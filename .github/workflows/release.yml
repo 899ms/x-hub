@@ -16,8 +16,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 拉取全部历史与 tags：release notes 取自 tag annotation（%(contents)），
-          # 浅克隆不拉 tags 会导致读不到 annotation、正文回退成 commit message
+          # 完整历史 + tags：release 正文优先取 RELEASE_NOTES.md 对应段落，
+          # 段落缺失时回退读 tag annotation（需要 tag 对象在本地）
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -61,20 +61,32 @@ jobs:
           Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $portableZip -Force
           Write-Output "portable_zip_name=$portableZip" >> $env:GITHUB_OUTPUT
 
-      - name: Get tag annotation
-        id: tag_note
+      - name: Extract release notes from RELEASE_NOTES.md
         shell: pwsh
         run: |
-          $note = git tag -l --format='%(contents)' $env:GITHUB_REF_NAME
-          $note | Out-File -FilePath tag_note.md -Encoding utf8
-          Write-Output "done"
+          # GitHub Release 正文 = RELEASE_NOTES.md 的「# vX.Y.Z 发布说明」章节（到下一个一级标题为止）
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $lines = Get-Content RELEASE_NOTES.md
+          $start = -1; $end = $lines.Count
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($start -lt 0 -and $lines[$i] -match ('^#\s*v' + [regex]::Escape($version) + '(\s|$)')) { $start = $i; continue }
+            if ($start -ge 0 -and $lines[$i] -match '^#\s') { $end = $i; break }
+          }
+          if ($start -ge 0) {
+            $lines[$start..($end - 1)] | Out-File -FilePath release_notes.md -Encoding utf8
+            Write-Host "release notes 源: RELEASE_NOTES.md v$version 段落（$($end - $start) 行）"
+          } else {
+            # RELEASE_NOTES.md 缺对应段落时回退 tag annotation（兜底，不要依赖这条路径）
+            Write-Warning "RELEASE_NOTES.md 未找到 v$version 段落，回退为 tag annotation"
+            git tag -l --format='%(contents)' $env:GITHUB_REF_NAME | Out-File -FilePath release_notes.md -Encoding utf8
+          }
 
       - name: Upload win-x64 zip
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           release_name: 'x-hub ${{ github.ref_name }}'
-          body_path: tag_note.md
+          body_path: release_notes.md
           files: |
             ${{ steps.package.outputs.zip_name }}
             ${{ steps.package.outputs.portable_zip_name }}

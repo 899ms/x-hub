@@ -213,6 +213,7 @@ npm run tauri:test    # Rust 单元测试（Windows 必须走此包装脚本，�
 1. 在 `RELEASE_NOTES.md` **顶部**新增一节 `# vX.Y.Z 发布说明`（累积式，旧版依次排后，勿覆盖历史）。
 2. 同步 `README.md` 版本徽章与 `DESIGN.md` 顶部「版本对齐」。
 3. git tag 用 `vX.Y.Z` 触发 `.github/workflows/release.yml`（tag 号须与 `tauri.conf.json` version 一致，否则打包产物版本漂移）。
+4. GitHub Release **正文 = `RELEASE_NOTES.md` 的 `# vX.Y.Z 发布说明` 章节**，由 `release.yml` 自动提取（到下一个一级标题为止；段落缺失才回退 tag annotation）。tag annotation 不再承担 release notes，打 tag 无需写说明；单独改已发布 release 正文用 `gh release edit vX.Y.Z --notes-file <文件>`（v0.5.1 起约定，此前正文误用 commit message）。
 
 ## 注意事项
 
