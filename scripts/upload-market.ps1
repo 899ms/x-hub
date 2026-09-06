@@ -1,10 +1,11 @@
 # upload-market.ps1 — 上传 dist-market 产物到分发端点
-# 三通道：-Target cos（默认，腾讯云 COS）/-Target r2（过渡期兜底，Cloudflare R2）/-Target sftp（备选，自建 Nginx）。
-# 过渡期每次发布建议 cos + r2 各跑一遍，保持两边清单/包一致；详见 docs/self-hosted-distribution.md §6。
+# 三通道：-Target cos（默认，腾讯云 COS）/-Target r2（过渡期兜底，Cloudflare R2）/-Target sftp（备选，自建 Nginx）/-Target all（双写）。
+# 过渡期每次发布直接 -Target all（cos + r2 依次各跑一遍，保持两边清单/包一致）；详见 docs/self-hosted-distribution.md §6。
 # 用法:
 #   .\scripts\upload-market.ps1                                  # cos → 腾讯云 COS（读 COS_* 环境变量）
 #   .\scripts\upload-market.ps1 -Target r2                       # → R2（读 R2_* 环境变量）
 #   .\scripts\upload-market.ps1 -Target sftp                     # → 自建服务器（读 XHUB_DEPLOY_*）
+#   .\scripts\upload-market.ps1 -Target all                      # → 双写：cos → r2 依次各跑一遍（任一失败立即中止）
 # 环境变量:
 #   COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET(含 APPID 后缀) / COS_REGION(如 ap-guangzhou)
 #   R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
@@ -12,7 +13,7 @@
 # 依赖: rclone (winget install --id Rclone.Rclone)
 
 param(
-  [ValidateSet('cos', 'sftp', 'r2')][string]$Target = 'cos',
+  [ValidateSet('cos', 'sftp', 'r2', 'all')][string]$Target = 'cos',
 
   # —— cos（腾讯云 COS，长期主通道）——
   [string]$CosSecretId  = $env:COS_SECRET_ID,
@@ -37,13 +38,32 @@ param(
 
   # —— 通用 ——
   [string]$DistDir = (Join-Path $PSScriptRoot "..\dist-market"),
-  [string]$Prefix  = "extensions"
+  [string]$Prefix  = "extensions",
+  # 抽查下载用的代理（如 http://127.0.0.1:7890）；直连 Cloudflare 慢的机器设置 XHUB_UPLOAD_PROXY 即可
+  [string]$CheckProxy = $env:XHUB_UPLOAD_PROXY
 )
 
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path (Join-Path $DistDir "registry.json"))) {
   Write-Error "本地产物缺失 registry.json：请先运行 publish-extension.ps1（$DistDir 不存在或未生成）。"
+}
+
+# --- 1. 双写模式：-Target all 依次调用自身跑 cos → r2（sftp 为独立备选通道，不参与双写）---
+if ($Target -eq 'all') {
+  foreach ($t in 'cos', 'r2') {
+    Write-Host ""
+    Write-Host "═══════ 双写通道 [$t] ═══════" -ForegroundColor Cyan
+    try {
+      $forward = @{} + $PSBoundParameters   # 转发用户显式传入的参数（Target 除外）
+      $forward['Target'] = $t
+      & $PSCommandPath @forward
+    } catch {
+      Write-Error "双写中止：通道 $t 失败 —— $($_.Exception.Message)（已完成通道不受影响，修复后可 -Target $t 单独重跑。）"
+    }
+  }
+  Write-Host "双写完成 ✔ cos + r2 均已更新" -ForegroundColor Green
+  exit 0
 }
 
 # --- 1. 检查 rclone（PATH 未生效时自动定位 winget 安装路径）---
@@ -153,7 +173,14 @@ $local = Get-ChildItem "$DistDir\packages" -Recurse -Filter *.xhpack | Select-Ob
 if ($local) {
   $hash = (Get-FileHash $local.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
   $dl = Join-Path $env:TEMP "market-check-$($local.Name)"
-  Invoke-WebRequest -Uri "$urlBase/$($local.FullName.Substring((Resolve-Path $DistDir).Path.Length + 1).Replace('\','/'))" -OutFile $dl -UseBasicParsing -TimeoutSec 30
+  $rel = $local.FullName.Substring((Resolve-Path $DistDir).Path.Length + 1).Replace('\','/')
+  # 用系统 curl（--max-time 硬超时）：Invoke-WebRequest 在部分网络环境下读 CDN 包体会挂住且超时参数兜不住
+  # 直连 Cloudflare 慢的线路可设 XHUB_UPLOAD_PROXY（如 http://127.0.0.1:7890）让抽查走代理
+  $curlArgs = @('-fsS', '--max-time', '120', '-o', $dl)
+  if ($CheckProxy) { $curlArgs += @('-x', $CheckProxy) }
+  $curlArgs += "$urlBase/$rel"
+  curl.exe @curlArgs
+  if ($LASTEXITCODE -ne 0) { Write-Error "sha256 抽查下载失败（curl exit=$LASTEXITCODE，超时或非 2xx）：$urlBase/$rel —— 若直连 Cloudflare 过慢，请设置 XHUB_UPLOAD_PROXY 后重跑" }
   $dlHash = (Get-FileHash $dl -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($hash -ne $dlHash) { Write-Error "sha256 不一致！本地 $hash vs 远端 $dlHash" }
   Remove-Item $dl -Force

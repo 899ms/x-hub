@@ -1,9 +1,10 @@
 # upload-release.ps1 — 上传 dist-release 产物到分发端点，并清理 `releases/win-x64/` 下最近 N 版之外的旧 zip。
-# 三通道：-Target cos（默认，腾讯云 COS）/-Target r2（过渡期兜底，Cloudflare R2）/-Target sftp（备选，自建 Nginx）。
-# 过渡期每次发布建议 cos + r2 各跑一遍；详见 docs/self-hosted-distribution.md §6。
+# 三通道：-Target cos（默认，腾讯云 COS）/-Target r2（过渡期兜底，Cloudflare R2）/-Target sftp（备选，自建 Nginx）/-Target all（双写）。
+# 过渡期每次发布直接 -Target all（cos + r2 依次各跑一遍）；详见 docs/self-hosted-distribution.md §6。
 # 用法:
 #   .\scripts\upload-release.ps1                                 # cos → 腾讯云 COS（读 COS_* 环境变量）
 #   .\scripts\upload-release.ps1 -Target r2                      # → R2（读 R2_* 环境变量）
+#   .\scripts\upload-release.ps1 -Target all                     # → 双写：cos → r2 依次各跑一遍（任一失败立即中止）
 # 环境变量:
 #   COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET(含 APPID 后缀) / COS_REGION(如 ap-guangzhou)
 #   R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
@@ -11,7 +12,7 @@
 # 依赖: rclone (winget install --id Rclone.Rclone)
 
 param(
-  [ValidateSet('cos', 'sftp', 'r2')][string]$Target = 'cos',
+  [ValidateSet('cos', 'sftp', 'r2', 'all')][string]$Target = 'cos',
 
   # —— cos（腾讯云 COS，长期主通道）——
   [string]$CosSecretId  = $env:COS_SECRET_ID,
@@ -43,6 +44,23 @@ $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path (Join-Path $DistDir "update.json"))) {
   Write-Error "本地产物缺失 update.json：请先运行 publish-release.ps1（$DistDir 不存在或未生成）。"
+}
+
+# --- 1. 双写模式：-Target all 依次调用自身跑 cos → r2（sftp 为独立备选通道，不参与双写）---
+if ($Target -eq 'all') {
+  foreach ($t in 'cos', 'r2') {
+    Write-Host ""
+    Write-Host "═══════ 双写通道 [$t] ═══════" -ForegroundColor Cyan
+    try {
+      $forward = @{} + $PSBoundParameters   # 转发用户显式传入的参数（Target 除外）
+      $forward['Target'] = $t
+      & $PSCommandPath @forward
+    } catch {
+      Write-Error "双写中止：通道 $t 失败 —— $($_.Exception.Message)（已完成通道不受影响，修复后可 -Target $t 单独重跑。）"
+    }
+  }
+  Write-Host "双写完成 ✔ cos + r2 均已更新" -ForegroundColor Green
+  exit 0
 }
 
 # --- 1. 检查 rclone ---

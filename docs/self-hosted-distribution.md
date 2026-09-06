@@ -73,23 +73,23 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 | `XHUB_SIGNING_KEY` | `E:\workspace\.x-hub-signing\market.key` | Ed25519 签名私钥（不变） |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | 原 R2 凭据 | 过渡期 `-Target r2` 双传用（R2 退役后可清） |
 
-用法（上传脚本三通道：`-Target cos` 默认主通道，`-Target r2` 过渡期兜底，`-Target sftp` 备选 Nginx）：
+用法（上传脚本四通道：`-Target cos` 默认主通道，`-Target r2` 过渡期兜底，`-Target sftp` 备选 Nginx，`-Target all` 双写=cos+r2 依次各跑一遍、任一失败立即中止）：
 
 ```powershell
 # 应用发版
 ./scripts/publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version 0.5.1 `
   -SignKey E:\workspace\.x-hub-signing\market.key -Notes "…"
-./scripts/upload-release.ps1 -Target cos        # → 腾讯云 COS
-./scripts/upload-release.ps1 -Target r2         # → R2（过渡期双传）
+./scripts/upload-release.ps1 -Target all         # → 双写：COS + R2（过渡期推荐）
 
 # 扩展发布
 ./scripts/publish-extension.ps1 -ExtDir E:\workspace\x-hub-extensions\extensions\hello-web `
   -SignKey E:\workspace\.x-hub-signing\market.key
-./scripts/upload-market.ps1 -Target cos
-./scripts/upload-market.ps1 -Target r2
+./scripts/upload-market.ps1 -Target all          # → 双写：COS + R2（过渡期推荐）
 ```
 
 脚本均以 rclone remote（环境变量临时配置，不落地）上传，末尾自动做 HTTP 200 + sha256 抽查校验；`upload-release.ps1` 保留 win-x64 只留最近 2 版的清理策略。对象存储通道的缓存头随上传设置（`--header-upload`，即写对象元数据 Cache-Control）。
+
+> 网络提示：直连 Cloudflare（r2.dckxx.com）过慢的机器，设置环境变量 `XHUB_UPLOAD_PROXY=http://127.0.0.1:7890`（或传 `-CheckProxy`）让脚本末尾的抽查下载走代理，只影响校验、不影响上传。
 
 ## 5. CI 通道（GitHub Actions，扩展发布）
 
