@@ -219,6 +219,8 @@ export interface FloatingBallState {
   /** 记忆的球心位置（物理 px，拖拽后由后端记忆） */
   x: number | null
   y: number | null
+  /** 球态窗口逻辑边长（前端 resize 失配自检的期望值之一） */
+  ball_size: number
   menu_size: number
 }
 
@@ -595,6 +597,8 @@ export const tauriApi = {
   floatingBallExpand: (expanded: boolean) => invoke<void>('floating_ball_expand', { expanded }),
   floatingBallTrigger: (id: string) => invoke<void>('floating_ball_trigger', { id }),
   floatingBallContextMenu: () => invoke<void>('floating_ball_context_menu'),
+  /** 前端失配自检兜底：视口尺寸偏离期望时让 Rust 按当前态重算窗口几何（DPI 自愈） */
+  floatingBallReapply: () => invoke<void>('floating_ball_reapply'),
   getThemeConfig: () => invoke<ThemeConfig>('get_theme_config'),
   getSystemInfo: () => invoke<SystemInfo>('get_system_info'),
   listSnippets: () => invoke<Snippet[]>('list_snippets'),

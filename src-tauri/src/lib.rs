@@ -593,6 +593,7 @@ commands::set_chat_panel,
             floating_ball::floating_ball_expand,
             floating_ball::floating_ball_trigger,
             floating_ball::floating_ball_context_menu,
+            floating_ball::floating_ball_reapply,
             commands::get_theme_config,
         ])
         .build(tauri::generate_context!())

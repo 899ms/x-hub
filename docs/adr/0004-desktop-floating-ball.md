@@ -26,6 +26,14 @@
 
 - **开关不再销毁窗口**：初版把「停用 = `win.destroy()`、启用 = 运行时 `build()`」当惰性重建用，实测反复开关悬浮球会**整窗未响应卡死**——运行时现场创建/销毁 WebView2 窗口是主线程长任务，与悬浮球菜单收拢/几何切换等窗口操作在主线程事件循环上交错时 WebView2 controller 创建挂起（剪贴板浮层踩过同款坑，见 `clipboard.rs::init_overlay_window` 注释）。现改为**启动无条件预创建 + 隐藏常驻**，停用只 `hide()`、启用只经 `sync_with_main()` 显隐联动，绝不运行时 build/destroy（`floating_ball.rs::init/apply_enabled`）。全局铁律见 AGENTS.md 关键约定 41。
 
+## 实施修订（DPI 失配自愈）
+
+- **非整数缩放下球体两侧被裁**（用户反馈：设置系统缩放 110% 或调整过显示缩放后，点击悬浮球左右两侧被遮盖一点）：110% 属自定义缩放（DPI 106，scale = 1.104166…非整数），悬浮球窗口常驻隐藏——隐藏期间 DPI 变化可能错过 `WM_DPICHANGED`（或 Win10/远程会话关闭「拖动时显示窗口内容」时 tao 在 `WM_DPICHANGED` 里显式跳过尺寸缩放），tao 缓存的 `scale_factor` 与窗口物理尺寸都停在旧值，而 WebView2 光栅化用窗口实时 DPI → CSS 视口从 100 缩到 ~90.6px，球体最外圈陀螺环（视觉 ~94.8px，两侧仅 ~2.4px 余量）被窗口边缘裁掉一截；旧 `apply_geometry` 用缓存 scale 算目标尺寸（`round(100×1.0)=100`），失配永远修不回来。对策四层（`floating_ball.rs`「DPI 自愈」注释）：
+  1. **几何计算一律 `GetDpiForWindow` 实时取 DPI**（`window_scale`），与 WebView2 换算同源，缓存过期也能算对；
+  2. **`apply_geometry` 用窗口实际 `outer_size` 推球心 + 按实时 scale 重设目标尺寸**——任何开合/显示都顺带把失配拉回（`PRE_EXPAND_POS` 由存左上角改为存球心，恢复与窗口实际尺寸解耦）；
+  3. **窗口事件挂 `ScaleFactorChanged`**：收到 DPI 变化立即按当前态重算几何；
+  4. **前端 resize 失配自检兜底**：视口与期望逻辑尺寸（`ball_size`/`menu_size` 经 state 下发）差超 1.5px 时调 `floating_ball_reapply` 重算。
+
 ## 交互原型
 
 `docs/prototypes/floating-ball-prototype.html`（单文件，可交互：拖拽吸附、单击环形菜单、双击主窗口、右键菜单、设置开关、状态点）。

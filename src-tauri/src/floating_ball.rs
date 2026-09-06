@@ -9,6 +9,17 @@
 //! 原子切换（单次 SetWindowPos）。窗口 resize 时 WebView2 内容重排滞后一帧，旧帧按
 //! 旧视口渲染会让球先「跳」向窗口移动方向再弹回——前端在开合前后把窗口内容整体
 //! 淡出/淡入，把跳动帧掩盖在「球化开成菜单」的过渡里（见 FloatingBallWindow 开合时序）。
+//!
+//! DPI 自愈（非整数缩放裁切修复）：系统缩放为非标准档位（如 110% → 106 DPI，
+//! scale = 1.104166…）时，窗口物理尺寸与 WebView2 CSS 视口的换算存在取整，且悬浮球
+//! 窗口大部分时间隐藏——隐藏窗口可能错过 WM_DPICHANGED（或 Win10/远程会话关闭
+//! 「拖动时显示窗口内容」时 tao 显式跳过尺寸缩放），导致 tao 缓存的 scale_factor 与
+//! 窗口物理尺寸都停留在旧值，而 WebView2 光栅化用窗口实时 DPI → 视口从 100 缩到
+//! ~90.6 CSS px，球体最外圈陀螺环（视觉 ~94.8px）左右两侧被窗口边缘裁掉一截。
+//! 对策：① 一切几何计算用 GetDpiForWindow 实时取 DPI（与 WebView2 同源，缓存过期
+//! 也能算对）；② apply_geometry 用窗口实际 outer_size 推球心并按实时 scale 重设目标
+//! 尺寸——任何开合/显示/动作都会顺带把失配修正回来；③ ScaleFactorChanged 事件即时
+//! 重算；④ 前端 resize 失配自检兜底（floating_ball_reapply）。
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize};
@@ -76,7 +87,26 @@ pub struct FloatingBallState {
     /// 记忆的球心位置（物理 px，拖拽松手后由后端记忆；None = 从未拖拽过）
     pub x: Option<f64>,
     pub y: Option<f64>,
+    /// 球态窗口逻辑边长（前端 resize 失配自检的期望值之一）
+    pub ball_size: f64,
     pub menu_size: f64,
+}
+
+/// 窗口实时 DPI 缩放系数：直接查 GetDpiForWindow，不用 tao 缓存的 scale_factor。
+/// 缓存过期场景：悬浮球隐藏期间系统缩放变化、窗口错过 WM_DPICHANGED（见模块注释
+/// 「DPI 自愈」）——此时缓存 scale 停在旧值，而 WebView2 光栅化用窗口实时 DPI，
+/// 两侧换算必须同源才不会裁切。取不到 HWND/失败时回退 tao 缓存（非 Windows 编译
+/// 走不到此分支，窗口 API 的调用点都在 #[cfg(target_os = "windows")] 内）。
+#[cfg(target_os = "windows")]
+fn window_scale(win: &tauri::WebviewWindow) -> f64 {
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    if let Ok(hwnd) = win.hwnd() {
+        let dpi = unsafe { GetDpiForWindow(hwnd.0) };
+        if dpi > 0 {
+            return dpi as f64 / 96.0;
+        }
+    }
+    win.scale_factor().unwrap_or(1.0)
 }
 
 // ---------- 生命周期 ----------
@@ -134,11 +164,23 @@ fn ensure_window(app: &AppHandle) -> tauri::Result<()> {
     // （非惰性创建，避免每次唤出的窗口创建延迟，见 ADR 0004）
     let handle = app.clone();
     win.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            if let Some(w) = handle.get_webview_window(LABEL) {
-                let _ = w.hide();
+        match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                if let Some(w) = handle.get_webview_window(LABEL) {
+                    let _ = w.hide();
+                }
             }
+            // DPI 变化：tao 会按建议矩形缩放窗口，但悬浮球常驻隐藏，隐藏期间可能错过
+            // WM_DPICHANGED（或 Win10/远程会话关闭「拖动时显示窗口内容」时 tao 跳过
+            // 尺寸缩放）——收到本事件立即按当前态重算几何，把物理尺寸拉回实时 DPI
+            // 对应值（失配会让球体陀螺环被窗口边缘裁掉一截，见 apply_geometry 注释）
+            tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(w) = handle.get_webview_window(LABEL) {
+                    apply_geometry(&w, is_expanded(&w));
+                }
+            }
+            _ => {}
         }
     });
 
@@ -152,7 +194,7 @@ fn ensure_window(app: &AppHandle) -> tauri::Result<()> {
 /// 位置会偏移一次，拖动一下即按新语义记忆）。
 #[cfg(target_os = "windows")]
 fn place_initial(app: &AppHandle, win: &tauri::WebviewWindow) {
-    let scale = win.scale_factor().unwrap_or(1.0);
+    let scale = window_scale(win);
     let half = (BALL_SIZE * scale / 2.0).round() as i32;
     let cfg = config::load();
     if let (Some(x), Some(y)) = (cfg.floating_ball_x, cfg.floating_ball_y) {
@@ -213,7 +255,7 @@ pub fn sync_with_main(app: &AppHandle) {
 /// 当前是否处于菜单展开态（按窗口实际尺寸判断，免维护额外状态）
 #[cfg(target_os = "windows")]
 fn is_expanded(win: &tauri::WebviewWindow) -> bool {
-    let scale = win.scale_factor().unwrap_or(1.0);
+    let scale = window_scale(win);
     win.outer_size()
         .map(|sz| sz.width as f64 > BALL_SIZE * scale * 1.5)
         .unwrap_or(false)
@@ -221,14 +263,25 @@ fn is_expanded(win: &tauri::WebviewWindow) -> bool {
 
 /// 以「球心」（窗口中心）为锚调整窗口几何：球态 = BALL_SIZE，菜单态 = MENU_SIZE。
 /// 展开时钳制到所在显示器内（空间自适应挪位，收起后自然回到吸附位置）。
+///
+/// DPI 失配自愈（见模块注释）：球心一律按窗口「实际」outer_size 的一半推算（视觉
+/// 球心 = 窗口中心，与换算方式无关），目标尺寸按实时 DPI 重算——窗口物理尺寸偏离
+/// 期望（隐藏期间错过 WM_DPICHANGED 等）时，任何一次开合/显示都会被本函数拉回：
+/// SetWindowPos 同时修正尺寸 → WM_SIZE → wry 同步 WebView2 bounds → 视口恢复。
+/// 换用 tao 缓存 scale 的话，缓存过期时目标尺寸永远算成旧值，失配无法自愈。
 #[cfg(target_os = "windows")]
 fn apply_geometry(win: &tauri::WebviewWindow, expanded: bool) {
     let Ok(pos) = win.outer_position() else { return };
-    let scale = win.scale_factor().unwrap_or(1.0);
+    let scale = window_scale(win);
     let was_expanded = is_expanded(win);
 
-    // 当前球心 = 当前模式窗口中心；目标窗口 = 球心 ± 目标半边长
-    let cur_half = (if was_expanded { MENU_SIZE } else { BALL_SIZE } / 2.0) * scale;
+    // 当前球心 = 窗口实际中心；取不到实际尺寸（极端）才退回逻辑换算
+    let cur_half = match win.outer_size() {
+        Ok(sz) if sz.width > 0 && sz.height > 0 => {
+            (sz.width as f64 + sz.height as f64) / 4.0
+        }
+        _ => (if was_expanded { MENU_SIZE } else { BALL_SIZE } / 2.0) * scale,
+    };
     let cx = pos.x as f64 + cur_half;
     let cy = pos.y as f64 + cur_half;
 
@@ -237,16 +290,18 @@ fn apply_geometry(win: &tauri::WebviewWindow, expanded: bool) {
     let mut nx = cx - new_half;
     let mut ny = cy - new_half;
 
-    // 展开时记住原位置；收起时优先恢复（展开被钳制挪位后，球回到原吸附点而非漂移）
+    // 展开时记住原球心；收起时优先恢复（展开被钳制挪位后，球回到原吸附点而非漂移）。
+    // 存球心而非窗口左上角：恢复时按目标半边长重新定位，与窗口实际尺寸/DPI 无关
+    // （DPI 在展开期间变化时按左上角恢复会让球心漂移半边长差）。
     // 已处于展开态时跳过记录（收回动画期间重复 expand 不覆盖原始吸附点）
     let mut pre = PRE_EXPAND_POS.lock().unwrap_or_else(|e| e.into_inner());
     if expanded {
         if !was_expanded {
-            *pre = Some((pos.x, pos.y));
+            *pre = Some((cx.round() as i32, cy.round() as i32));
         }
     } else if let Some((px, py)) = pre.take() {
-        nx = px as f64;
-        ny = py as f64;
+        nx = px as f64 - new_half;
+        ny = py as f64 - new_half;
     }
     drop(pre);
 
@@ -264,6 +319,21 @@ fn apply_geometry(win: &tauri::WebviewWindow, expanded: bool) {
 
     // 原子应用尺寸+位置（单次 SetWindowPos）：拆成 set_size + set_position 会让窗口
     // 先单向长大再挪回（球心瞬移），WebView2 还要做两次重排——展开卡顿的一部分
+    let expect =
+        ((if was_expanded { MENU_SIZE } else { BALL_SIZE }) * scale).round() as i32;
+    if let Ok(sz) = win.outer_size() {
+        let actual = sz.width as i32;
+        // 失配修正诊断日志：物理尺寸偏离「逻辑×实时DPI」说明经历过 DPI 失配，
+        // 本次调用即自愈（用户反馈「两侧被遮盖」时先查这条日志）
+        if (actual - expect).abs() > 1 {
+            log::info!(
+                "[悬浮球] DPI 失配自愈: 窗口物理 {} → 期望 {} (scale {:.4})",
+                actual,
+                expect,
+                scale
+            );
+        }
+    }
     if let Ok(hwnd) = win.hwnd() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
@@ -317,6 +387,7 @@ pub fn floating_ball_get_state() -> FloatingBallState {
         buttons: cfg.floating_ball_buttons,
         x: cfg.floating_ball_x,
         y: cfg.floating_ball_y,
+        ball_size: BALL_SIZE,
         menu_size: MENU_SIZE,
     }
 }
@@ -386,7 +457,7 @@ pub async fn floating_ball_drag_end(app: AppHandle) {
     {
         let Some(win) = app.get_webview_window(LABEL) else { return };
         let Ok(pos) = win.outer_position() else { return };
-        let scale = win.scale_factor().unwrap_or(1.0);
+        let scale = window_scale(&win);
         let half = (BALL_SIZE * scale / 2.0).round();
         // 拖拽结束时的球心（球态窗口中心即球心）
         let mut cx = pos.x as f64 + half;
@@ -472,4 +543,18 @@ pub fn floating_ball_trigger(app: AppHandle, id: String) {
 #[tauri::command]
 pub fn floating_ball_context_menu(app: AppHandle) -> Result<(), String> {
     crate::tray::popup_context_menu(&app).map_err(|e| e.to_string())
+}
+
+/// 前端失配自检兜底：检测到视口尺寸偏离期望（window.innerWidth 与球态/菜单态
+/// 逻辑尺寸差超容差，见 FloatingBallWindow 的 resize 监听）时调用，按当前态
+/// 重算窗口几何。与 expand 的区别：不切换态，只把当前态的几何拉回正确值。
+/// async 与 expand 同理（窗口操作离开主线程）。
+#[tauri::command]
+pub async fn floating_ball_reapply(app: AppHandle) {
+    #[cfg(target_os = "windows")]
+    if let Some(win) = app.get_webview_window(LABEL) {
+        apply_geometry(&win, is_expanded(&win));
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
 }

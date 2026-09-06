@@ -500,7 +500,38 @@ let unlistenConfig: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
 let unlistenTheme: (() => void) | null = null
 
+// ---- 视口失配自检（DPI 自愈兜底，Rust 侧机制见 floating_ball.rs「DPI 自愈」注释）----
+// 非整数系统缩放（如 110% → scale 1.104166…）下，悬浮球隐藏期间错过 DPI 变化会让
+// 窗口物理尺寸与 WebView2 视口失配，球体陀螺环被窗口边缘裁掉一截。Rust 侧在开合/
+// 显示/ScaleFactorChanged 时已自愈，这里兜底捕获「几何未被触发修正」的漏网场景：
+// 视口与期望逻辑尺寸差超容差 → 让 Rust 按当前态重算几何。clientWidth 虽取整，
+// 但取整误差 <1px、容差 1.5px 下不影响判定（正常 110% 换算差仅 ~0.4px，失配差 ~9px）。
+const VIEWPORT_TOLERANCE = 1.5
+let viewportTimer: number | null = null
+
+function checkViewportSync() {
+  if (!isTauri() || !st.value || resizing.value) return
+  const expected = menuOpen.value
+    ? (st.value.menu_size ?? 260)
+    : (st.value.ball_size ?? 100)
+  if (
+    Math.abs(document.documentElement.clientWidth - expected) > VIEWPORT_TOLERANCE ||
+    Math.abs(document.documentElement.clientHeight - expected) > VIEWPORT_TOLERANCE
+  ) {
+    tauriApi.floatingBallReapply().catch(() => {})
+  }
+}
+
+function onWindowResize() {
+  if (viewportTimer != null) window.clearTimeout(viewportTimer)
+  viewportTimer = window.setTimeout(() => {
+    viewportTimer = null
+    checkViewportSync()
+  }, 250)
+}
+
 onMounted(async () => {
+  window.addEventListener('resize', onWindowResize)
   document.addEventListener('keydown', onKeydown)
   ctx2d = cvsEl.value?.getContext('2d') ?? null
   rafId = requestAnimationFrame(drawFrame)
@@ -563,6 +594,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize)
+  if (viewportTimer != null) window.clearTimeout(viewportTimer)
   cancelAnimationFrame(rafId)
   document.removeEventListener('keydown', onKeydown)
   cancelPendingToggle()
