@@ -4,8 +4,10 @@ import { Crepe } from '@milkdown/crepe'
 import '@milkdown/crepe/theme/common/style.css'
 import '@milkdown/crepe/theme/frame.css'
 import { editorViewCtx } from '@milkdown/kit/core'
+import type { Node as ProseNode } from '@milkdown/kit/prose/model'
+import type { EditorView } from '@milkdown/kit/prose/view'
 import { TextSelection, type EditorState } from '@milkdown/kit/prose/state'
-import { Tag as TagIcon, Trash2 } from 'lucide-vue-next'
+import { Tag as TagIcon, Trash2, X } from 'lucide-vue-next'
 import { isTauri, tauriApi, type Note, type Tag } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { attachBlockDrag } from '../utils/blockDrag'
@@ -49,6 +51,12 @@ const dirty = ref(false)
 // ---- 生命周期 ----
 onBeforeUnmount(() => {
   flushPendingSave()
+  detachImageListeners()
+  // 防御：卸载瞬间可能仍在拖拽/预览中
+  window.removeEventListener('pointermove', onResizeMove)
+  window.removeEventListener('pointerup', onResizeUp)
+  resizeCtx = null
+  window.removeEventListener('keydown', onPreviewKeydown)
   void destroyEditor()
 })
 
@@ -182,11 +190,14 @@ async function mountEditor(content: string) {
       })
     })
     crepe = c
+    attachImageListeners()
     // 块拖拽（六点把手）指针实现：create 完成后从 ctx 取 EditorView 接管把手拖拽
     c.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx)
       detachBlockDrag = attachBlockDrag(() => view)
     })
+    // 已缓存的图片不会再次触发 load：挂载完成后先按 attrs 同步一次宽度
+    syncImageWidths()
   } catch (e) {
     console.error('Crepe 初始化失败', e)
   } finally {
@@ -243,8 +254,14 @@ function flushPendingSave() {
   saveTimer = null
   if (dirty.value && lastNoteId !== null) {
     dirty.value = false
-    emit('save', lastNoteId, localTitle.value, localContent.value)
+    emit('save', lastNoteId, normalizeTitle(localTitle.value), localContent.value)
   }
+}
+
+/** 空标题落库时归一为默认值，与新建笔记的初始标题一致（列表展示不出现空行） */
+function normalizeTitle(title: string): string {
+  const t = title.trim()
+  return t ? t : '无标题笔记'
 }
 
 function onEdited(markdown: string) {
@@ -255,8 +272,192 @@ function onEdited(markdown: string) {
     const derived = deriveNoteTitle(markdown)
     if (derived) localTitle.value = derived
   }
+  // ratio 等图片属性可能经撤销/属性事务变化，同步一次宽度（幂等、无强制布局）
+  syncImageWidths()
   scheduleSave()
 }
+
+/** 标题输入（v-model 之外）：用户修改标题必须同样进入防抖保存链路，
+ *  否则只在改正文时才落库——改完标题不改正文，标题永远不会保存（切换/重启即丢失） */
+function onTitleInput() {
+  scheduleSave()
+}
+
+// ---- 图片尺寸接管（宽度语义）----
+// Crepe 的 onImageLoad 会把图片高度锁定为像素（style.height），宽度 auto——窗口放大后
+// 高度不变、宽度随之不变，表现为「图片不跟随窗口变宽」。这里在 CSS 层解锁高度
+// （height: auto !important），让宽度成为唯一尺寸维度，并按 ProseMirror attrs 的 ratio
+// 恢复用户调整过的尺寸：ratio=1（默认）→ 响应式 min(自然宽, 100%)；ratio<1 → 百分比定宽。
+// ratio 沿用 Crepe 的序列化通道（markdown 图片 alt，如 ![0.75](url)），跨会话持久化。
+
+const IMAGE_BLOCK_HANDLE_PX = 26 // 右下角把手命中区边长（与 CSS 视觉一致）
+
+let detachImageListeners: () => void = () => {}
+
+/** 监听图片 load（不冒泡，用捕获）与点击/拖拽把手，随编辑器挂载/销毁配对 */
+function attachImageListeners() {
+  const root = rootEl.value
+  if (!root) return
+  root.addEventListener('load', onEditorImgLoad, true)
+  root.addEventListener('click', onEditorClick)
+  root.addEventListener('pointerdown', onEditorPointerDown, true)
+  detachImageListeners = () => {
+    root.removeEventListener('load', onEditorImgLoad, true)
+    root.removeEventListener('click', onEditorClick)
+    root.removeEventListener('pointerdown', onEditorPointerDown, true)
+    detachImageListeners = () => {}
+  }
+}
+
+function onEditorImgLoad(e: Event) {
+  const t = e.target
+  if (!(t instanceof HTMLImageElement) || t.dataset.type !== 'image-block') return
+  syncImageWidths()
+}
+
+/** 把 doc 里每个 image-block 的 attrs.ratio 应用到对应 DOM 图片（幂等，无强制布局） */
+function syncImageWidths() {
+  const c = crepe
+  if (!c) return
+  c.editor.action((ctx) => {
+    const view = ctx.get(editorViewCtx)
+    view.state.doc.descendants((node, pos) => {
+      if (node.type.name !== 'image-block') return
+      const dom = view.nodeDOM(pos)
+      const img =
+        dom instanceof Element
+          ? dom.querySelector<HTMLImageElement>('img[data-type="image-block"]')
+          : null
+      if (img) applyImageWidth(img, Number(node.attrs.ratio) || 1)
+    })
+  })
+}
+
+function applyImageWidth(img: HTMLImageElement, ratio: number) {
+  if (!img.naturalWidth) return // 尚未加载完成，load 后会再来
+  if (ratio >= 0.995) {
+    if (img.style.width) img.style.removeProperty('width')
+    return
+  }
+  const w = `${(ratio * 100).toFixed(2)}%`
+  if (img.style.width !== w) img.style.width = w
+}
+
+function findImageBlockAt(view: EditorView, img: HTMLImageElement): { node: ProseNode; pos: number } | null {
+  let found: { node: ProseNode; pos: number } | null = null
+  view.state.doc.descendants((node, pos) => {
+    if (found) return false
+    if (node.type.name !== 'image-block') return
+    const dom = view.nodeDOM(pos)
+    if (dom instanceof Element && dom.contains(img)) {
+      found = { node, pos }
+      return false
+    }
+  })
+  return found
+}
+
+// ---- 拖拽调整图片宽度 ----
+interface ResizeCtx {
+  img: HTMLImageElement
+  startX: number
+  startW: number
+  base: number
+}
+let resizeCtx: ResizeCtx | null = null
+
+function isHandleZone(wrapper: Element, e: { clientX: number; clientY: number }): boolean {
+  const r = wrapper.getBoundingClientRect()
+  return e.clientX >= r.right - IMAGE_BLOCK_HANDLE_PX && e.clientY >= r.bottom - IMAGE_BLOCK_HANDLE_PX
+}
+
+function onEditorPointerDown(e: PointerEvent) {
+  if (e.button !== 0 || !crepe) return
+  const target = e.target
+  if (!(target instanceof Element)) return
+  const wrapper = target.closest<HTMLElement>('.milkdown-image-block .image-wrapper')
+  if (!wrapper || !isHandleZone(wrapper, e)) return
+  const img = wrapper.querySelector<HTMLImageElement>('img[data-type="image-block"]')
+  if (!img || !img.naturalWidth) return
+  // 阻断 PM 的 mousedown 兼容链（取消 pointerdown 即抑制后续 mouse 事件），避免拖拽时选中节点
+  e.preventDefault()
+  e.stopPropagation()
+  const block = img.closest('.milkdown-image-block')
+  const startW = img.getBoundingClientRect().width
+  const base = block
+    ? Math.min(img.naturalWidth, block.getBoundingClientRect().width) || startW
+    : startW
+  resizeCtx = { img, startX: e.clientX, startW, base }
+  window.addEventListener('pointermove', onResizeMove)
+  window.addEventListener('pointerup', onResizeUp)
+}
+
+function onResizeMove(e: PointerEvent) {
+  if (!resizeCtx) return
+  // 鼠标移出窗口后松键不会派发 pointerup：buttons 归零即视为拖拽结束
+  if (!e.buttons) {
+    onResizeUp()
+    return
+  }
+  e.preventDefault()
+  const w = Math.max(60, resizeCtx.startW + (e.clientX - resizeCtx.startX))
+  // px 定宽拖动；上限由 CSS max-width:100% 兜底（超宽自动停在容器宽）
+  resizeCtx.img.style.width = `${Math.round(w)}px`
+}
+
+function onResizeUp() {
+  window.removeEventListener('pointermove', onResizeMove)
+  window.removeEventListener('pointerup', onResizeUp)
+  const ctx = resizeCtx
+  resizeCtx = null
+  if (!ctx || !crepe) return
+  const finalW = ctx.img.getBoundingClientRect().width
+  if (!ctx.base || !finalW) return
+  let ratio = finalW / ctx.base
+  if (ratio >= 0.98) ratio = 1 // 拖回默认宽度即恢复响应式
+  ratio = Math.max(0.05, Math.round(ratio * 100) / 100)
+  crepe.editor.action((actx) => {
+    const view = actx.get(editorViewCtx)
+    const found = findImageBlockAt(view, ctx.img)
+    if (!found) return
+    view.dispatch(
+      view.state.tr.setNodeMarkup(found.pos, undefined, { ...found.node.attrs, ratio }),
+    )
+    view.focus()
+  })
+}
+
+// ---- 点击图片预览（lightbox）----
+const previewSrc = ref('')
+
+function onEditorClick(e: MouseEvent) {
+  if (previewSrc.value) return
+  const target = e.target
+  if (!(target instanceof Element)) return
+  const block = target.closest<HTMLElement>('.milkdown-image-block')
+  if (block) {
+    // caption 输入框、右上角操作按钮（说明开关）不触发预览
+    if (target.closest('.caption-input, .operation')) return
+    const wrapper = target.closest('.image-wrapper')
+    if (!wrapper) return
+    if (isHandleZone(wrapper, e)) return
+    const img = wrapper.querySelector<HTMLImageElement>('img[data-type="image-block"]')
+    if (!img) return // 空上传态（无图片本体）
+    previewSrc.value = img.currentSrc || img.src
+    return
+  }
+  const inlineImg = target.closest<HTMLImageElement>('img.image-inline')
+  if (inlineImg) previewSrc.value = inlineImg.currentSrc || inlineImg.src
+}
+
+function onPreviewKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') previewSrc.value = ''
+}
+
+watch(previewSrc, (v) => {
+  if (v) window.addEventListener('keydown', onPreviewKeydown)
+  else window.removeEventListener('keydown', onPreviewKeydown)
+})
 
 function scheduleSave() {
   if (!props.note) return
@@ -266,7 +467,7 @@ function scheduleSave() {
   saveTimer = setTimeout(() => {
     saveTimer = null
     if (props.note) {
-      emit('save', props.note.id, localTitle.value, localContent.value)
+      emit('save', props.note.id, normalizeTitle(localTitle.value), localContent.value)
     }
   }, 600)
 }
@@ -426,6 +627,7 @@ function onEditorAreaMouseDown(e: MouseEvent) {
           type="text"
           maxlength="80"
           placeholder="笔记标题"
+          @input="onTitleInput"
           @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
         />
         <button
@@ -489,6 +691,23 @@ function onEditorAreaMouseDown(e: MouseEvent) {
     </template>
 
     <EmojiPicker :visible="emojiPickerVisible" @select="onPickEmoji" @close="emojiPickerVisible = false" />
+
+    <!-- 图片预览灯箱（瞬态表面，点击遮罩/关闭按钮/Esc 关闭） -->
+    <Teleport to="body">
+      <div
+        v-if="previewSrc"
+        class="img-lightbox"
+        role="dialog"
+        aria-modal="true"
+        aria-label="图片预览"
+        @click="previewSrc = ''"
+      >
+        <img :src="previewSrc" alt="图片预览" @click.stop />
+        <button class="lb-close" type="button" aria-label="关闭预览" title="关闭 (Esc)" @click="previewSrc = ''">
+          <X :size="16" :stroke-width="2" />
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -670,6 +889,64 @@ function onEditorAreaMouseDown(e: MouseEvent) {
 .ed-status.dirty {
   color: var(--brand-500);
 }
+
+/* 图片预览灯箱（Teleport 到 body，瞬态表面允许 backdrop-filter） */
+.img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scrim);
+  backdrop-filter: blur(10px);
+  animation: lb-in 0.18s ease-out;
+  cursor: zoom-out;
+}
+
+.img-lightbox img {
+  max-width: 92vw;
+  max-height: 90vh;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  cursor: default;
+}
+
+.lb-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 50%;
+  background: var(--bg-card);
+  color: var(--text-2);
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+  transition: color 0.12s, border-color 0.12s, transform 0.12s;
+}
+
+.lb-close:hover {
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+
+.lb-close:active {
+  transform: scale(0.96);
+}
+
+@keyframes lb-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
 </style>
 
 <style>
@@ -740,5 +1017,43 @@ html[data-wallpaper-clear='1'] .crepe-root .milkdown {
 /* 引用块：Crepe 默认 padding-left 40px，文字离左侧引用条太远，收紧到贴条显示 */
 .crepe-root .milkdown .ProseMirror blockquote {
   padding-left: 12px;
+}
+
+/* ---- 图片尺寸接管 ----
+   Crepe onImageLoad 把图片高度锁成像素（style.height），窗口放大后图片不跟随变宽。
+   这里解锁高度让宽度成为唯一尺寸维度：ratio=1（默认）→ max-width:100% 响应式占满内容区；
+   ratio<1（用户拖拽调整过，见 NoteEditor 宽度把手）→ 按百分比定宽，同样随窗口缩放 */
+.crepe-root .milkdown .milkdown-image-block img {
+  height: auto !important;
+}
+
+/* Crepe 内置高度把手停用（row-resize 调高度的交互不可见也不直观，改为宽度把手） */
+.crepe-root .milkdown .milkdown-image-block .image-resize-handle {
+  display: none !important;
+}
+
+/* 自定义宽度把手：image-wrapper 右下角 22px 视觉区（命中判定 26px，见 IMAGE_BLOCK_HANDLE_PX），
+   悬停浮现斜向三点，pointer 事件由 NoteEditor 在编辑器根上委托处理 */
+.crepe-root .milkdown .milkdown-image-block .image-wrapper::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 0 0 6px 0;
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background:
+    radial-gradient(2.5px circle at 5px 17px, var(--text-3) 98%, transparent),
+    radial-gradient(2.5px circle at 11px 11px, var(--text-3) 98%, transparent),
+    radial-gradient(2.5px circle at 17px 5px, var(--text-3) 98%, transparent);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.35));
+}
+
+.crepe-root .milkdown .milkdown-image-block:hover .image-wrapper::after,
+.crepe-root .milkdown .milkdown-image-block .image-wrapper:active::after {
+  opacity: 0.9;
 }
 </style>
