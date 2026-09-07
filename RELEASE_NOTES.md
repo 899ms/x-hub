@@ -1,3 +1,10 @@
+# v0.5.2 发布说明
+
+- **工作台形态化布局**——时钟卡四形态（大时钟 / 今日阴阳历 / 整月日历 / 极简时间）、天气独立卡片（简版 / 详情版）；布局编辑器所见即所得重构：clock/weather 画布内挂载真实卡片、其余模块样式化预览，支持形态切换、最小尺寸钳制与适配徽标；时钟卡农历 / 月视图派生值改分钟粒度驱动，秒级 tick 不再触发每秒重算；新增农历转换（utils/lunar.ts，1900–2100）与布局样式化预览（utils/dashPreviews.ts）
+- **扩展宿主数据访问口子**——新增 data.* 桥能力（笔记 / 待办 / 便签 / 浮窗便签 / 速达 / 提示词 / 标签，按 data:read / data:write 权限读写），扩展桥补齐 data 命名空间封装与 xhub.call 通用调用通道；todos / stickies / detached_stickies 增加 version 乐观锁（expectedVersion 冲突检测），主 UI 本地写同步推进版本链，为局域网同步预留冲突检测基础
+- **service 对外监听**——扩展后端支持绑 0.0.0.0 / 局域网地址（network 权限门控），探活按监听地址探测并移出命令线程（打开扩展不再卡顿）；防火墙规则先删后加幂等、按程序定向、停止 / 卸载 / 启动失败时同步清理
+- **审查修复**——扩展桥入参 fail-fast 校验（expectedVersion / dueAt / remindAt / parentId / tagIds 非整数报错、标题非空）；NOT_FOUND 与 CONFLICT 错误区分、乐观锁删除返回级联子 id、repo update 系补 NOT_FOUND 语义；布局编辑器预览 XSS 转义、老布局放大重叠消解、形态钳制右边界修正、无效 variant 归一与形态广播补发；农历超出 2100 年优雅返回空
+
 # v0.5.1 发布说明
 
 - **分发端点迁移：腾讯云 COS 替代 Cloudflare R2**——客户端默认市场/升级清单端点切到 COS（广州），国内下载更快更稳；CI 扩展发布通道同步切换（rclone TencentCOS）并新增 registry.json(.sig) 可访问性校验步骤；upload-market / upload-release 脚本三通道化（cos 主通道 / r2 过渡兜底 / sftp 自建 Nginx 备选），publish 脚本端点改由 XHUB_DIST_BASE_URL 环境变量驱动，产物目录 dist/market、dist/release → dist-market、dist-release；新增 docs/self-hosted-distribution.md（迁移总方案与六阶段切换）、scripts/sync-r2-to-cos.ps1（阶段 0 R2→COS 一键平移）、scripts/server/（自建 Nginx 一键初始化与站点配置）

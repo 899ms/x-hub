@@ -12,6 +12,7 @@ import SysMonitorCard from '../components/SysMonitorCard.vue'
 import PromptBoxCard from '../components/PromptBoxCard.vue'
 import RecentBar from '../components/RecentBar.vue'
 import ClockCard from '../components/ClockCard.vue'
+import WeatherCard from '../components/WeatherCard.vue'
 import StickyCard from '../components/StickyCard.vue'
 import CountdownCard from '../components/CountdownCard.vue'
 import { useStore } from '../stores/workbench'
@@ -24,7 +25,7 @@ import type { Component } from 'vue'
 import { useTheme } from '../composables/useTheme'
 import { broadcastThemeToFrames } from '../composables/themeTokens'
 import { iconSrc } from '../composables/useResourceIcon'
-import { useDashboardLayout, type DashPlacement } from '../composables/useDashboardLayout'
+import { dashVariantDef, useDashboardLayout, type DashPlacement } from '../composables/useDashboardLayout'
 
 // 大体量/低频视图异步分包按需加载，缩小首屏主 chunk
 const NoteEditor = defineAsyncComponent(() => import('../components/NoteEditor.vue'))
@@ -250,6 +251,7 @@ const layout = useDashboardLayout()
 // 模块 id → 组件 + props 映射（含原「中上可切换」的 5 个独立模块）
 const dashCardComponents: Record<string, Component> = {
   clock: ClockCard,
+  weather: WeatherCard,
   sysmon: SysMonitorCard,
   sticky1: StickyCard,
   sticky2: StickyCard,
@@ -275,10 +277,15 @@ function dashCardProps(p: DashPlacement): Record<string, unknown> {
     return {
       extId,
       surface: 'module',
+      variant: p.variant ?? dashVariantDef(id)?.id ?? null,
       onOpenSurface: (surface: string) => openExtensionSurface(extId, surface),
     }
   }
   switch (id) {
+    case 'clock':
+      return { variant: p.variant }
+    case 'weather':
+      return { variant: p.variant }
     case 'sticky1':
       return { slot: 1 }
     case 'sticky2':
@@ -1214,6 +1221,8 @@ html[data-wallpaper='1'] .title-bar [data-tip]::after {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 容器查询容器：卡片内 cq 单位随格子缩放（形态化卡片的核心前提） */
+  container-type: size;
 }
 .dash-cell > * {
   flex: 1;

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
@@ -49,7 +49,7 @@ pub struct Capability {
 }
 
 /// 全部桥 API 能力表。新增能力只改这里 + 补 handler 函数。
-static CAPABILITIES: &[Capability] = &[
+pub(crate) static CAPABILITIES: &[Capability] = &[
     Capability {
         namespace: "runtime",
         method: "info",
@@ -109,6 +109,176 @@ static CAPABILITIES: &[Capability] = &[
         method: "resources.list",
         permission: Some("data:read"),
         handler: CapabilityHandler::Sync(data_resources_list),
+    },
+    // ----- data 读扩展：单条 get + 便签/提示词/标签 -----
+    Capability {
+        namespace: "data",
+        method: "todos.get",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_todos_get),
+    },
+    Capability {
+        namespace: "data",
+        method: "resources.get",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_resources_get),
+    },
+    Capability {
+        namespace: "data",
+        method: "stickies.list",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_stickies_list),
+    },
+    Capability {
+        namespace: "data",
+        method: "detachedStickies.list",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_detached_stickies_list),
+    },
+    Capability {
+        namespace: "data",
+        method: "snippets.list",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_snippets_list),
+    },
+    Capability {
+        namespace: "data",
+        method: "snippets.get",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_snippets_get),
+    },
+    Capability {
+        namespace: "data",
+        method: "tags.list",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_tags_list),
+    },
+    Capability {
+        namespace: "data",
+        method: "tags.ofNote",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_tags_of_note),
+    },
+    // ----- data 写：消费 data:write 权限（授权给第三方扩展增删改宿主数据） -----
+    Capability {
+        namespace: "data",
+        method: "notes.create",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_notes_create),
+    },
+    Capability {
+        namespace: "data",
+        method: "notes.update",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_notes_update),
+    },
+    Capability {
+        namespace: "data",
+        method: "notes.delete",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_notes_delete),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.create",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_create),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.update",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_update),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.toggle",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_toggle),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.delete",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_delete),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.schedule",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_schedule),
+    },
+    Capability {
+        namespace: "data",
+        method: "stickies.save",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_stickies_save),
+    },
+    Capability {
+        namespace: "data",
+        method: "detachedStickies.save",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_detached_stickies_save),
+    },
+    Capability {
+        namespace: "data",
+        method: "resources.create",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_resources_create),
+    },
+    Capability {
+        namespace: "data",
+        method: "resources.update",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_resources_update),
+    },
+    Capability {
+        namespace: "data",
+        method: "resources.delete",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_resources_delete),
+    },
+    Capability {
+        namespace: "data",
+        method: "snippets.create",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_snippets_create),
+    },
+    Capability {
+        namespace: "data",
+        method: "snippets.update",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_snippets_update),
+    },
+    Capability {
+        namespace: "data",
+        method: "snippets.delete",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_snippets_delete),
+    },
+    Capability {
+        namespace: "data",
+        method: "snippets.togglePin",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_snippets_toggle_pin),
+    },
+    Capability {
+        namespace: "data",
+        method: "tags.create",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_tags_create),
+    },
+    Capability {
+        namespace: "data",
+        method: "tags.delete",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_tags_delete),
+    },
+    Capability {
+        namespace: "data",
+        method: "tags.setNoteTags",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_tags_set_note_tags),
     },
     Capability {
         namespace: "config",
@@ -514,6 +684,55 @@ where
     f(&conn)
 }
 
+/// data 写方法通用脚手架：锁连接执行闭包，落库后 emit 变更事件让宿主主窗口 UI 刷新。
+/// 解析可选整型参数：缺失 / null → None；存在但非整数（字符串/浮点/对象等）报
+/// INVALID_ARGUMENT——静默降级会改变语义（expectedVersion 失效、dueAt 被当「清除排期」、
+/// parentId 掉成顶级待办），fail-fast 比静默改写安全。
+fn expect_opt_i64(args: &Value, key: &str) -> Result<Option<i64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("INVALID_ARGUMENT: {key} 必须为整数")),
+    }
+}
+
+/// 必填非空字符串（trim 后非空）：与宿主命令同强度校验——扩展是不可信输入源，
+/// 空/纯空白标题会制造列表空白条目。
+fn expect_non_empty(args: &Value, key: &str) -> Result<String, String> {
+    let s = args
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("INVALID_ARGUMENT: 缺少 {key}"))?
+        .trim()
+        .to_owned();
+    if s.is_empty() {
+        return Err(format!("INVALID_ARGUMENT: {key} 不能为空"));
+    }
+    Ok(s)
+}
+
+/// 权限检查已在 dispatch 统一做（data:write）。event 为前端监听的事件名
+/// （如 todos-changed / notes-changed / stickies-changed / snippets-changed；resources 无独立事件传 None）。
+fn data_write<F>(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    event: Option<&str>,
+    f: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(&Connection) -> Result<Value, String>,
+{
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let result = f(&conn)?;
+    drop(conn);
+    if let Some(ev) = event {
+        let _ = app.emit(ev, ());
+    }
+    Ok(result)
+}
+
 fn data_notes_list(
     _app: &tauri::AppHandle,
     state: &DbState,
@@ -563,6 +782,557 @@ fn data_resources_list(
     data_read(state, |conn| {
         let resources = repo::resource::list_all(conn).map_err(|e| e.to_string())?;
         serde_json::to_value(resources).map_err(|e| e.to_string())
+    })
+}
+
+// ---------- data 读扩展：单条 get + 便签/提示词/标签（需 data:read） ----------
+
+fn data_todos_get(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_read(state, |conn| {
+        let todo = repo::todo::get(conn, id).map_err(|e| e.to_string())?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+fn data_resources_get(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_read(state, |conn| {
+        let resource = repo::resource::get(conn, id).map_err(|e| e.to_string())?;
+        serde_json::to_value(resource).map_err(|e| e.to_string())
+    })
+}
+
+fn data_stickies_list(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    _args: Value,
+) -> Result<Value, String> {
+    data_read(state, |conn| {
+        let stickies = repo::sticky::list(conn).map_err(|e| e.to_string())?;
+        serde_json::to_value(stickies).map_err(|e| e.to_string())
+    })
+}
+
+fn data_detached_stickies_list(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    _args: Value,
+) -> Result<Value, String> {
+    data_read(state, |conn| {
+        let stickies = repo::detached_sticky::list(conn).map_err(|e| e.to_string())?;
+        serde_json::to_value(stickies).map_err(|e| e.to_string())
+    })
+}
+
+fn data_snippets_list(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    _args: Value,
+) -> Result<Value, String> {
+    data_read(state, |conn| {
+        let snippets = repo::snippet::list(conn).map_err(|e| e.to_string())?;
+        serde_json::to_value(snippets).map_err(|e| e.to_string())
+    })
+}
+
+fn data_snippets_get(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_read(state, |conn| {
+        let snippet = repo::snippet::get(conn, id).map_err(|e| e.to_string())?;
+        serde_json::to_value(snippet).map_err(|e| e.to_string())
+    })
+}
+
+fn data_tags_list(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    _args: Value,
+) -> Result<Value, String> {
+    data_read(state, |conn| {
+        let tags = repo::tag::list(conn).map_err(|e| e.to_string())?;
+        serde_json::to_value(tags).map_err(|e| e.to_string())
+    })
+}
+
+fn data_tags_of_note(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let note_id = args
+        .get("noteId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 noteId".to_string())?;
+    data_read(state, |conn| {
+        let tags = repo::tag::tags_of_note(conn, note_id).map_err(|e| e.to_string())?;
+        serde_json::to_value(tags).map_err(|e| e.to_string())
+    })
+}
+
+// ---------- data 写：增删改宿主数据（需 data:write） ----------
+
+fn data_notes_create(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let title = expect_non_empty(&args, "title")?;
+    data_write(app, state, Some("notes-changed"), |conn| {
+        let note = repo::note::create(conn, &title).map_err(|e| e.to_string())?;
+        serde_json::to_value(note).map_err(|e| e.to_string())
+    })
+}
+
+fn data_notes_update(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let title = expect_non_empty(&args, "title")?;
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    data_write(app, state, Some("notes-changed"), |conn| {
+        let note = repo::note::update(conn, id, &title, &content).map_err(|e| e.to_string())?;
+        serde_json::to_value(note).map_err(|e| e.to_string())
+    })
+}
+
+fn data_notes_delete(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_write(app, state, Some("notes-changed"), |conn| {
+        repo::note::delete(conn, id).map_err(|e| e.to_string())?;
+        Ok(Value::Null)
+    })
+}
+
+fn data_todos_create(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let title = expect_non_empty(&args, "title")?;
+    let parent_id = expect_opt_i64(&args, "parentId")?;
+    let created_at = args
+        .get("createdAt")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::create(conn, &title, parent_id, created_at.as_deref())
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todos_update(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let title = expect_non_empty(&args, "title")?;
+    let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(0);
+    if !(0..=2).contains(&priority) {
+        return Err("INVALID_ARGUMENT: 优先级取值 0-2".to_string());
+    }
+    // 乐观锁：期望版本（局域网同步冲突检测）；缺省不校验
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::update_with_version(conn, id, &title, priority, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todos_toggle(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::toggle_with_version(conn, id, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todos_delete(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        repo::todo::delete_with_version(conn, id, expected)?;
+        Ok(Value::Null)
+    })
+}
+
+fn data_todos_schedule(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let due_at = expect_opt_i64(&args, "dueAt")?;
+    let remind_at = expect_opt_i64(&args, "remindAt")?;
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::schedule_with_version(conn, id, due_at, remind_at, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+/// stickies.save：slot 无记录时自动建档（upsert 语义，version 从 0 起算）；
+/// 已有记录时 expectedVersion 命中才写并 +1（缺省不校验）。
+fn data_stickies_save(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let slot = args
+        .get("slot")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 slot".to_string())?;
+    if !(1..=2).contains(&slot) {
+        return Err("INVALID_ARGUMENT: 便签槽位取值 1-2".to_string());
+    }
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("stickies-changed"), |conn| {
+        let sticky =
+            repo::sticky::upsert_with_version(conn, slot, &content, expected)?;
+        serde_json::to_value(sticky).map_err(|e| e.to_string())
+    })
+}
+
+/// detachedStickies.save：仅更新「已脱离为主卡浮窗」的记录（update 语义），slot 无记录
+/// 报 NOT_FOUND、不自动建档——浮窗便签由主卡「脱离」动作创建，扩展不应凭空造出浮窗。
+fn data_detached_stickies_save(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let slot = args
+        .get("slot")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 slot".to_string())?;
+    if !(1..=2).contains(&slot) {
+        return Err("INVALID_ARGUMENT: 便签槽位取值 1-2".to_string());
+    }
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("stickies-changed"), |conn| {
+        repo::detached_sticky::update_content_with_version(conn, slot, &content, expected)?;
+        Ok(Value::Null)
+    })
+}
+
+/// 解析资源类型字符串（app/web/file）到 ResourceKind；非法值报错
+fn parse_resource_kind(v: &Value) -> Result<crate::models::ResourceKind, String> {
+    let s = v
+        .as_str()
+        .ok_or_else(|| "INVALID_ARGUMENT: kind 必须为字符串 app/web/file".to_string())?;
+    match s {
+        "app" => Ok(crate::models::ResourceKind::App),
+        "web" => Ok(crate::models::ResourceKind::Web),
+        "file" => Ok(crate::models::ResourceKind::File),
+        _ => Err(format!("INVALID_ARGUMENT: 未知资源类型 {s}")),
+    }
+}
+
+fn data_resources_create(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let kind = parse_resource_kind(
+        args.get("kind")
+            .ok_or_else(|| "INVALID_ARGUMENT: 缺少 kind".to_string())?,
+    )?;
+    let name = expect_non_empty(&args, "name")?;
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 target".to_string())?;
+    let category = args.get("category").and_then(|v| v.as_str()).map(str::to_owned);
+    let icon = args.get("icon").and_then(|v| v.as_str()).map(str::to_owned);
+    let extra = args.get("args").and_then(|v| v.as_str()).map(str::to_owned);
+    data_write(app, state, None, |conn| {
+        let resource = repo::resource::create(
+            conn,
+            kind,
+            &name,
+            &target,
+            category.as_deref(),
+            icon.as_deref(),
+            extra.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        serde_json::to_value(resource).map_err(|e| e.to_string())
+    })
+}
+
+fn data_resources_update(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let kind = parse_resource_kind(
+        args.get("kind")
+            .ok_or_else(|| "INVALID_ARGUMENT: 缺少 kind".to_string())?,
+    )?;
+    let name = expect_non_empty(&args, "name")?;
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 target".to_string())?;
+    let category = args.get("category").and_then(|v| v.as_str()).map(str::to_owned);
+    let icon = args.get("icon").and_then(|v| v.as_str()).map(str::to_owned);
+    let extra = args.get("args").and_then(|v| v.as_str()).map(str::to_owned);
+    data_write(app, state, None, |conn| {
+        let resource = repo::resource::update(
+            conn,
+            id,
+            kind,
+            &name,
+            &target,
+            category.as_deref(),
+            icon.as_deref(),
+            extra.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        serde_json::to_value(resource).map_err(|e| e.to_string())
+    })
+}
+
+fn data_resources_delete(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_write(app, state, None, |conn| {
+        repo::resource::delete(conn, id).map_err(|e| e.to_string())?;
+        Ok(Value::Null)
+    })
+}
+
+fn data_snippets_create(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let title = expect_non_empty(&args, "title")?;
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    data_write(app, state, Some("snippets-changed"), |conn| {
+        let snippet = repo::snippet::create(conn, &title, &content).map_err(|e| e.to_string())?;
+        serde_json::to_value(snippet).map_err(|e| e.to_string())
+    })
+}
+
+fn data_snippets_update(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let title = expect_non_empty(&args, "title")?;
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    data_write(app, state, Some("snippets-changed"), |conn| {
+        let snippet = repo::snippet::update(conn, id, &title, &content).map_err(|e| e.to_string())?;
+        serde_json::to_value(snippet).map_err(|e| e.to_string())
+    })
+}
+
+fn data_snippets_delete(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_write(app, state, Some("snippets-changed"), |conn| {
+        repo::snippet::delete(conn, id).map_err(|e| e.to_string())?;
+        Ok(Value::Null)
+    })
+}
+
+fn data_snippets_toggle_pin(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_write(app, state, Some("snippets-changed"), |conn| {
+        let snippet = repo::snippet::toggle_pin(conn, id).map_err(|e| e.to_string())?;
+        serde_json::to_value(snippet).map_err(|e| e.to_string())
+    })
+}
+
+fn data_tags_create(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let name = expect_non_empty(&args, "name")?;
+    data_write(app, state, None, |conn| {
+        let tag = repo::tag::create(conn, &name).map_err(|e| e.to_string())?;
+        serde_json::to_value(tag).map_err(|e| e.to_string())
+    })
+}
+
+fn data_tags_delete(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_write(app, state, None, |conn| {
+        repo::tag::delete(conn, id).map_err(|e| e.to_string())?;
+        Ok(Value::Null)
+    })
+}
+
+fn data_tags_set_note_tags(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let note_id = args
+        .get("noteId")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 noteId".to_string())?;
+    // 逐项校验：set_note_tags 是「先清空再写入」的全量替换语义，静默丢弃非整数项
+    // 会退化成「清空该笔记全部标签」且调用方无感知
+    let tag_ids: Vec<i64> = match args.get("tagIds").and_then(|v| v.as_array()) {
+        Some(arr) => {
+            let mut ids = Vec::with_capacity(arr.len());
+            for x in arr {
+                match x.as_i64() {
+                    Some(id) => ids.push(id),
+                    None => return Err("INVALID_ARGUMENT: tagIds 必须为整数数组".to_string()),
+                }
+            }
+            ids
+        }
+        None => return Err("INVALID_ARGUMENT: 缺少 tagIds".to_string()),
+    };
+    data_write(app, state, Some("notes-changed"), |conn| {
+        repo::tag::set_note_tags(conn, note_id, &tag_ids).map_err(|e| e.to_string())?;
+        Ok(Value::Null)
     })
 }
 
@@ -1008,6 +1778,7 @@ mod tests {
             backend: None,
             description: String::new(),
             config: Map::new(),
+            module_variants: vec![],
         };
         assert!(declares(&manifest, "data:read"));
         assert!(!declares(&manifest, "data:write"));
@@ -1038,20 +1809,77 @@ mod tests {
         assert!(keys.contains(&("runtime", "info")));
         assert!(keys.contains(&("storage", "get")));
         assert!(keys.contains(&("storage", "set")));
+        // data 读
         assert!(keys.contains(&("data", "notes.list")));
+        assert!(keys.contains(&("data", "notes.get")));
         assert!(keys.contains(&("data", "todos.list")));
+        assert!(keys.contains(&("data", "todos.get")));
         assert!(keys.contains(&("data", "resources.list")));
+        assert!(keys.contains(&("data", "resources.get")));
+        assert!(keys.contains(&("data", "stickies.list")));
+        assert!(keys.contains(&("data", "detachedStickies.list")));
+        assert!(keys.contains(&("data", "snippets.list")));
+        assert!(keys.contains(&("data", "tags.list")));
+        // data 写
+        assert!(keys.contains(&("data", "notes.create")));
+        assert!(keys.contains(&("data", "notes.delete")));
+        assert!(keys.contains(&("data", "todos.create")));
+        assert!(keys.contains(&("data", "todos.toggle")));
+        assert!(keys.contains(&("data", "todos.delete")));
+        assert!(keys.contains(&("data", "todos.schedule")));
+        assert!(keys.contains(&("data", "stickies.save")));
+        assert!(keys.contains(&("data", "detachedStickies.save")));
+        assert!(keys.contains(&("data", "resources.create")));
+        assert!(keys.contains(&("data", "resources.delete")));
+        assert!(keys.contains(&("data", "snippets.create")));
+        assert!(keys.contains(&("data", "snippets.delete")));
+        assert!(keys.contains(&("data", "tags.create")));
+        assert!(keys.contains(&("data", "tags.setNoteTags")));
         assert!(keys.contains(&("service", "request")));
+    }
+
+    /// data 读方法（挂 data:read 权限）方法名约定：list / get / ofNote 结尾。
+    fn is_data_read_method(method: &str) -> bool {
+        method.ends_with(".list")
+            || method.ends_with(".get")
+            || method.ends_with(".ofNote")
     }
 
     #[test]
     fn data_read_capabilities_declare_data_read_permission() {
         for c in CAPABILITIES {
-            if c.namespace == "data" {
+            if c.namespace == "data" && is_data_read_method(c.method) {
                 assert_eq!(
                     c.permission,
                     Some("data:read"),
-                    "data capability {}:{} must require data:read",
+                    "data read capability {}:{} must require data:read",
+                    c.namespace,
+                    c.method
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn data_write_capabilities_declare_data_write_permission() {
+        // 所有 data 能力必须二选一挂 data:read 或 data:write，禁止裸奔
+        for c in CAPABILITIES {
+            if c.namespace == "data" {
+                assert!(
+                    c.permission == Some("data:read") || c.permission == Some("data:write"),
+                    "data capability {}:{} must require data:read or data:write",
+                    c.namespace,
+                    c.method
+                );
+            }
+        }
+        // 写方法必须挂 data:write
+        for c in CAPABILITIES {
+            if c.namespace == "data" && !is_data_read_method(c.method) {
+                assert_eq!(
+                    c.permission,
+                    Some("data:write"),
+                    "data write capability {}:{} must require data:write",
                     c.namespace,
                     c.method
                 );

@@ -76,6 +76,8 @@ function toAssetUrl(filePath: string): string {
  * @param onError    加载失败回调（用于 toast 提示）
  * @param getReloadKey 强制重载计数（可选）：宿主每次「打开某扩展」递增，点击同一个
  *                     已打开的扩展时 extId/surface 均不变，靠该计数触发重新导航
+ * @param getVariant 工作台模块形态 id（可选，module 形态多形态时生效）：入口 URL 追加
+ *                   `xhub-variant` query（首帧可读），变化时 postMessage 广播给扩展
  */
 export function useExtensionFrame(
   getExtId: () => string,
@@ -83,10 +85,19 @@ export function useExtensionFrame(
   onError?: (message: string) => void,
   onOpenSurface?: (surface: string) => void,
   getReloadKey?: () => number,
+  getVariant?: () => string | null,
 ) {
   const frameRef = ref<HTMLIFrameElement | null>(null)
   const loading = ref(true)
   const error = ref<string | null>(null)
+
+  /** 把当前形态 id 广播给扩展 iframe（桥脚本写 data-xhub-variant + CSS 变量 + 派发事件） */
+  function broadcastVariant() {
+    const frame = frameRef.value
+    const variant = getVariant?.() ?? null
+    if (!frame || !frame.contentWindow) return
+    frame.contentWindow.postMessage({ __xhub: true, type: 'variant', variant }, '*')
+  }
 
   // 看门狗状态：扩展 iframe 是否已回传任意桥消息（桥脚本运行即算“已就绪”）
   let frameAlive = false
@@ -134,11 +145,15 @@ export function useExtensionFrame(
     if (!m || m.__xhub !== true) return
 
     // 桥脚本首次回包即证明扩展入口已成功执行（白屏 = 桥脚本根本没跑起来）
+    const firstAlive = !frameAlive
     frameAlive = true
     if (watchdogTimer !== undefined) {
       clearTimeout(watchdogTimer)
       watchdogTimer = undefined
     }
+    // 首条桥消息时补发当前形态：iframe 加载完成前 postMessage 无监听者会被丢弃，
+    // URL query 又固化为加载时的旧形态——不补发则扩展停留在旧形态直到下次重载
+    if (firstAlive && getVariant) broadcastVariant()
 
     // 扩展 module 请求打开自身某个形态（view/window/drawer）：通用能力，任何扩展 module 均可使用
     if (m.type === 'open') {
@@ -238,7 +253,13 @@ export function useExtensionFrame(
     try {
       const htmlPath = await tauriApi.readExtensionEntry(getExtId(), getSurface())
       if (frameRef.value) {
-        frameRef.value.src = toAssetUrl(htmlPath)
+        const variant = getVariant?.() ?? null
+        // 形态经 URL query 随入口首帧到达（桥脚本运行前即可读 location.search），
+        // 后续切换走 postMessage 广播（见下方 watch），两种通道互补
+        const url = variant
+          ? `${toAssetUrl(htmlPath)}?xhub-variant=${encodeURIComponent(variant)}`
+          : toAssetUrl(htmlPath)
+        frameRef.value.src = url
         // 看门狗：入口 HTML 已返回但 iframe 在超时内没有任何桥消息（桥脚本未运行）
         // → 判定白屏，落日志并给出友好提示，而不是永远停在空白页
         watchdogTimer = window.setTimeout(() => {
@@ -285,6 +306,11 @@ export function useExtensionFrame(
     registerExtensionFrame(frameRef.value, getExtId())
     void load()
   })
+
+  // 模块形态变化：不重载 iframe（避免闪白/丢状态），仅广播新形态给扩展自行切换内容
+  if (getVariant) {
+    watch(getVariant, () => broadcastVariant())
+  }
 
   return { frameRef, loading, error }
 }

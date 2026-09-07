@@ -38,8 +38,28 @@ pub struct BackendSpec {
     pub cwd: Option<String>,
     /// 0 = 动态分配；固定端口需冲突检测
     pub port: Option<u16>,
+    /// 监听主机（对外开服务用）。缺省/`127.0.0.1` = 本机（安全默认）；
+    /// `0.0.0.0` / 具体局域网地址 = 对外开放，需 `network` 权限（宿主启动时校验 + 放行防火墙）。
+    #[serde(default)]
+    pub host: Option<String>,
     /// 健康检查路径（可选）
     pub health: Option<String>,
+}
+
+impl BackendSpec {
+    /// 解析监听主机：缺省回退 `127.0.0.1`（本机，安全默认）。
+    pub fn listen_host(&self) -> String {
+        self.host.clone().unwrap_or_else(|| "127.0.0.1".to_string())
+    }
+
+    /// 是否对外监听（非回环地址）。对外监听需要 `network` 权限。
+    pub fn is_external(&self) -> bool {
+        let host = self.listen_host();
+        // 忽略大小写比较：manifest 写 "LocalHost" 等变形是合法回环写法，不应误判为对外
+        !(host.eq_ignore_ascii_case("127.0.0.1")
+            || host.eq_ignore_ascii_case("::1")
+            || host.eq_ignore_ascii_case("localhost"))
+    }
 }
 
 /// 后端运行时引擎要求（backend.engine）
@@ -92,6 +112,23 @@ fn condition_matches(cond: &DisableCondition) -> bool {
         }
     }
     false
+}
+
+/// 工作台模块形态声明（manifest.moduleVariants，可选）。
+/// 声明后扩展的 module 形态在工作台模块库里以多个形态注册（min/ideal 尺寸、适配徽标、
+/// 拖入落位均按声明生效）；不声明则只有一个默认形态（沿用固定 min 2×2 / ideal 4×3）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleVariant {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "minW")]
+    pub min_w: u32,
+    #[serde(rename = "minH")]
+    pub min_h: u32,
+    #[serde(rename = "idealW")]
+    pub ideal_w: u32,
+    #[serde(rename = "idealH")]
+    pub ideal_h: u32,
 }
 
 /// 扩展 manifest（manifest.json），对齐 spec §4。
@@ -147,6 +184,9 @@ pub struct ExtensionManifest {
     /// 扩展默认配置（对象）；用户覆盖存 `.config.json`，读取时用户覆盖优先（配置分层）
     #[serde(default)]
     pub config: Map<String, Value>,
+    /// 工作台模块形态声明（manifest 字段为 moduleVariants；module 形态可选多形态）
+    #[serde(default, rename = "moduleVariants")]
+    pub module_variants: Vec<ModuleVariant>,
 }
 
 fn default_kind() -> String {
@@ -187,6 +227,8 @@ pub struct ExtensionEntry {
     pub expose: Vec<String>,
     /// 快捷动作（manifest.actions）
     pub actions: Vec<ExtensionAction>,
+    /// 工作台模块形态声明（module 形态多形态注册；空 = 单个默认形态）
+    pub module_variants: Vec<ModuleVariant>,
 }
 
 fn runtime_str(r: &ExtensionRuntime) -> &'static str {
@@ -286,6 +328,7 @@ fn load_extension(dir: &Path) -> ExtensionEntry {
         depends_on: Vec::new(),
         expose: Vec::new(),
         actions: Vec::new(),
+        module_variants: Vec::new(),
     };
 
     let manifest = match read_manifest(dir) {
@@ -334,6 +377,7 @@ fn load_extension(dir: &Path) -> ExtensionEntry {
         depends_on: manifest.depends_on,
         expose: manifest.expose,
         actions: manifest.actions,
+        module_variants: manifest.module_variants,
     }
 }
 
@@ -435,6 +479,11 @@ const XHUB_BRIDGE_SCRIPT: &str = r#"
       else{var err=new Error(m.error&&m.error.message||'xhub error');err.code=m.error&&m.error.code;p.reject(err);}
     }else if(m.type==='theme'){
       applyTheme(m.theme);emit('theme-changed',m.theme);
+    }else if(m.type==='variant'){
+      // 工作台模块形态：module 形态多形态切换时由宿主广播；扩展据此切换内容
+      var v=m.variant||'';
+      var r=document.documentElement;if(r){r.setAttribute('data-xhub-variant',v);r.style.setProperty('--xhub-variant',v);}
+      emit('xhub:variant-changed',v);
     }else if(m.type==='event'){
       emit(m.event,m.payload);
     }else if(m.type==='xhub-call-result'){
@@ -452,6 +501,9 @@ const XHUB_BRIDGE_SCRIPT: &str = r#"
   // 本扩展暴露给其它扩展调用的方法（跨扩展调用）
   var exposed={};
   window.xhub={
+    // 通用调用通道：直接调任意 CAPABILITIES 方法（新增能力无需等桥封装更新）。
+    // 函数体内的 call 解析到闭包私有的 rpc 实现，不会递归到 window.xhub.call
+    call:function(ns,method,args){return call(ns,method,args||{});},
     runtime:{
       info:function(){return call('runtime','info',{});},
       open:function(surface){window.parent.postMessage({__xhub:true,type:'open',surface:surface||'view'},'*');return Promise.resolve();},
@@ -479,10 +531,56 @@ const XHUB_BRIDGE_SCRIPT: &str = r#"
       set:function(k,v){return call('sharedStorage','set',{key:k,value:v});},
       remove:function(k){return call('sharedStorage','remove',{key:k});}
     },
+    // data 命名空间：与 Rust CAPABILITIES 的 data.* 能力一一对应（读方法带明确参数，
+    // 写方法整包透传 opts——expectedVersion 等可选字段原样传递）。新增能力必须同步此表
+    //（单测 bridge_script_covers_all_data_capabilities 兜底），或让扩展走 xhub.call 通用通道。
     data:{
-      notes:{list:function(){return call('data','notes.list',{});},get:function(id){return call('data','notes.get',{id:id});}},
-      todos:{list:function(){return call('data','todos.list',{});}},
-      resources:{list:function(){return call('data','resources.list',{});}}
+      notes:{
+        list:function(){return call('data','notes.list',{});},
+        get:function(id){return call('data','notes.get',{id:id});},
+        create:function(opts){return call('data','notes.create',opts||{});},
+        update:function(opts){return call('data','notes.update',opts||{});},
+        delete:function(opts){return call('data','notes.delete',opts||{});}
+      },
+      todos:{
+        list:function(){return call('data','todos.list',{});},
+        get:function(id){return call('data','todos.get',{id:id});},
+        create:function(opts){return call('data','todos.create',opts||{});},
+        update:function(opts){return call('data','todos.update',opts||{});},
+        toggle:function(opts){return call('data','todos.toggle',opts||{});},
+        delete:function(opts){return call('data','todos.delete',opts||{});},
+        schedule:function(opts){return call('data','todos.schedule',opts||{});}
+      },
+      stickies:{
+        list:function(){return call('data','stickies.list',{});},
+        save:function(opts){return call('data','stickies.save',opts||{});}
+      },
+      detachedStickies:{
+        list:function(){return call('data','detachedStickies.list',{});},
+        save:function(opts){return call('data','detachedStickies.save',opts||{});}
+      },
+      resources:{
+        list:function(){return call('data','resources.list',{});},
+        get:function(id){return call('data','resources.get',{id:id});},
+        create:function(opts){return call('data','resources.create',opts||{});},
+        update:function(opts){return call('data','resources.update',opts||{});},
+        delete:function(opts){return call('data','resources.delete',opts||{});}
+      },
+      snippets:{
+        list:function(){return call('data','snippets.list',{});},
+        get:function(id){return call('data','snippets.get',{id:id});},
+        create:function(opts){return call('data','snippets.create',opts||{});},
+        update:function(opts){return call('data','snippets.update',opts||{});},
+        delete:function(opts){return call('data','snippets.delete',opts||{});},
+        togglePin:function(opts){return call('data','snippets.togglePin',opts||{});}
+      },
+      tags:{
+        list:function(){return call('data','tags.list',{});},
+        ofNote:function(noteId){return call('data','tags.ofNote',{noteId:noteId});},
+        create:function(opts){return call('data','tags.create',opts||{});},
+        delete:function(opts){return call('data','tags.delete',opts||{});},
+        setNoteTags:function(opts){return call('data','tags.setNoteTags',opts||{});}
+      }
     },
     fs:{
       saveText:function(name,content){return call('fs','saveText',{name:name,content:content});},
@@ -794,6 +892,24 @@ mod tests {
     }
 
     #[test]
+    fn bridge_script_covers_all_data_capabilities() {
+        // 桥脚本的 data 封装必须覆盖全部 data.* 能力：扩展按 window.xhub.data.* 编程，
+        // 桥漏方法 = 能力形同虚设。新增 data 能力时同步桥脚本（或让扩展走 xhub.call）。
+        for cap in crate::xhub_api::CAPABILITIES.iter() {
+            if cap.namespace != "data" {
+                continue;
+            }
+            let needle = format!("'{}','{}'", cap.namespace, cap.method);
+            assert!(
+                XHUB_BRIDGE_SCRIPT.contains(&needle),
+                "桥脚本缺少 data 能力封装: {}.{}",
+                cap.namespace,
+                cap.method
+            );
+        }
+    }
+
+    #[test]
     fn parses_web_manifest() {
         let dir = tempdir().unwrap();
         write_manifest(
@@ -883,6 +999,41 @@ mod tests {
         let manifest: ExtensionManifest = serde_json::from_str(&raw).unwrap();
         assert_eq!(manifest.runtime, ExtensionRuntime::Web);
         assert_eq!(manifest.kind, "view");
+        // 未声明 moduleVariants → 空
+        assert!(manifest.module_variants.is_empty());
+    }
+
+    #[test]
+    fn parses_module_variants() {
+        let dir = tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            "com.x-hub.calendar",
+            serde_json::json!({
+                "id": "com.x-hub.calendar",
+                "name": "日历",
+                "version": "0.2.0",
+                "kind": "module",
+                "surfaces": ["module", "view"],
+                "entry": {
+                    "module": "./module/index.html",
+                    "view": "./view/index.html"
+                },
+                "moduleVariants": [
+                    { "id": "compact", "name": "紧凑", "minW": 2, "minH": 2, "idealW": 2, "idealH": 2 },
+                    { "id": "month", "name": "整月", "minW": 4, "minH": 4, "idealW": 5, "idealH": 5 }
+                ]
+            }),
+        );
+
+        let entry = load_extension(&dir.path().join("com.x-hub.calendar"));
+        assert!(!entry.invalid);
+        assert_eq!(entry.module_variants.len(), 2);
+        assert_eq!(entry.module_variants[0].id, "compact");
+        assert_eq!(entry.module_variants[0].min_w, 2);
+        assert_eq!(entry.module_variants[0].ideal_h, 2);
+        assert_eq!(entry.module_variants[1].name, "整月");
+        assert_eq!(entry.module_variants[1].min_w, 4);
     }
 
     #[test]
@@ -945,7 +1096,7 @@ mod tests {
                 "id": "com.x-hub.caps",
                 "name": "能力探测",
                 "version": "1.0.0",
-                "requires": ["data.notes.list", "data.notes.create"],
+                "requires": ["data.notes.list", "data.chat.list"],
                 "dependsOn": ["com.x-hub.other"],
                 "disabled": { "platform": "not-a-real-os" }
             }),
@@ -955,8 +1106,8 @@ mod tests {
         assert!(!entry.invalid);
         // data.notes.list 已实现 → 不缺失
         assert!(!entry.missing_capabilities.contains(&"data.notes.list".to_string()));
-        // data.notes.create 未实现 → 缺失
-        assert!(entry.missing_capabilities.contains(&"data.notes.create".to_string()));
+        // data.chat.list 未实现 → 缺失
+        assert!(entry.missing_capabilities.contains(&"data.chat.list".to_string()));
         // platform 不匹配 → 不禁用
         assert!(!entry.disabled);
         // dependsOn 原样记录（缺失依赖在 scan_extensions 后处理）

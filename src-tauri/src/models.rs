@@ -63,6 +63,9 @@ pub struct Todo {
     /// 手动拖拽排序位（分组内按此升序）；NULL = 未手动排序，按创建时间倒序
     #[serde(default)]
     pub sort_order: Option<i64>,
+    /// 乐观锁版本号（局域网同步冲突检测；写回时需携带期望 version，命中后 +1）
+    #[serde(default)]
+    pub version: i64,
 }
 
 /// 便签（工作台左上，slot 1/2 两张卡，每卡一条多行文本）
@@ -71,6 +74,9 @@ pub struct Sticky {
     pub id: i64,
     pub slot: i64,
     pub content: String,
+    /// 乐观锁版本号
+    #[serde(default)]
+    pub version: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -81,6 +87,9 @@ pub struct DetachedSticky {
     pub id: i64,
     pub slot: i64,
     pub content: String,
+    /// 乐观锁版本号
+    #[serde(default)]
+    pub version: i64,
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub always_on_top: bool,

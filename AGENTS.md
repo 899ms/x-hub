@@ -1,10 +1,10 @@
 # x-hub (个人效率工作台)
 
-**生成:** 2026-08-29 | **分支:** master | **版本:** 0.5.1
+**生成:** 2026-08-29 | **分支:** master | **版本:** 0.5.2
 
 ## 概述
 
-基于 Tauri 2 + Vue 3 + Tailwind CSS 4 的本地桌面效率工作台（Bento 风格 Dashboard）。侧栏导航含 **工作台**（自由网格布局：时钟/便签×2/系统监视/提示词/待办/倒计时/概览卡 + 最近使用通栏，可经布局编辑器编排）、**速记**（笔记）、**速达**（应用/网页/文件资源），另有**扩展中心/扩展视图**与侧栏左下角独立入口**设置**（双栏 10 分区：常规/AI助手/外观/工作台/快捷键/剪贴板/联网/扩展/数据/关于）。主要子系统：**AI 对话面板**（OpenAI 兼容流式，Ctrl+Shift+K）、**剪贴板历史**（Ctrl+`）、**扩展系统**（module/view/window/drawer 四形态 + service 托管 + 市场）、**应用自动更新**、**倒计时浮窗**、**天气/一言**。Rust 后端管理 SQLite 数据持久化，前端使用 Vite 8 + TypeScript 6。
+基于 Tauri 2 + Vue 3 + Tailwind CSS 4 的本地桌面效率工作台（Bento 风格 Dashboard）。侧栏导航含 **工作台**（自由网格布局：时钟/天气/便签×2/系统监视/提示词/待办/倒计时/概览卡 + 最近使用通栏，时钟与天气支持多形态展示，可经布局编辑器所见即所得编排）、**速记**（笔记）、**速达**（应用/网页/文件资源），另有**扩展中心/扩展视图**与侧栏左下角独立入口**设置**（双栏 10 分区：常规/AI助手/外观/工作台/快捷键/剪贴板/联网/扩展/数据/关于）。主要子系统：**AI 对话面板**（OpenAI 兼容流式，Ctrl+Shift+K）、**剪贴板历史**（Ctrl+`）、**扩展系统**（module/view/window/drawer 四形态 + service 托管 + 市场）、**应用自动更新**、**倒计时浮窗**、**天气/一言**。Rust 后端管理 SQLite 数据持久化，前端使用 Vite 8 + TypeScript 6。
 
 ## 结构
 
@@ -17,11 +17,12 @@ x-hub/
 │   ├── style.css               # 设计令牌（亮/暗色 CSS 变量）+ Tailwind + 通用组件样式
 │   ├── api/tauri.ts            # 所有 Tauri invoke 调用封装（128 个命令）+ 34 个模型/配置类型
 │   ├── stores/workbench.ts     # 响应式状态管理（reactive + readonly，无 Pinia；工作台/便签/待办/倒计时/提示词/AI 对话/扩展/更新）
-│   ├── composables/            # useResourceIcon（资源图标）/ useFocusTrap（焦点陷阱）/ useTheme + themeTokens（三轴主题，后者广播给扩展 iframe）/ useDashboardLayout（工作台网格布局）/ useExtensionFrame（扩展 webview 桥接）/ useShortcutRecorder（快捷键录制）
-│   ├── utils/                  # categories（文件分类）/ time / web / error-report / chime（提示音）/ weather（Open-Meteo 天气码映射）/ quotes（本地名言兜底语料）/ todoParse（序号列表拆多条待办）
+│   ├── composables/            # useResourceIcon（资源图标）/ useFocusTrap（焦点陷阱）/ useTheme + themeTokens（三轴主题，后者广播给扩展 iframe）/ useDashboardLayout（工作台网格布局 + 形态注册表）/ useExtensionFrame（扩展 webview 桥接）/ useShortcutRecorder（快捷键录制）
+│   ├── utils/                  # categories（文件分类）/ time / web / error-report / chime（提示音）/ weather（Open-Meteo 天气码映射）/ quotes（本地名言兜底语料）/ todoParse（序号列表拆多条待办）/ lunar（农历转换）/ dashPreviews（布局编辑器样式化预览）
 │   └── components/
 │       ├── TitleBar.vue        # 透明自制标题栏（startDragging 拖动 + 窗口控制 + AI 对话/搜索入口）
-│       ├── ClockCard.vue       # 时钟卡片（HH:mm + 日期星期 + 实时天气 + 一言语录点击换一句）
+│       ├── ClockCard.vue       # 时钟卡片（四形态：大时钟 HH:mm 日期天气语录 / 今日阴阳历 农历+干支生肖 / 整月日历 / 极简时间；cq 响应式 + preview 模式）
+│       ├── WeatherCard.vue     # 天气卡片（独立模块，两形态：简版 图标温度城市 / 详情版 体感湿度风状况；数据来自 store.weather）
 │       ├── SysMonitorCard.vue  # 系统资源监视器（CPU/内存，2s 轮询，sysinfo 后端）
 │       ├── StickyCard.vue      # 便签卡片 ×2（布局部件 slot 1/2，统一玻璃卡，600ms 防抖自动保存）
 │       ├── CountdownCard.vue   # 倒计时卡片（时长/定时/每天/间隔 新建 + 列表 + 暂停/浮窗/删除）
@@ -50,7 +51,7 @@ x-hub/
 │       ├── ExtensionSettingsDialog.vue # 扩展设置/权限详情弹窗
 │       ├── MarketDetailDialog.vue  # 扩展市场详情/安装弹窗
 │       ├── UpdateCheckDialog.vue   # 应用更新全局弹窗（新版本信息/下载进度/跳过此版本/立即重启）
-│       ├── DashboardLayoutEditor.vue # 工作台布局编辑器视图（部件增删/拖拽/调尺寸，保存 dashboard_layout）
+│       ├── DashboardLayoutEditor.vue # 工作台布局编辑器视图（所见即所得：clock/weather 真实卡片 + 其余样式化预览、形态切换、最小尺寸钳制 + 适配徽标，保存 dashboard_layout）
 │       ├── AboutSection.vue    # 设置「关于」区（版本/开源声明/版本历史/检查更新）
 │       ├── SettingsView.vue    # 设置视图（双栏：分类导航 常规/AI助手/外观/工作台/快捷键/剪贴板/联网/扩展/数据/关于 + 内容面板）
 │       └── ContextMenu.vue     # 通用右键菜单
@@ -176,7 +177,7 @@ x-hub/
 24. **reka-ui Portal 弹层（铁律）：** `DatePickerContent` 等经 Portal 渲染到 `<body>` 后父组件 scoped `data-v` 不传播到容器，容器样式（`z-index`/背景/边框/阴影）全部失效 → 日历被 `modal-mask`(100) 盖住选不到；容器样式必须用 `:global()`，`z-index` 设 110（CountdownCard.vue `.cc-calendar-content` 即此例）
 25. **reka-ui segment 组件（铁律）：** `TimeField`/`DatePickerField` 外层禁止 `<label>` 包裹（segment 是 contenteditable div、非 labelable，label 会激活组件内部隐藏 input → `onFocus` 强制聚焦第一个 segment，表现为点「分」跳「时」）；外层用 `<div class="cc-field">`；`NumberField` 的原生 input 不受影响可继续用 label
 26. **主题三轴系统（v0.1.15）：** 主题 = 模式（light/dark/system，`data-theme`）× 预设（10 单色 `data-preset` + 10 渐变，渐变仅覆盖 `--app-bg` 背景）× 强调色（8 预设 + 自定义 hex，inline `--accent`）。`style.css` 中 `--brand-500` = `var(--accent)`，`--brand-600/50/glow` 均 `color-mix` 派生；实现/读取都在 `composables/useTheme.ts`，配置字段 `theme_mode`/`theme_preset`/`accent_color`（旧 `theme` 字段经 serde alias 自动迁移）
-27. **工作台自由网格布局（v0.3.0，取代 v0.1.15 中上区块）：** 工作台卡片由配置 `dashboard_layout`（JSON 网格坐标）驱动，部件目录在 `useDashboardLayout.ts`：clock / sticky1 / sticky2 / notes / todo_overview / resources / countdown / prompts / todo 共 9 种，可增删、拖拽、调宽高并持久化；编辑入口为设置 →「布局编辑器」（独立视图 `DashboardLayoutEditor.vue`，完成后回工作台）。旧字段 `dashboard_mid_content` 已废弃不再被 UI 读取（保留在配置结构中向后兼容）
+27. **工作台自由网格布局 + 形态注册表（v0.3.0 引入网格，v0.5.x 形态化）：** 工作台卡片由配置 `dashboard_layout`（JSON 网格坐标，每项含 `variant` 形态字段）驱动，模块目录 + 形态注册表在 `useDashboardLayout.ts`（`DASH_MODULES`，每模块声明多个形态，每形态带 `min` 最小完整尺寸 / `ideal` 推荐尺寸 / 名称）：clock（big/lunar/month/minimal 四形态）、weather（now/detail）、sysmon / sticky1 / sticky2 / notes / todo_overview / resources / countdown / prompts / todo / recent 单形态。**仅真渲染的模块暴露多形态**，其余单形态保持现状。可增删、拖拽、调宽高并持久化；编辑入口为设置 →「布局编辑器」（`DashboardLayoutEditor.vue`，完成后回工作台）。**所见即所得编辑器**：clock/weather 画布内挂载真实组件（`preview` prop 禁交互），其余模块用 `utils/dashPreviews.ts` 样式化预览；缩放钳制到形态最小尺寸，卡片带适配徽标（绿=正好铺满/黄=紧凑/蓝=弹性空间/红=低于最小自动钳制），⇄ 按钮切换形态（格小于新形态最小自动补足并就近让位）。**容器查询弹性**：ClockCard/WeatherCard 内容用 cq（cqw/cqh）+ clamp 双保险——真实工作台格子（`repeat(N,minmax(0,1fr))` 随窗口缩放）保持现有观感，编辑器缩略按比例缩印（前提：`.dash-cell` 与编辑器 `.le-cell` 均为 `container-type: size`）。老数据无 variant 字段 → 回退 defaultVariant 天然兼容；`dashboard_mid_content` 已废弃不再被 UI 读取（保留在配置结构中向后兼容）。天气模块（WeatherCard）为独立卡片，数据来自 store.state.weather（当前天气，无 7 日预报）；农历用 `utils/lunar.ts` 经典数据表算法（1900–2100，已验证与官方天文历在 1996-10 之后全部一致，更早年份为经典表与天文历的历史差异，今日展示不受影响）
 28. **侧栏默认收起（v0.1.15）：** `sidebarCollapsed` 默认 `true`（56px 图标态，hover 出名称气泡）；展开/收起按钮仅在设置开启 `sidebar_toggle` 后出现（默认关闭）；720px 以下强制恢复文字导航
 29. **关于 / 更新日志（v0.1.16，v0.3.0 改版）：** 设置「关于」区（`AboutSection.vue`）展示版本号 + 开源声明 + 内置版本历史 + 检查更新；changelog 单一来源为仓库根 `RELEASE_NOTES.md`，经 `about.rs` `include_str!` 打包进二进制（**零网络**），`get_app_info` 返回 `{version, changelog, latest_section}`。版本号运行时读 `app.package_info().version`（随 `tauri.conf.json` 烘焙），README badge 是文档侧唯一真相。升级提醒已改走**应用自动更新**链路（见约定 35：updater.rs 静默检查 + UpdateCheckDialog 弹窗），旧 `check_whats_new`/`whats_new_enabled`/`last_seen_version` 机制已移除。RELEASE_NOTES 累积式：每发版在顶部新增一节 `# vX.Y.Z 发布说明`（`version_sections()` 按 `# ` 一级标题切分，最新在前）
 30. **优先复用现成组件：** 需要下拉选择、弹窗、输入等交互控件时，先查 `src/components/` 已有通用组件（如 `AppSelect.vue` 下拉选择器、`ContextMenu.vue` 右键菜单、`useFocusTrap` 焦点陷阱），优先复用而非新写原生控件（如原生 `<select>`）——保证交互与视觉一致、避免样式重复（反例：设置「粘贴方式」曾用原生 `<select>` 加 `min-width` 撑宽，应改用 `AppSelect`）

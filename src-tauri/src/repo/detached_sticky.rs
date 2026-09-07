@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, Result};
 
 pub fn list(conn: &Connection) -> Result<Vec<DetachedSticky>> {
     let mut stmt = conn.prepare(
-        "SELECT id, slot, content, x, y, always_on_top, created_at, updated_at
+        "SELECT id, slot, content, version, x, y, always_on_top, created_at, updated_at
          FROM detached_stickies ORDER BY slot ASC",
     )?;
     let rows = stmt.query_map([], row_to_detached)?;
@@ -13,7 +13,7 @@ pub fn list(conn: &Connection) -> Result<Vec<DetachedSticky>> {
 
 pub fn get_by_slot(conn: &Connection, slot: i64) -> Result<Option<DetachedSticky>> {
     let mut stmt = conn.prepare(
-        "SELECT id, slot, content, x, y, always_on_top, created_at, updated_at
+        "SELECT id, slot, content, version, x, y, always_on_top, created_at, updated_at
          FROM detached_stickies WHERE slot = ?1",
     )?;
     let mut rows = stmt.query_map(params![slot], row_to_detached)?;
@@ -36,7 +36,8 @@ pub fn upsert(
            x = excluded.x,
            y = excluded.y,
            always_on_top = excluded.always_on_top,
-           updated_at = excluded.updated_at",
+           updated_at = excluded.updated_at,
+           version = detached_stickies.version + 1",
         params![slot, content, x, y, always_on_top, now()],
     )?;
     get_by_slot(conn, slot)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -44,9 +45,40 @@ pub fn upsert(
 
 pub fn update_content(conn: &Connection, slot: i64, content: &str) -> Result<()> {
     conn.execute(
-        "UPDATE detached_stickies SET content = ?1, updated_at = ?2 WHERE slot = ?3",
+        "UPDATE detached_stickies SET content = ?1, updated_at = ?2, version = version + 1 WHERE slot = ?3",
         params![content, now(), slot],
     )?;
+    Ok(())
+}
+
+/// 乐观锁保存浮窗便签内容（局域网同步写回）：expected_version 命中才更新 +1，否则 CONFLICT。
+pub fn update_content_with_version(
+    conn: &Connection,
+    slot: i64,
+    content: &str,
+    expected_version: Option<i64>,
+) -> Result<(), String> {
+    let affected = conn
+        .execute(
+            "UPDATE detached_stickies SET content = ?1, updated_at = ?2, version = version + 1
+             WHERE slot = ?3 AND (?4 IS NULL OR version = ?4)",
+            params![content, now(), slot, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        // 区分「slot 已收起（记录不存在）」与「版本冲突」：NOT_FOUND 不应触发重试
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM detached_stickies WHERE slot = ?1",
+                params![slot],
+                |r| r.get(0),
+            )
+            .ok();
+        return match exists {
+            None => Err(format!("NOT_FOUND: 浮窗便签 slot {slot} 不存在")),
+            Some(_) => Err(format!("CONFLICT: 浮窗便签 slot {slot} 已被他人修改，请刷新后重试")),
+        };
+    }
     Ok(())
 }
 
@@ -76,11 +108,12 @@ pub fn row_to_detached(row: &rusqlite::Row) -> Result<DetachedSticky> {
         id: row.get(0)?,
         slot: row.get(1)?,
         content: row.get(2)?,
-        x: row.get(3)?,
-        y: row.get(4)?,
-        always_on_top: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        version: row.get(3)?,
+        x: row.get(4)?,
+        y: row.get(5)?,
+        always_on_top: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -134,5 +167,39 @@ mod tests {
 
         delete_by_slot(&conn, 2).unwrap();
         assert!(get_by_slot(&conn, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn update_content_with_version_optimistic_lock() {
+        let conn = setup();
+        upsert(&conn, 1, "原始", None, None, true).unwrap();
+
+        // expected_version 命中：更新并自增 version
+        let ok = update_content_with_version(&conn, 1, "第一次改", Some(0)).unwrap();
+        assert_eq!(ok, ());
+        let s = get_by_slot(&conn, 1).unwrap().unwrap();
+        assert_eq!(s.content, "第一次改");
+        assert_eq!(s.version, 1);
+
+        // version 不匹配：返回 CONFLICT，内容不被覆盖
+        let err = update_content_with_version(&conn, 1, "冲突写入", Some(0)).unwrap_err();
+        assert!(err.starts_with("CONFLICT"));
+        let s = get_by_slot(&conn, 1).unwrap().unwrap();
+        assert_eq!(s.content, "第一次改");
+        assert_eq!(s.version, 1);
+
+        // 不带 expected_version（None）等价普通更新，照常自增
+        update_content_with_version(&conn, 1, "本地直写", None).unwrap();
+        let s = get_by_slot(&conn, 1).unwrap().unwrap();
+        assert_eq!(s.content, "本地直写");
+        assert_eq!(s.version, 2);
+    }
+
+    #[test]
+    fn update_content_with_version_reports_not_found_for_missing_slot() {
+        // slot 已收起（无记录）：NOT_FOUND 而非 CONFLICT
+        let conn = setup();
+        let err = update_content_with_version(&conn, 9, "内容", None).unwrap_err();
+        assert!(err.starts_with("NOT_FOUND"), "{err}");
     }
 }

@@ -263,6 +263,18 @@ export interface ExtensionEntry {
   expose: string[]
   /** 快捷动作（manifest.actions，能力注入） */
   actions: { id: string; title: string; surface: string }[]
+  /** 工作台模块形态声明（manifest.moduleVariants；module 形态多形态注册，空 = 单个默认形态） */
+  module_variants: ExtensionModuleVariant[]
+}
+
+/** manifest.moduleVariants 里的单个形态声明（与 Rust ModuleVariant 对齐） */
+export interface ExtensionModuleVariant {
+  id: string
+  name: string
+  minW: number
+  minH: number
+  idealW: number
+  idealH: number
 }
 
 /** 市场清单里的一条扩展（v2：R2 远端清单格式） */

@@ -3,7 +3,7 @@ use crate::repo::now;
 use rusqlite::{params, Connection, Result};
 
 const COLS: &str =
-    "id, title, done, priority, created_at, updated_at, completed_at, due_at, remind_at, remind_fired, parent_id, sort_order";
+    "id, title, done, priority, created_at, updated_at, completed_at, due_at, remind_at, remind_fired, parent_id, sort_order, version";
 
 pub fn list(conn: &Connection) -> Result<Vec<Todo>> {
     let mut stmt = conn.prepare(&format!(
@@ -56,7 +56,7 @@ pub fn get(conn: &Connection, id: i64) -> Result<Todo> {
 
 pub fn update(conn: &Connection, id: i64, title: &str, priority: i64) -> Result<Todo> {
     conn.execute(
-        "UPDATE todos SET title = ?1, priority = ?2, updated_at = ?3 WHERE id = ?4",
+        "UPDATE todos SET title = ?1, priority = ?2, updated_at = ?3, version = version + 1 WHERE id = ?4",
         params![title, priority, now(), id],
     )?;
     get(conn, id)
@@ -73,10 +73,110 @@ pub fn schedule(
     remind_at: Option<i64>,
 ) -> Result<Todo> {
     conn.execute(
-        "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0, sort_order = NULL, updated_at = ?3 WHERE id = ?4",
+        "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0, sort_order = NULL, updated_at = ?3, version = version + 1 WHERE id = ?4",
         params![due_at, remind_at, now(), id],
     )?;
     get(conn, id)
+}
+
+/// affected == 0 时区分「记录不存在」与「版本冲突」：若把 NOT_FOUND 误报成 CONFLICT，
+/// 同步端会走「刷新重试」而记录根本不存在，永远失败。label 如「待办」。
+fn not_found_or_conflict(conn: &Connection, id: i64, label: &str) -> String {
+    let exists: Option<i64> = conn
+        .query_row("SELECT 1 FROM todos WHERE id = ?1", params![id], |r| r.get(0))
+        .ok();
+    match exists {
+        None => format!("NOT_FOUND: 待办 {id} 不存在"),
+        Some(_) => format!("CONFLICT: {label} {id} 已被他人修改，请刷新后重试"),
+    }
+}
+
+/// 乐观锁更新（局域网同步写回）：仅当记录的 version == expected_version 才更新并 +1，
+/// 否则返回 CONFLICT 错误（带 prefix，供桥 handler / 扩展后端识别）。
+/// 不校验（expected = None）时等价于普通更新，供主 UI 本地写回使用。
+pub fn update_with_version(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    priority: i64,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let affected = conn
+        .execute(
+            "UPDATE todos SET title = ?1, priority = ?2, updated_at = ?3, version = version + 1
+             WHERE id = ?4 AND (?5 IS NULL OR version = ?5)",
+            params![title, priority, now(), id, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    get(conn, id).map_err(|e| e.to_string())
+}
+
+/// 乐观锁切换完成状态。expected_version 命中才翻转，否则 CONFLICT。
+pub fn toggle_with_version(
+    conn: &Connection,
+    id: i64,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let affected = conn
+        .execute(
+            "UPDATE todos SET
+               done = CASE WHEN done = 1 THEN 0 ELSE 1 END,
+               completed_at = CASE WHEN done = 1 THEN NULL ELSE strftime('%Y-%m-%d %H:%M:%f','now') END,
+               updated_at = ?1, version = version + 1
+             WHERE id = ?2 AND (?3 IS NULL OR version = ?3)",
+            params![now(), id, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    get(conn, id).map_err(|e| e.to_string())
+}
+
+/// 乐观锁删除（子待办级联）。expected_version 命中才删除，否则 CONFLICT；
+/// 返回被级联删除的子待办 id（供同步端传播级联删除），与普通 delete 语义一致。
+pub fn delete_with_version(
+    conn: &Connection,
+    id: i64,
+    expected_version: Option<i64>,
+) -> Result<Vec<i64>, String> {
+    // 先记下级联子 id（删除后经 FK ON DELETE CASCADE 消失，无法再查）
+    let kids = children_ids(conn, id).map_err(|e| e.to_string())?;
+    let affected = conn
+        .execute(
+            "DELETE FROM todos WHERE id = ?1 AND (?2 IS NULL OR version = ?2)",
+            params![id, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    Ok(kids)
+}
+
+/// 乐观锁排期。expected_version 命中才更新，否则 CONFLICT。
+pub fn schedule_with_version(
+    conn: &Connection,
+    id: i64,
+    due_at: Option<i64>,
+    remind_at: Option<i64>,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let affected = conn
+        .execute(
+            "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0, sort_order = NULL,
+               updated_at = ?3, version = version + 1
+             WHERE id = ?4 AND (?5 IS NULL OR version = ?5)",
+            params![due_at, remind_at, now(), id, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    get(conn, id).map_err(|e| e.to_string())
 }
 
 pub fn toggle(conn: &Connection, id: i64) -> Result<Todo> {
@@ -84,7 +184,7 @@ pub fn toggle(conn: &Connection, id: i64) -> Result<Todo> {
         "UPDATE todos SET
            done = CASE WHEN done = 1 THEN 0 ELSE 1 END,
            completed_at = CASE WHEN done = 1 THEN NULL ELSE strftime('%Y-%m-%d %H:%M:%f','now') END,
-           updated_at = ?1
+           updated_at = ?1, version = version + 1
          WHERE id = ?2",
         params![now(), id],
     )?;
@@ -162,6 +262,7 @@ pub fn row_to_todo(row: &rusqlite::Row) -> Result<Todo> {
         remind_fired: row.get::<_, i64>(9)? != 0,
         parent_id: row.get(10)?,
         sort_order: row.get(11)?,
+        version: row.get(12)?,
     })
 }
 
@@ -336,5 +437,125 @@ mod tests {
         let due = list_due_reminders(&conn, now).unwrap();
         let titles: Vec<&str> = due.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, vec!["到期未触发"]);
+    }
+
+    #[test]
+    fn update_with_version_optimistic_lock() {
+        let conn = setup();
+        let t = create(&conn, "原标题", None, None).unwrap();
+        assert_eq!(t.version, 0);
+
+        // 版本命中：更新并自增 version
+        let updated = update_with_version(&conn, t.id, "新标题", 1, Some(0)).unwrap();
+        assert_eq!(updated.title, "新标题");
+        assert_eq!(updated.version, 1);
+
+        // 版本不匹配：返回 CONFLICT，数据不被覆盖
+        let err = update_with_version(&conn, t.id, "冲突写入", 2, Some(0)).unwrap_err();
+        assert!(err.starts_with("CONFLICT"));
+        let t2 = get(&conn, t.id).unwrap();
+        assert_eq!(t2.title, "新标题");
+        assert_eq!(t2.version, 1);
+
+        // 不校验（None）等价普通更新
+        let local = update_with_version(&conn, t.id, "本地直写", 0, None).unwrap();
+        assert_eq!(local.title, "本地直写");
+        assert_eq!(local.version, 2);
+    }
+
+    #[test]
+    fn toggle_with_version_conflicts_on_stale_version() {
+        let conn = setup();
+        let t = create(&conn, "开关", None, None).unwrap();
+
+        let done = toggle_with_version(&conn, t.id, Some(0)).unwrap();
+        assert!(done.done);
+        assert_eq!(done.version, 1);
+
+        // 旧版本号切换：CONFLICT
+        let err = toggle_with_version(&conn, t.id, Some(0)).unwrap_err();
+        assert!(err.starts_with("CONFLICT"));
+        assert!(get(&conn, t.id).unwrap().done);
+    }
+
+    #[test]
+    fn delete_with_version_guards_stale_version() {
+        let conn = setup();
+        let t = create(&conn, "待删", None, None).unwrap();
+        // 先改一次让 version=1
+        update_with_version(&conn, t.id, "已改", 0, Some(0)).unwrap();
+
+        // 用旧版本删除：CONFLICT，记录仍存在
+        let err = delete_with_version(&conn, t.id, Some(0)).unwrap_err();
+        assert!(err.starts_with("CONFLICT"));
+        assert!(get(&conn, t.id).is_ok());
+
+        // 命中版本删除成功
+        delete_with_version(&conn, t.id, Some(1)).unwrap();
+        assert!(get(&conn, t.id).is_err());
+    }
+
+    #[test]
+    fn schedule_with_version_optimistic_lock() {
+        let conn = setup();
+        let t = create(&conn, "排期", None, None).unwrap();
+        let due = 1_800_000_000_000;
+
+        let s = schedule_with_version(&conn, t.id, Some(due), None, Some(0)).unwrap();
+        assert_eq!(s.due_at, Some(due));
+        assert_eq!(s.version, 1);
+
+        // 旧版本排期：CONFLICT
+        let err = schedule_with_version(&conn, t.id, None, None, Some(0)).unwrap_err();
+        assert!(err.starts_with("CONFLICT"));
+        assert_eq!(get(&conn, t.id).unwrap().due_at, Some(due));
+    }
+
+    #[test]
+    fn local_ui_writes_bump_version() {
+        // 主 UI 本地写（旧函数）也必须推进版本链：否则同步端持过期 expectedVersion
+        // 仍能「命中」写回，本机 UI 刚做的修改被静默覆盖
+        let conn = setup();
+        let t = create(&conn, "原始", None, None).unwrap();
+        assert_eq!(t.version, 0);
+
+        let u = update(&conn, t.id, "改标题", 2).unwrap();
+        assert_eq!(u.version, 1);
+
+        let g = toggle(&conn, t.id).unwrap();
+        assert_eq!(g.version, 2);
+
+        let s = schedule(&conn, t.id, Some(123_456), None).unwrap();
+        assert_eq!(s.version, 3);
+    }
+
+    #[test]
+    fn with_version_reports_not_found_for_missing_id() {
+        // 记录不存在必须报 NOT_FOUND 而非 CONFLICT（同步端不应反复重试一条已删记录）
+        let conn = setup();
+        let err = update_with_version(&conn, 9999, "x", 0, Some(0)).unwrap_err();
+        assert!(err.starts_with("NOT_FOUND"), "{err}");
+        let err = toggle_with_version(&conn, 9999, None).unwrap_err();
+        assert!(err.starts_with("NOT_FOUND"), "{err}");
+        let err = schedule_with_version(&conn, 9999, None, None, None).unwrap_err();
+        assert!(err.starts_with("NOT_FOUND"), "{err}");
+        let err = delete_with_version(&conn, 9999, None).unwrap_err();
+        assert!(err.starts_with("NOT_FOUND"), "{err}");
+
+        // 对照：记录存在但版本不匹配仍报 CONFLICT
+        let t = create(&conn, "存在", None, None).unwrap();
+        let err = update_with_version(&conn, t.id, "x", 0, Some(5)).unwrap_err();
+        assert!(err.starts_with("CONFLICT"), "{err}");
+    }
+
+    #[test]
+    fn delete_with_version_returns_cascade_children() {
+        let conn = setup();
+        let parent = create(&conn, "父", None, None).unwrap();
+        let kid = create(&conn, "子", Some(parent.id), None).unwrap();
+
+        let kids = delete_with_version(&conn, parent.id, None).unwrap();
+        assert_eq!(kids, vec![kid.id]);
+        assert!(get(&conn, parent.id).is_err());
     }
 }

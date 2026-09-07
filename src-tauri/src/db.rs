@@ -78,6 +78,8 @@ fn migrate(conn: &Connection) -> Result<()> {
           parent_id INTEGER REFERENCES todos(id) ON DELETE CASCADE,
           -- 手动拖拽排序位（分组内升序；NULL = 未手动排序，组内按创建时间倒序）
           sort_order INTEGER,
+          -- 乐观锁版本号（局域网同步冲突检测：每次写回 +1）
+          version INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           completed_at TEXT
@@ -87,6 +89,8 @@ fn migrate(conn: &Connection) -> Result<()> {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           slot INTEGER NOT NULL UNIQUE CHECK (slot IN (1, 2)),
           content TEXT NOT NULL DEFAULT '',
+          -- 乐观锁版本号
+          version INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
         );
@@ -98,6 +102,8 @@ fn migrate(conn: &Connection) -> Result<()> {
           x REAL,
           y REAL,
           always_on_top INTEGER NOT NULL DEFAULT 1,
+          -- 乐观锁版本号
+          version INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
         );
@@ -338,6 +344,34 @@ fn migrate(conn: &Connection) -> Result<()> {
     // 待办手动排序位（v0.4.3，拖拽排序；NULL = 未手动排序）
     if !todo_cols.iter().any(|c| c == "sort_order") {
         conn.execute("ALTER TABLE todos ADD COLUMN sort_order INTEGER", [])?;
+    }
+    // 乐观锁版本号（局域网同步冲突检测：写回时 WHERE version 比对，每次 +1）
+    if !todo_cols.iter().any(|c| c == "version") {
+        conn.execute(
+            "ALTER TABLE todos ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    // 便签/浮窗便签表补乐观锁版本号
+    let sticky_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(stickies)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    if !sticky_cols.iter().any(|c| c == "version") {
+        conn.execute(
+            "ALTER TABLE stickies ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    let detached_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(detached_stickies)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    if !detached_cols.iter().any(|c| c == "version") {
+        conn.execute(
+            "ALTER TABLE detached_stickies ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_todos_parent ON todos(parent_id)",

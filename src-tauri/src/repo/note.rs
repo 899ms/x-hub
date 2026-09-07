@@ -38,10 +38,16 @@ pub fn list_meta(conn: &Connection) -> Result<Vec<Note>> {
 }
 
 pub fn update(conn: &Connection, id: i64, title: &str, content: &str) -> Result<Note> {
-    conn.execute(
+    let affected = conn.execute(
         "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
         params![title, content, now(), id],
     )?;
+    if affected == 0 {
+        // 带 NOT_FOUND 前缀：扩展桥调用方据此与服务器错误区分，不再盲目重试
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 笔记 {id} 不存在"
+        )));
+    }
     get(conn, id)
 }
 

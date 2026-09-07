@@ -46,10 +46,16 @@ pub fn update(
     icon: Option<&str>,
     args: Option<&str>,
 ) -> Result<Resource> {
-    conn.execute(
+    let affected = conn.execute(
         "UPDATE resources SET kind = ?1, name = ?2, target = ?3, category = ?4, icon = ?5, args = ?6, updated_at = ?7 WHERE id = ?8",
         params![kind_to_str(&kind), name, target, category, icon, args, now(), id],
     )?;
+    if affected == 0 {
+        // 带 NOT_FOUND 前缀：扩展桥调用方据此与服务器错误区分，不再盲目重试
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 资源 {id} 不存在"
+        )));
+    }
     get(conn, id)
 }
 

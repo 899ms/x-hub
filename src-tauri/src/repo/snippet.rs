@@ -32,10 +32,16 @@ pub fn create(conn: &Connection, title: &str, content: &str) -> Result<Snippet> 
 }
 
 pub fn update(conn: &Connection, id: i64, title: &str, content: &str) -> Result<Snippet> {
-    conn.execute(
+    let affected = conn.execute(
         "UPDATE snippets SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
         params![title, content, now(), id],
     )?;
+    if affected == 0 {
+        // 带 NOT_FOUND 前缀：扩展桥调用方据此与服务器错误区分，不再盲目重试
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 提示词 {id} 不存在"
+        )));
+    }
     get(conn, id)
 }
 
@@ -45,10 +51,15 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
 }
 
 pub fn toggle_pin(conn: &Connection, id: i64) -> Result<Snippet> {
-    conn.execute(
+    let affected = conn.execute(
         "UPDATE snippets SET is_pinned = CASE WHEN is_pinned = 1 THEN 0 ELSE 1 END, updated_at = ?1 WHERE id = ?2",
         params![now(), id],
     )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "NOT_FOUND: 提示词 {id} 不存在"
+        )));
+    }
     get(conn, id)
 }
 
