@@ -212,10 +212,10 @@ npm run tauri:test    # Rust 单元测试（Windows 必须走此包装脚本，�
 
 每次发版从 README 向下同步版本号（`README.md` 徽章 → `package.json` → `src-tauri/tauri.conf.json` → `src-tauri/Cargo.toml` → `AGENTS.md` 头部），并：
 
-1. 在 `RELEASE_NOTES.md` **顶部**新增一节 `# vX.Y.Z 发布说明`（累积式，旧版依次排后，勿覆盖历史）。
+1. 在 `RELEASE_NOTES.md` **顶部**新增一节 `# vX.Y.Z 发布说明`（累积式，旧版依次排后，勿覆盖历史）。若改动要**并入尚未发布的当前版本**（版本号不变，如 v0.5.2 的 tag 已打但 release 未 publish），则不新增节，直接就地修订该节条目。
 2. 同步 `README.md` 版本徽章与 `DESIGN.md` 顶部「版本对齐」。
-3. git tag 用 `vX.Y.Z` 触发 `.github/workflows/release.yml`（tag 号须与 `tauri.conf.json` version 一致，否则打包产物版本漂移）。
-4. GitHub Release **正文 = `RELEASE_NOTES.md` 的 `# vX.Y.Z 发布说明` 章节**，由 `release.yml` 自动提取（到下一个一级标题为止；段落缺失才回退 tag annotation）。tag annotation 不再承担 release notes，打 tag 无需写说明；单独改已发布 release 正文用 `gh release edit vX.Y.Z --notes-file <文件>`（v0.5.1 起约定，此前正文误用 commit message）。
+3. git tag 用 `vX.Y.Z` 触发 `.github/workflows/release.yml`（tag 号须与 `tauri.conf.json` version 一致，否则打包产物版本漂移）。**`src-tauri/Cargo.lock` 必须一并提交**：改 `Cargo.toml` 版本号时 cargo 会顺带更新 lock 里 `name = "app"` 的 version，发版提交漏掉它就使远端 tag 的 lock 停在旧版本（v0.5.2 就是这样补交过一次；自查 `git show <tag>:src-tauri/Cargo.lock`）。
+4. GitHub Release **正文 = `RELEASE_NOTES.md` 的 `# vX.Y.Z 发布说明` 章节**，由 `release.yml` 自动提取（到下一个一级标题为止；段落缺失才回退 tag annotation）。tag annotation 不再承担 release notes，打 tag 无需写说明；单独改已发布 release 正文用 `gh release edit vX.Y.Z --notes-file <文件>`（v0.5.1 起约定，此前正文误用 commit message）。**坑：`action-gh-release` 只在「创建 release」时用 `body_path`，对已存在的 release（含 draft）只更新产物、不覆盖正文**——移动 tag 重跑（`git tag -f` + `git push -f`）后正文仍是旧文案，必须再手动 `gh release edit --notes-file` 补一次；发版后核对 `gh release view vX.Y.Z --json body`，别默认它已跟着 RELEASE_NOTES 走。
 
 ## 注意事项
 
