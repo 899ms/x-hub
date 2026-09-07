@@ -148,6 +148,15 @@ export const DASH_MODULES: DashModuleDef[] = [
   },
 ]
 
+/**
+ * 编辑器画布内直接挂载真实组件（所见即所得）的模块。
+ * 其余模块（含扩展 module）用 DashModulePreview 做真实卡片结构的等比缩印；
+ * clock / weather 在形态切换浮层的缩略图里也走 DashModulePreview 的静态形态分支。
+ */
+export function isLivePreview(modId: string): boolean {
+  return modId === 'clock' || modId === 'weather'
+}
+
 const moduleMap = new Map(DASH_MODULES.map((m) => [m.id, m]))
 
 /** 扩展 module 动态注册表（运行时从 listExtensions 填充；id 用 `ext:<扩展id>` 前缀与内置模块区分） */

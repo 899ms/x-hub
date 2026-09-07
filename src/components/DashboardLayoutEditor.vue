@@ -10,19 +10,22 @@ import {
   dashModuleVariants,
   dashVariantDef,
   findFreeSpot,
+  isLivePreview,
   useDashboardLayout,
   type DashPlacement,
   type DashVariantDef,
 } from '../composables/useDashboardLayout'
-import { dashPreviewHtml, isLivePreview } from '../utils/dashPreviews'
+import { startPreviewTick, stopPreviewTick } from '../composables/useDashPreviewData'
 import ClockCard from './ClockCard.vue'
+import DashModulePreview from './DashModulePreview.vue'
 import WeatherCard from './WeatherCard.vue'
 
 /**
  * 工作台布局编辑器（形态驱动 + 所见即所得）：
- * - 12×15 棋盘，编辑器即等比缩略图（行高 1fr 自适应，卡片内容容器查询单位随格子缩印）
+ * - 12×15 棋盘，列间距 / 卡片圆角与真实工作台一致（gap 16、radius-lg），画布即真实工作台的等比缩略
  * - 模块库：多形态模块先选形态再拖入（拖入按所选形态推荐尺寸落位）
- * - 画布：clock/weather 挂载真实组件，其余模块渲染样式化预览；每格带适配徽标
+ * - 画布：clock/weather 挂载真实组件，其余模块用 DashModulePreview（结构逐一对齐真实卡片，
+ *   尺寸按 --dp-k 等比缩印）；每格带适配徽标
  *   绿=正好铺满 / 黄=紧凑可读 / 蓝=弹性空间 / 红=低于最小（缩放钳制到形态最小尺寸）
  * - 卡片 ⇄ 切换形态：格子小于新形态最小尺寸自动补足并就近让位
  * - 草稿语义：进入快照，确认 commitEdit 落盘，未确认切走 cancelEdit 回滚
@@ -32,11 +35,50 @@ const emit = defineEmits<{ (e: 'done'): void }>()
 
 const layout = useDashboardLayout()
 
-const GAP = 8
+/** 画布列间距与真实工作台 .dash-grid 取齐（16px），保证缩印比例一致 */
+const GAP = 16
+const REAL_GAP = 16
 const MIN_ROWS = 15
 
 const canvasRef = ref<HTMLElement | null>(null)
 const gridRef = ref<HTMLElement | null>(null)
+
+// ---- 等比缩印系数 ----
+// 预览内容一律按「真实卡片像素 × k」绘制，k = 编辑器每列像素 ÷ 真实工作台每列像素。
+// 真实每列像素按主区宽度推算：窗口宽 − 实际侧栏宽（收起 56 / 展开 220，直接读 DOM，
+// 侧栏开合会改变画布宽并顺带触发本函数重算）− 右内边距 20 − 列间距。
+const dpK = ref(0.78)
+const realColPx = ref(96)
+
+function sidebarWidth(): number {
+  const el = document.querySelector('.sidebar') as HTMLElement | null
+  const w = el?.offsetWidth ?? 0
+  // 窄屏（<720px）侧栏叠在内容上、宽度不再是网格列宽的一部分，异常值一律回退收起态
+  return w >= 40 && w <= 320 ? w : 56
+}
+
+function recomputeScale() {
+  const el = gridRef.value
+  if (!el) return
+  const w = el.clientWidth
+  if (w <= 0) return
+  const editorCol = (w - (DASH_COLS - 1) * GAP) / DASH_COLS
+  const dashWidth = Math.max(640, window.innerWidth - sidebarWidth() - 20)
+  realColPx.value = (dashWidth - (DASH_COLS - 1) * REAL_GAP) / DASH_COLS
+  dpK.value = Math.min(1, Math.max(0.5, editorCol / realColPx.value))
+}
+
+let resizeObs: ResizeObserver | null = null
+
+/** 形态浮层缩略图：框宽代表该形态的推荐宽度，故系数按「缩略框宽 ÷ 真实卡片宽」单独算 */
+function thumbK(vd: DashVariantDef): number {
+  const boxW = 62
+  const realW = vd.idealW * realColPx.value + (vd.idealW - 1) * REAL_GAP
+  return Math.min(1, Math.max(0.34, boxW / realW))
+}
+function thumbRatio(vd: DashVariantDef): string {
+  return `${vd.idealW} / ${vd.idealH}`
+}
 
 // 模块库当前选中的形态（多形态模块才有意义）
 const libVariant = ref<Record<string, string>>({})
@@ -330,11 +372,21 @@ function confirmDone() {
 
 onMounted(() => {
   layout.beginEdit()
+  // 预览里的时间 / 农历 / 倒计时剩余按分钟推进（离开编辑器即停，无常驻定时器）
+  startPreviewTick()
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', onPointerUp)
   window.addEventListener('pointerdown', onGlobalPointerDown, true)
+  recomputeScale()
+  if (gridRef.value) {
+    resizeObs = new ResizeObserver(recomputeScale)
+    resizeObs.observe(gridRef.value)
+  }
 })
 onUnmounted(() => {
+  stopPreviewTick()
+  resizeObs?.disconnect()
+  resizeObs = null
   if (!committed.value) layout.cancelEdit()
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
@@ -415,7 +467,10 @@ function previewComponent(id: string) {
           ref="gridRef"
           class="le-grid"
           :class="{ 'audit-on': auditOn }"
-          :style="{ gridTemplateRows: `repeat(${rowCount}, minmax(0, 1fr))` }"
+          :style="{
+            gridTemplateRows: `repeat(${rowCount}, minmax(0, 1fr))`,
+            '--dp-k': dpK,
+          }"
         >
           <div
             v-for="p in layout.placements.value"
@@ -433,8 +488,10 @@ function previewComponent(id: string) {
               :preview="true"
               class="le-live"
             />
-            <!-- 其余模块：样式化静态预览 -->
-            <div v-else class="le-pv" v-html="dashPreviewHtml(p.id, p.variant)"></div>
+            <!-- 其余模块：真实卡片结构的等比缩印（--dp-k 由画布列宽推得） -->
+            <div v-else class="le-pv">
+              <DashModulePreview :mod-id="p.id" :variant="p.variant" />
+            </div>
 
             <span class="le-cell-tag">{{ dashModuleTitle(p.id) }}<template v-if="variantName(p)"> · {{ variantName(p) }}</template></span>
             <div class="le-cell-ctrl">
@@ -501,8 +558,13 @@ function previewComponent(id: string) {
           :class="{ on: variantPop.variant === vd.id }"
           @click="applyVariant(vd.id)"
         >
-          <div class="le-pop-thumb">
-            <div class="le-pop-thumb-in" v-html="dashPreviewHtml(variantPop.id, vd.id)"></div>
+          <div
+            class="le-pop-thumb"
+            :style="{ aspectRatio: thumbRatio(vd), '--dp-k': thumbK(vd) }"
+          >
+            <div class="le-pop-thumb-in">
+              <DashModulePreview :mod-id="variantPop.id" :variant="vd.id" />
+            </div>
           </div>
           <div class="le-pop-info">
             <div class="le-pop-name">
@@ -716,18 +778,19 @@ function previewComponent(id: string) {
 .le-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 8px;
+  gap: 16px;
   height: 100%;
 }
 
-/* 卡片格：容器查询容器，cq 单位随格子缩放 */
+/* 卡片格：与真实工作台 .dash-cell 里的 .card 同款材质（玻璃面 + 12px 圆角 + 落影），
+ * 适配状态用彩色描边只在 hover / 开启填充审计时出现，避免画布被四色边框糊满而失真 */
 .le-cell {
   position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--frost-surface);
   box-shadow: var(--frost-edge), var(--shadow-card);
   cursor: grab;
@@ -750,13 +813,16 @@ function previewComponent(id: string) {
 .le-cell.fit-below {
   border-color: var(--c-red-ink);
 }
-.le-cell.fit-mid {
+.le-cell:hover.fit-mid,
+.audit-on .le-cell.fit-mid {
   border-color: var(--c-yellow-ink);
 }
-.le-cell.fit-room {
+.le-cell:hover.fit-room,
+.audit-on .le-cell.fit-room {
   border-color: var(--c-blue-ink);
 }
-.le-cell.fit-ideal {
+.le-cell:hover.fit-ideal,
+.audit-on .le-cell.fit-ideal {
   border-color: var(--c-green-ink);
 }
 
@@ -773,7 +839,7 @@ function previewComponent(id: string) {
   border: none;
   box-shadow: none;
   background: transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
 }
 
 .le-cell-tag {
@@ -909,7 +975,7 @@ function previewComponent(id: string) {
 }
 .le-preview {
   border: 2px dashed var(--brand-500);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--brand-50);
   opacity: 0.75;
   pointer-events: none;
@@ -930,450 +996,6 @@ function previewComponent(id: string) {
   font-size: 0.8125rem;
   color: var(--text-3);
   pointer-events: none;
-}
-
-/* ===== 样式化预览（dp-*，编辑器与形态浮层共用） ===== */
-.le-cell :deep(.dp-card),
-.le-pop-thumb-in :deep(.dp-card) {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 3cqh;
-  padding: 4cqh 4cqw;
-  overflow: hidden;
-}
-.le-cell :deep(.dp-title),
-.le-pop-thumb-in :deep(.dp-title) {
-  font-size: 4.2cqh;
-  font-weight: 700;
-  color: var(--text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.le-cell :deep(.dp-lines),
-.le-pop-thumb-in :deep(.dp-lines) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-evenly;
-  gap: 2cqh;
-}
-.le-cell :deep(.dp-lines i),
-.le-pop-thumb-in :deep(.dp-lines i) {
-  height: 1.6cqh;
-  border-radius: 2px;
-  background: var(--text-3);
-  opacity: 0.25;
-  display: block;
-}
-.le-cell :deep(.dp-bar),
-.le-pop-thumb-in :deep(.dp-bar) {
-  display: flex;
-  align-items: center;
-  gap: 3cqw;
-}
-.le-cell :deep(.dp-bar span),
-.le-pop-thumb-in :deep(.dp-bar span) {
-  width: 22%;
-  font-size: 2.6cqh;
-  font-weight: 600;
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.le-cell :deep(.dp-bar i),
-.le-pop-thumb-in :deep(.dp-bar i) {
-  flex: 1;
-  height: 2.6cqh;
-  background: var(--bg-card-soft);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-}
-.le-cell :deep(.dp-bar i b),
-.le-pop-thumb-in :deep(.dp-bar i b) {
-  display: block;
-  height: 100%;
-  border-radius: var(--radius-pill);
-  background: var(--brand-500);
-}
-.le-cell :deep(.dp-bar em),
-.le-pop-thumb-in :deep(.dp-bar em) {
-  width: 20%;
-  text-align: right;
-  font-size: 2.4cqh;
-  font-weight: 700;
-  font-style: normal;
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-list),
-.le-pop-thumb-in :deep(.dp-list) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-evenly;
-  gap: 2cqh;
-}
-.le-cell :deep(.dp-row),
-.le-pop-thumb-in :deep(.dp-row) {
-  display: flex;
-  align-items: center;
-  gap: 2.4cqw;
-  font-size: 2.6cqh;
-  color: var(--text-2);
-  min-width: 0;
-}
-.le-cell :deep(.dp-row b),
-.le-pop-thumb-in :deep(.dp-row b) {
-  font-weight: 600;
-  color: var(--text-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.le-cell :deep(.dp-row span),
-.le-pop-thumb-in :deep(.dp-row span) {
-  margin-left: auto;
-  font-size: 2.2cqh;
-  color: var(--text-3);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.le-cell :deep(.dp-dot),
-.le-pop-thumb-in :deep(.dp-dot) {
-  flex-shrink: 0;
-  width: 1.9cqh;
-  height: 1.9cqh;
-  border-radius: 50%;
-  background: var(--c-yellow-ink);
-}
-.le-cell :deep(.dp-dot.red),
-.le-pop-thumb-in :deep(.dp-dot.red) {
-  background: var(--c-red-ink);
-}
-.le-cell :deep(.dp-dot.blue),
-.le-pop-thumb-in :deep(.dp-dot.blue) {
-  background: var(--c-blue-ink);
-}
-.le-cell :deep(.dp-ring),
-.le-pop-thumb-in :deep(.dp-ring) {
-  width: 14cqh;
-  height: 14cqh;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 3.8cqh;
-  font-weight: 700;
-  color: var(--text-on-accent);
-  background: var(--brand-500);
-  font-variant-numeric: tabular-nums;
-}
-.le-cell :deep(.dp-txt),
-.le-pop-thumb-in :deep(.dp-txt) {
-  display: flex;
-  flex-direction: column;
-  gap: 1cqh;
-  min-width: 0;
-}
-.le-cell :deep(.dp-txt b),
-.le-pop-thumb-in :deep(.dp-txt b) {
-  font-size: 3cqh;
-  color: var(--text-1);
-}
-.le-cell :deep(.dp-txt span),
-.le-pop-thumb-in :deep(.dp-txt span) {
-  font-size: 2.4cqh;
-  color: var(--text-3);
-}
-.le-cell :deep(.dp-chips),
-.le-pop-thumb-in :deep(.dp-chips) {
-  flex: 1;
-  display: flex;
-  flex-wrap: wrap;
-  align-content: center;
-  gap: 1.6cqh;
-}
-.le-cell :deep(.dp-chips i),
-.le-pop-thumb-in :deep(.dp-chips i) {
-  font-size: 2.3cqh;
-  font-weight: 600;
-  color: var(--text-2);
-  background: var(--bg-card-soft);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-pill);
-  padding: 0.6cqh 2.2cqw;
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-add),
-.le-pop-thumb-in :deep(.dp-add) {
-  margin-top: auto;
-  font-size: 2.5cqh;
-  font-weight: 600;
-  color: var(--brand-500);
-}
-.le-cell :deep(.dp-ext-name),
-.le-pop-thumb-in :deep(.dp-ext-name) {
-  margin-top: auto;
-  font-size: 2.4cqh;
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* 时钟形态缩略 */
-.le-cell :deep(.dp-clock-big),
-.le-cell :deep(.dp-clock-lunar),
-.le-cell :deep(.dp-clock-month),
-.le-cell :deep(.dp-clock-mini),
-.le-pop-thumb-in :deep(.dp-clock-big),
-.le-pop-thumb-in :deep(.dp-clock-lunar),
-.le-pop-thumb-in :deep(.dp-clock-month),
-.le-pop-thumb-in :deep(.dp-clock-mini) {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 2cqh;
-  padding: 3cqh 3cqw;
-  overflow: hidden;
-}
-.le-cell :deep(.dp-c-time),
-.le-pop-thumb-in :deep(.dp-c-time) {
-  font-size: 13cqh;
-  font-weight: 700;
-  line-height: 1.05;
-  letter-spacing: -0.03em;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-1);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-c-date),
-.le-pop-thumb-in :deep(.dp-c-date) {
-  font-size: 2.9cqh;
-  font-weight: 500;
-  color: var(--text-3);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-c-wx),
-.le-pop-thumb-in :deep(.dp-c-wx) {
-  font-size: 2.9cqh;
-  font-weight: 600;
-  color: var(--text-2);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-c-quote),
-.le-pop-thumb-in :deep(.dp-c-quote) {
-  margin-top: auto;
-  font-size: 2.6cqh;
-  font-weight: 600;
-  background: linear-gradient(100deg, var(--brand-500), #f472b6 45%, #38bdf8 80%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.le-cell :deep(.dp-l-time),
-.le-pop-thumb-in :deep(.dp-l-time) {
-  font-size: 10cqh;
-  font-weight: 700;
-  line-height: 1.05;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-1);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-l-solar),
-.le-pop-thumb-in :deep(.dp-l-solar) {
-  font-size: 2.9cqh;
-  font-weight: 500;
-  color: var(--text-2);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-l-lunar),
-.le-pop-thumb-in :deep(.dp-l-lunar) {
-  margin-top: auto;
-  font-size: 4.4cqh;
-  font-weight: 700;
-  color: var(--brand-500);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-clock-lunar hr),
-.le-pop-thumb-in :deep(.dp-clock-lunar hr) {
-  border: none;
-  border-top: 1px solid var(--border-soft);
-  margin: 0;
-}
-.le-cell :deep(.dp-l-extra),
-.le-pop-thumb-in :deep(.dp-l-extra) {
-  font-size: 2.6cqh;
-  color: var(--text-3);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-m-head),
-.le-pop-thumb-in :deep(.dp-m-head) {
-  flex-shrink: 0;
-  font-size: 3.6cqh;
-  font-weight: 700;
-  color: var(--text-1);
-}
-.le-cell :deep(.dp-m-grid),
-.le-pop-thumb-in :deep(.dp-m-grid) {
-  flex: 1;
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  grid-auto-rows: 1fr;
-  gap: 0.8cqh;
-}
-.le-cell :deep(.dp-m-grid i),
-.le-pop-thumb-in :deep(.dp-m-grid i) {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 2.3cqh;
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-2);
-  border-radius: 2px;
-  min-width: 0;
-  overflow: hidden;
-}
-.le-cell :deep(.dp-m-wd),
-.le-pop-thumb-in :deep(.dp-m-wd) {
-  color: var(--text-4) !important;
-  font-weight: 600;
-}
-.le-cell :deep(.dp-m-today),
-.le-pop-thumb-in :deep(.dp-m-today) {
-  background: var(--brand-500);
-  color: var(--text-on-accent) !important;
-  font-weight: 700;
-}
-.le-cell :deep(.dp-m-other),
-.le-pop-thumb-in :deep(.dp-m-other) {
-  color: var(--text-3) !important;
-  opacity: 0.4;
-}
-.le-cell :deep(.dp-clock-mini),
-.le-pop-thumb-in :deep(.dp-clock-mini) {
-  flex-direction: row;
-  align-items: center;
-  justify-content: center;
-  gap: 2cqw;
-  font-size: 12cqh;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-1);
-  padding: 0;
-}
-.le-cell :deep(.dp-clock-mini span),
-.le-pop-thumb-in :deep(.dp-clock-mini span) {
-  font-size: 6cqh;
-  font-weight: 600;
-  color: var(--brand-500);
-}
-
-/* 天气形态缩略 */
-.le-cell :deep(.dp-w-now),
-.le-pop-thumb-in :deep(.dp-w-now) {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  gap: 4cqw;
-  padding: 3cqh 3cqw;
-}
-.le-cell :deep(.dp-w-ic),
-.le-pop-thumb-in :deep(.dp-w-ic) {
-  font-size: 8cqh;
-}
-.le-cell :deep(.dp-w-now b),
-.le-pop-thumb-in :deep(.dp-w-now b) {
-  font-size: 8cqh;
-  font-weight: 700;
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-}
-.le-cell :deep(.dp-w-now span),
-.le-pop-thumb-in :deep(.dp-w-now span) {
-  margin-left: auto;
-  font-size: 3cqh;
-  color: var(--text-3);
-}
-.le-cell :deep(.dp-w-detail),
-.le-pop-thumb-in :deep(.dp-w-detail) {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 2.5cqh;
-  padding: 3cqh 3cqw;
-}
-.le-cell :deep(.dp-wd-head),
-.le-pop-thumb-in :deep(.dp-wd-head) {
-  display: flex;
-  align-items: baseline;
-  gap: 3cqw;
-  min-width: 0;
-}
-.le-cell :deep(.dp-wd-head b),
-.le-pop-thumb-in :deep(.dp-wd-head b) {
-  font-size: 8cqh;
-  font-weight: 700;
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-}
-.le-cell :deep(.dp-wd-head span),
-.le-pop-thumb-in :deep(.dp-wd-head span) {
-  font-size: 3cqh;
-  color: var(--text-2);
-  white-space: nowrap;
-}
-.le-cell :deep(.dp-wd-head i),
-.le-pop-thumb-in :deep(.dp-wd-head i) {
-  margin-left: auto;
-  font-size: 2.8cqh;
-  font-style: normal;
-  color: var(--text-3);
-}
-.le-cell :deep(.dp-wd-grid),
-.le-pop-thumb-in :deep(.dp-wd-grid) {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-auto-rows: 1fr;
-  gap: 1.6cqh 3cqw;
-}
-.le-cell :deep(.dp-wd-grid i),
-.le-pop-thumb-in :deep(.dp-wd-grid i) {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 0.4cqh;
-  background: var(--bg-card-soft);
-  border-radius: 4px;
-  padding: 1cqh 1.6cqw;
-  min-width: 0;
-}
-.le-cell :deep(.dp-wd-grid b),
-.le-pop-thumb-in :deep(.dp-wd-grid b) {
-  font-size: 3.4cqh;
-  font-weight: 700;
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.le-cell :deep(.dp-wd-grid span),
-.le-pop-thumb-in :deep(.dp-wd-grid span) {
-  font-size: 2.3cqh;
-  color: var(--text-3);
-  white-space: nowrap;
 }
 
 /* ===== 拖拽浮层 ===== */
@@ -1441,11 +1063,12 @@ function previewComponent(id: string) {
   background: var(--brand-50);
   box-shadow: inset 0 0 0 1px var(--brand-500);
 }
+/* 缩略框按该形态真实宽高比（idealW / idealH）成形，内容按 thumbK 等比缩印真实卡片 */
 .le-pop-thumb {
   flex-shrink: 0;
-  width: 58px;
-  height: 46px;
-  border-radius: 6px;
+  width: 62px;
+  height: auto;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-soft);
   background: var(--frost-surface);
   overflow: hidden;
