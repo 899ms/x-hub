@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.5.2"
+version = "0.5.3"
 description = "本地个人效率工作台"
 authors = ["you"]
 license = ""
@@ -26,7 +26,6 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-log = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-notification = "2"
 opener = "0.7"
 rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 dirs = "6"

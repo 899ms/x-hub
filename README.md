@@ -10,7 +10,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-6.x-3178c6?logo=typescript&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-1.77+-dea584?logo=rust&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-local-003b57?logo=sqlite&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.5.2-blue)
+![Version](https://img.shields.io/badge/version-0.5.3-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -77,7 +77,7 @@
 | 前端 | Vue 3（`<script setup>`）+ TypeScript + Tailwind CSS 4 + Vite 8 |
 | 图标 | lucide-vue-next（按需引入，颜色继承 currentColor） |
 | 表单 | reka-ui 无头组件（DatePicker / TimeField / NumberField，样式自绘） |
-| 后端 | Rust（Tauri 2）+ rusqlite（SQLite, WAL 模式）+ sysinfo（系统资源）+ tauri-plugin-notification（系统通知）+ reqwest（OpenAI 兼容 SSE 流式）+ keyring（API Key 系统钥匙串） |
+| 后端 | Rust（Tauri 2）+ rusqlite（SQLite, WAL 模式）+ sysinfo（系统资源）+ 自绘右下角通知窗（跨 Win10/11 一致，见 notify.rs）+ reqwest（OpenAI 兼容 SSE 流式）+ keyring（API Key 系统钥匙串） |
 | 状态 | `reactive()` + `readonly()` 自定义 store（无 Pinia） |
 | 样式 | 设计令牌 CSS 变量（Bento 风格，见 `DESIGN.md`），三轴主题（模式 × 预设 × 强调色） |
 
@@ -122,7 +122,7 @@ src-tauri/
     ├── process.rs           # 程序启动 / URL 打开 / 提权（UAC）
     ├── shortcut.rs / tray.rs
     ├── sysmon.rs            # 系统资源监视（CPU/内存）
-    ├── notify.rs            # 系统通知封装（tauri-plugin-notification）
+    ├── notify.rs            # 右下角自绘通知窗（跨 Win10/11，前端 NoticeOverlay.vue 渲染卡片）
     ├── chat.rs              # OpenAI 兼容 SSE 流式对话客户端 + API Key 钥匙串存取
     ├── countdown_ticker.rs  # 倒计时后台驱动线程（1s 轮询 → 通知 + 事件 + 顺延）
     ├── countdown_window.rs  # 倒计时圆形浮窗（创建/销毁/位置持久化）

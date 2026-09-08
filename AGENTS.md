@@ -1,6 +1,6 @@
 # x-hub (个人效率工作台)
 
-**生成:** 2026-08-29 | **分支:** master | **版本:** 0.5.2
+**生成:** 2026-08-29 | **分支:** master | **版本:** 0.5.3
 
 ## 概述
 
@@ -87,7 +87,7 @@ x-hub/
 │   │   ├── countdown_window.rs # 倒计时圆形浮窗（创建/销毁/位置持久化，countdown-{id}）
 │   │   ├── sticky_window.rs    # 便签脱离浮窗（创建/销毁，sticky-{id}）
 │   │   ├── float_window.rs     # 通用整列表浮窗（prompt-float 提示词 / todo-float 待办）
-│   │   ├── notify.rs           # 系统通知封装（tauri-plugin-notification）
+│   │   ├── notify.rs           # 右下角自绘通知窗（独立 WebView「notice」，跨 Win10/11 一致；替代 tauri-plugin-notification，前端 NoticeOverlay.vue 渲染卡片）
 │   │   └── repo/               # 数据访问层：resource, note, todo, sticky, detached_sticky, snippet, tag, countdown, chat, clipboard
 │   ├── capabilities/default.json  # Tauri 权限声明（含 start-dragging/global-shortcut/dialog/notification）
 │   └── tauri.conf.json         # 窗口配置（无边框、1400x900）
@@ -171,7 +171,7 @@ x-hub/
 17. **AI 用量：** 已拆分为 service 扩展 `com.x-hub.token-stats`（实时读 opencode 数据库聚合，宿主零 token 代码）；详见 `x-hub-extensions/extensions/com.x-hub.token-stats`。宿主侧旧用量代码（`usage.rs`/TokenStatsCard/用量视图）已全部移除，侧栏无「用量」入口
 18. **系统监视：** `sysmon.rs` 用 sysinfo crate 返回 CPU/内存，2s 轮询（SysMonitorCard.vue）
 19. **GPU 性能约束（v0.1.13）：** 常驻卡片默认禁用 `backdrop-filter`，一律用 `--frost-surface` 静态烘焙渐变模拟毛玻璃；`backdrop-filter` 只允许出现在瞬态层（弹窗/菜单/下拉/tooltip）+ 沉浸模式的静态 `.card`（opt-in 受控例外，见 `docs/adr/0003`）；周期性更新的进度条用 `transform: scaleX` 而非 `width`，避免触发布局重排
-20. **倒计时驱动（v0.1.13）：** 到期判定、通知、顺延全部在 Rust `countdown_ticker.rs` 后台线程（1s 轮询），**不能依赖前端 setInterval**（WebView 隐藏/最小化会节流）；前端只做展示与用户操作。到点发系统通知（tauri-plugin-notification）+ emit `countdown-fired` / `countdowns-changed` 事件；完全退出/休眠期间错过的提醒（超 5s）静默顺延不补发。`once` 到点置 finished 灰态，`daily` 按 24h 顺延，`interval` 按 `interval_minutes` 顺延。**计时门控：倒计时计时 ⇔ 工作台有倒计时卡片 ∨ 该倒计时已浮窗**——前端按「已提交」的 dashboard_layout（编辑器草稿不算）在主窗口调 `set_countdown_card_visible` 上报（`useDashboardLayout.ts` 的 syncCommitted），卡片不在场时后端冻结全部非浮窗倒计时（`repo/countdown.rs::auto_pause_*`，`auto_paused` 列标记自动冻结、与手动暂停区分），卡片恢复显示或浮窗浮起/收起时按暂停语义恢复/冻结对应倒计时（`resume_if_auto_paused`/`auto_pause_single`）；`CardVisible(AtomicBool)` 默认 false，防前端未就绪时倒计时抢跑到点
+20. **倒计时驱动（v0.1.13）：** 到期判定、通知、顺延全部在 Rust `countdown_ticker.rs` 后台线程（1s 轮询），**不能依赖前端 setInterval**（WebView 隐藏/最小化会节流）；前端只做展示与用户操作。到点发自绘右下角通知（`notify.rs::show_notice`，跨 Win10/11 一致）+ emit `countdown-fired` / `countdowns-changed` 事件；完全退出/休眠期间错过的提醒（超 5s）静默顺延不补发。`once` 到点置 finished 灰态，`daily` 按 24h 顺延，`interval` 按 `interval_minutes` 顺延。**计时门控：倒计时计时 ⇔ 工作台有倒计时卡片 ∨ 该倒计时已浮窗**——前端按「已提交」的 dashboard_layout（编辑器草稿不算）在主窗口调 `set_countdown_card_visible` 上报（`useDashboardLayout.ts` 的 syncCommitted），卡片不在场时后端冻结全部非浮窗倒计时（`repo/countdown.rs::auto_pause_*`，`auto_paused` 列标记自动冻结、与手动暂停区分），卡片恢复显示或浮窗浮起/收起时按暂停语义恢复/冻结对应倒计时（`resume_if_auto_paused`/`auto_pause_single`）；`CardVisible(AtomicBool)` 默认 false，防前端未就绪时倒计时抢跑到点
 21. **倒计时浮窗（v0.1.13）：** 每个倒计时可浮起为独立透明圆窗（label `countdown-{id}`，300×340 固定、无边框、置顶、skip_taskbar），圆形水位随剩余比例下降 + 双层正弦波滚动动画；浮起状态与位置持久化在 `countdowns` 表，重启恢复；`once` 到点自动收窗。App.vue 按 label 前缀路由到 `CountdownFloat.vue`
 22. **倒计时提示音：** 默认关闭（`countdown_sound` 配置，设置视图开关）；开启后前端 WebAudio 合成双音（`utils/chime.ts`，无外部音频文件），仅主窗口播放避免多窗重音
 23. **reka-ui（^2.10.3）组件：** 仅用于复杂输入（DatePicker 定时日期 / TimeField 时:分 / NumberField 步进），无头组件样式全部自绘；v-model 绑定 `Time`/`DateValue` 一律用 `shallowRef`（含 `#private` 字段，ref 深度解包破坏类型匹配）——详见 `docs/reka-ui.md`
@@ -216,6 +216,7 @@ npm run tauri:test    # Rust 单元测试（Windows 必须走此包装脚本，�
 2. 同步 `README.md` 版本徽章与 `DESIGN.md` 顶部「版本对齐」。
 3. git tag 用 `vX.Y.Z` 触发 `.github/workflows/release.yml`（tag 号须与 `tauri.conf.json` version 一致，否则打包产物版本漂移）。**`src-tauri/Cargo.lock` 必须一并提交**：改 `Cargo.toml` 版本号时 cargo 会顺带更新 lock 里 `name = "app"` 的 version，发版提交漏掉它就使远端 tag 的 lock 停在旧版本（v0.5.2 就是这样补交过一次；自查 `git show <tag>:src-tauri/Cargo.lock`）。
 4. GitHub Release **正文 = `RELEASE_NOTES.md` 的 `# vX.Y.Z 发布说明` 章节**，由 `release.yml` 自动提取（到下一个一级标题为止；段落缺失才回退 tag annotation）。tag annotation 不再承担 release notes，打 tag 无需写说明；单独改已发布 release 正文用 `gh release edit vX.Y.Z --notes-file <文件>`（v0.5.1 起约定，此前正文误用 commit message）。**坑：`action-gh-release` 只在「创建 release」时用 `body_path`，对已存在的 release（含 draft）只更新产物、不覆盖正文**——移动 tag 重跑（`git tag -f` + `git push -f`）后正文仍是旧文案，必须再手动 `gh release edit --notes-file` 补一次；发版后核对 `gh release view vX.Y.Z --json body`，别默认它已跟着 RELEASE_NOTES 走。
+5. **本地测试包（未 commit 的验证包）用 4 段式版本**：只给 `tauri.conf.json` 的 version 加构建元数据 `X.Y.Z+MMDDHHmm`（如 `0.5.3+09081524`，尾段=构建时间），应用内「关于」即可区分是哪次构建；zip 命名 `x-hub-win64-X.Y.Z.MMDDHHmm.zip`。正式提交 / 打 tag 前必须还原为 3 段（其余版本文件不动）——4 段点号版不是合法 semver，Cargo / tauri.conf 都解析不了。
 
 ## 注意事项
 
