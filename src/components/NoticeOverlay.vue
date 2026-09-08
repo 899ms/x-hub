@@ -98,6 +98,10 @@ onMounted(async () => {
     'notice-theme',
     (e) => applyTheme(e.payload ?? {}),
   )
+  // 监听就绪后告知后端：启动初期（本窗口 webview 尚未加载完）到达的通知会被
+  // 后端暂存，见 notify.rs 的 pending 队列——不 ready 重放就会静默漏提醒
+  // （倒计时/待办提醒触发后 remind_fired 已置位，丢了不会补发）
+  void tauriApi.noticeReady().catch(() => {})
 })
 
 onBeforeUnmount(() => {
@@ -116,33 +120,37 @@ function iconFor(kind: string) {
 
 <template>
   <div class="notice-host">
-    <TransitionGroup
-      tag="div"
-      name="notice"
-      class="notice-stack"
-      ref="stackEl"
-      @after-enter="syncLayout"
-      @after-leave="syncLayout"
-    >
-      <div
-        v-for="n in items"
-        :key="n.uid"
-        class="notice-card"
-        :class="`k-${n.kind}`"
-        @click="dismiss(n.uid)"
+    <!-- 量高 ref 必须挂在真实元素上：挂在 TransitionGroup 上拿到的是组件实例
+         （无 defineExpose，没有 getBoundingClientRect），syncLayout 会抛
+         TypeError，notice_layout 高度校正链路整体失效、窗口高度永远停在默认值 -->
+    <div ref="stackEl" class="notice-stack-host">
+      <TransitionGroup
+        tag="div"
+        name="notice"
+        class="notice-stack"
+        @after-enter="syncLayout"
+        @after-leave="syncLayout"
       >
-        <span class="nc-icon" :class="`k-${n.kind}`">
-          <component :is="iconFor(n.kind)" :size="18" :stroke-width="2" />
-        </span>
-        <div class="nc-text">
-          <div class="nc-title">{{ n.title }}</div>
-          <div v-if="n.body" class="nc-body">{{ n.body }}</div>
+        <div
+          v-for="n in items"
+          :key="n.uid"
+          class="notice-card"
+          :class="`k-${n.kind}`"
+          @click="dismiss(n.uid)"
+        >
+          <span class="nc-icon" :class="`k-${n.kind}`">
+            <component :is="iconFor(n.kind)" :size="18" :stroke-width="2" />
+          </span>
+          <div class="nc-text">
+            <div class="nc-title">{{ n.title }}</div>
+            <div v-if="n.body" class="nc-body">{{ n.body }}</div>
+          </div>
+          <button class="nc-close" type="button" aria-label="关闭" @click.stop="dismiss(n.uid)">
+            <X :size="14" :stroke-width="2" />
+          </button>
         </div>
-        <button class="nc-close" type="button" aria-label="关闭" @click.stop="dismiss(n.uid)">
-          <X :size="14" :stroke-width="2" />
-        </button>
-      </div>
-    </TransitionGroup>
+      </TransitionGroup>
+    </div>
   </div>
 </template>
 
@@ -155,6 +163,10 @@ function iconFor(kind: string) {
   justify-content: flex-end;
   background: transparent;
   user-select: none;
+}
+/* 量高层：包裹栈体、高度随内容收缩（syncLayout 量它的 rect） */
+.notice-stack-host {
+  flex: none;
 }
 .notice-stack {
   display: flex;

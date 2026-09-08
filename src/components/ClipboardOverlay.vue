@@ -63,16 +63,27 @@ function firstLine(text: string): string {
   return line.length > 40 ? line.slice(0, 40) + '…' : line
 }
 
+// 请求序号：loadList 递增使所有在途请求（含旧 loadMore）作废——浮层隐藏再唤起 /
+// 搜索词变化时，旧 invoke 若在重拉之后才返回，其整页数据会 append 进新列表
+// （按 id 去重拦不住：新列表 id 集合不含旧页 id），列表混入不匹配/重复条目
+let requestEpoch = 0
+
 async function loadList() {
   if (!isTauri()) return
+  const ep = ++requestEpoch
   loading.value = true
   try {
     const kw = keyword.value.trim()
-    items.value = await tauriApi.clipboardList(kw || undefined, PAGE_SIZE, 0)
+    const list = await tauriApi.clipboardList(kw || undefined, PAGE_SIZE, 0)
+    if (ep !== requestEpoch) return // 已被更新的请求作废
+    items.value = list
     pageFull.value = items.value.length >= PAGE_SIZE
     selected.value = 0
     await nextTick()
     if (listRef.value) listRef.value.scrollTop = 0
+  } catch {
+    // 拉取失败：清掉首拉满页标记，避免搜索态残留「N+ 条」假徽标
+    pageFull.value = false
   } finally {
     loading.value = false
   }
@@ -81,10 +92,12 @@ async function loadList() {
 // 滚动到底拉下一页；offset=已加载条数（后端 LIMIT/OFFSET）
 async function loadMore() {
   if (!isTauri() || loading.value || loadingMore.value || !hasMore.value) return
+  const ep = requestEpoch
   loadingMore.value = true
   try {
     const kw = keyword.value.trim()
     const page = await tauriApi.clipboardList(kw || undefined, PAGE_SIZE, items.value.length)
+    if (ep !== requestEpoch || kw !== keyword.value.trim()) return // 请求已被作废
     pageFull.value = page.length >= PAGE_SIZE
     if (page.length > 0) {
       // 分页期间若来了新复制记录，offset 窗口会整体平移导致跨页重复，按 id 去重

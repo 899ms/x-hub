@@ -617,6 +617,7 @@ export const tauriApi = {
   setRunAtStartup: (enabled: boolean) => invoke<void>('set_run_at_startup', { enabled }),
   getStartupHidden: () => invoke<boolean>('get_startup_hidden'),
   /** 右下角通知窗：前端上报内容高度→后端锚定工作区右下角并显示 */
+  noticeReady: () => invoke<void>('notice_ready'),
   noticeLayout: (height: number) => invoke<void>('notice_layout', { height }),
   /** 通知队列清空后收起通知窗 */
   noticeDismiss: () => invoke<void>('notice_dismiss_window'),
@@ -634,6 +635,7 @@ export const tauriApi = {
     buttons: string[],
   ) => invoke<void>('floating_ball_save_settings', { enabled, autoHide, withMain, buttons }),
   floatingBallDragBegin: () => invoke<void>('floating_ball_drag_begin'),
+  floatingBallDragCancel: () => invoke<void>('floating_ball_drag_cancel'),
   floatingBallExpand: (expanded: boolean) => invoke<void>('floating_ball_expand', { expanded }),
   floatingBallTrigger: (id: string) => invoke<void>('floating_ball_trigger', { id }),
   floatingBallContextMenu: () => invoke<void>('floating_ball_context_menu'),

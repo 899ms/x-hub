@@ -130,6 +130,6 @@ fn send_notification(app: &AppHandle, item: &Countdown) -> Result<(), String> {
         _ => "时间到",
     };
     crate::notify::show_notice(app, "countdown", &title, body);
-    log::info!("已发送系统通知: id={} name={}", item.id, item.name);
+    log::info!("已推送右下角通知: id={} name={}", item.id, item.name);
     Ok(())
 }

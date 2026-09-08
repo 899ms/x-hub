@@ -250,7 +250,7 @@ function onBallPointerMove(e: PointerEvent) {
     // startDragging 的 promise 在拖动开始时就 resolve，不能当拖动结束信号：
     // 曾因此在松手钩子里读到拖动中途位置（与最终位置差几百 px），
     // 球被落位补齐搬回中途——表现为「拖到边缘松手，球弹回屏幕中间」
-    void tauriApi.floatingBallDragBegin()
+    void tauriApi.floatingBallDragBegin().catch(() => {})
     getCurrentWindow()
       .startDragging()
       .then(() => {
@@ -259,7 +259,9 @@ function onBallPointerMove(e: PointerEvent) {
         targetEnergy = hovered.value ? 1 : 0
       })
       .catch(() => {
-        // 启动失败回退指针收尾路径，避免卡在拖拽态
+        // 启动失败：清掉后端刚武装的落位标志（否则残留标志会把用户下一次无关的
+        // 左键单击松开当成拖拽落位，球被无端吸附/落位），再回退指针收尾路径
+        void tauriApi.floatingBallDragCancel().catch(() => {})
         if (drag) drag.native = false
       })
   }

@@ -14,7 +14,8 @@
 //! 窗口操作交错导致整窗未响应）。推送时后端**先**把窗口定位+无激活显示，再 emit 内容——避免依赖
 //! 隐藏态 WebView2 是否及时处理 IPC 事件的不确定性。
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 /// 通知窗 label（App.vue 按此路由渲染 NoticeOverlay）
 pub const NOTICE_LABEL: &str = "notice";
@@ -24,6 +25,21 @@ const NOTICE_WIDTH: f64 = 360.0;
 const NOTICE_MARGIN: f64 = 8.0;
 /// 窗口默认高度（首帧定位用；随后前端按实际内容高度回调 notice_layout 校正）
 const NOTICE_DEFAULT_HEIGHT: f64 = 104.0;
+
+/// 前端通知窗监听是否就绪：notice webview 启动需要一两秒，期间倒计时/待办线程
+/// 可能已推送提醒——`emit_to` 不缓存，事件会静默丢失，而提醒的 remind_fired 已置位、
+/// 倒计时已顺延，丢了不可恢复。就绪前暂存（容量上限），`notice_ready` 时重放。
+static NOTICE_READY: AtomicBool = AtomicBool::new(false);
+
+/// 未就绪期间暂存的通知（kind, title, body）。见 NOTICE_READY。
+fn pending_notices() -> &'static std::sync::Mutex<Vec<(String, String, String)>> {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String, String)>>> =
+        std::sync::OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 暂存队列上限：超出丢最旧（启动首秒积压超过 8 条通知本身就不正常）
+const PENDING_CAP: usize = 8;
 
 /// 启动时预创建通知窗（隐藏常驻）。
 pub fn init(app: &AppHandle) {
@@ -36,6 +52,16 @@ pub fn init(app: &AppHandle) {
 /// 推送一条通知：确保窗口存在 → 先定位并无激活显示 → emit `notice-new` 给前端渲染。
 /// `kind` 供前端选图标/配色（"countdown" | "todo" | "info" ...）。
 pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
+    // 前端未就绪：暂存等 notice_ready 重放（直接 emit 会丢事件，且丢的是不可恢复的提醒）
+    if !NOTICE_READY.load(Ordering::Relaxed) {
+        let mut q = pending_notices().lock().unwrap_or_else(|p| p.into_inner());
+        if q.len() >= PENDING_CAP {
+            q.remove(0);
+        }
+        q.push((kind.to_string(), title.to_string(), body.to_string()));
+        log::info!("通知窗前端未就绪，暂存通知: [{kind}] {title}");
+        return;
+    }
     let win = match ensure_window(app) {
         Ok(w) => w,
         Err(e) => {
@@ -43,8 +69,19 @@ pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
             return;
         }
     };
-    // 先定位 + 显示：不依赖隐藏 WebView2 处理事件的时序，卡片随后由前端 layout 精确校正高度
-    anchor_default_and_show(&win);
+    // 已在展示堆叠：只保证显示，不动尺寸/位置——重置回默认高度会让已展示的卡片
+    // 被瞬时裁切、再经一次 IPC 往返校正回来（肉眼可见跳动）；高度交给 notice_layout 增量校正
+    if win.is_visible().unwrap_or(false) {
+        #[cfg(target_os = "windows")]
+        show_no_activate(&win);
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = win.show();
+        }
+    } else {
+        // 首帧：先定位 + 显示（不依赖隐藏 WebView2 处理事件的时序），高度随后校正
+        anchor_default_and_show(&win);
+    }
     let payload = serde_json::json!({ "kind": kind, "title": title, "body": body });
     if let Err(e) = app.emit_to(NOTICE_LABEL, "notice-new", &payload) {
         log::warn!("通知事件投递失败: {e}");
@@ -52,37 +89,30 @@ pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
     log::info!("已推送右下角通知: [{kind}] {title}");
 }
 
+/// 窗口只取预创建实例。**不做运行时 build 兜底**：预创建失败说明启动期建窗已出问题，
+/// ticker 线程运行时 build WebView2 会与并发窗口操作交错挂起整窗（铁律：运行时禁止
+/// 现场 build/destroy WebView2 窗口）——直接丢弃该条通知并让调用方日志可见。
 fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
-    if let Some(w) = app.get_webview_window(NOTICE_LABEL) {
-        return Ok(w);
-    }
-    build_window(app)
+    app.get_webview_window(NOTICE_LABEL)
+        .ok_or_else(|| "通知窗未预创建（启动期建窗失败），已丢弃通知".to_string())
 }
 
-fn build_window(app: &AppHandle) -> Result<WebviewWindow, String> {
-    let mut builder = WebviewWindowBuilder::new(app, NOTICE_LABEL, WebviewUrl::App("index.html".into()))
-        .title("通知")
-        .inner_size(NOTICE_WIDTH, NOTICE_DEFAULT_HEIGHT)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .closable(false)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focused(false)
-        .visible(false)
-        .background_color(tauri::window::Color(0, 0, 0, 0))
-        .additional_browser_args(crate::ADDITIONAL_BROWSER_ARGS);
-
-    // 透明窗口在 Windows 上开系统阴影会渲染成黑描边；卡片自带 CSS 阴影，关掉 OS 阴影（同倒计时/剪贴板浮窗）
-    #[cfg(target_os = "windows")]
-    {
-        builder = builder.shadow(false);
+/// 前端通知窗监听就绪：置就绪标志并重放启动初期暂存的通知。
+#[tauri::command]
+pub fn notice_ready(app: AppHandle) {
+    if NOTICE_READY.swap(true, Ordering::Relaxed) {
+        return; // 已就绪过（前端重载等场景），不重复重放
     }
-
-    builder.build().map_err(|e| e.to_string())
+    let drained: Vec<(String, String, String)> = std::mem::take(
+        &mut *pending_notices().lock().unwrap_or_else(|p| p.into_inner()),
+    );
+    let replayed = drained.len();
+    for (kind, title, body) in drained {
+        show_notice(&app, &kind, &title, &body);
+    }
+    if replayed > 0 {
+        log::info!("通知窗前端就绪，重放 {replayed} 条启动期暂存通知");
+    }
 }
 
 /// 用默认高度把窗口锚到右下角并无激活显示（供推送首帧；精确高度随后由 notice_layout 校正）。

@@ -323,7 +323,9 @@ pub fn run() {
             // 按当前 exe 重写。放在主窗显示前，静默修复，不阻断启动。
             if config.run_at_startup {
                 match autostart::ensure_registered() {
-                    Ok(true) => log::info!("开机自启动：启动时自愈完成"),
+                    // 自愈详情已由 ensure_registered 内部记录（键缺失/路径不符两种），
+                    // 这里不再重复写一条
+                    Ok(true) => {}
                     Ok(false) => {}
                     Err(e) => log::warn!("开机自启动自愈失败: {e}"),
                 }
@@ -509,6 +511,7 @@ pub fn run() {
             commands::get_run_at_startup,
             commands::set_run_at_startup,
             commands::get_startup_hidden,
+            notify::notice_ready,
             notify::notice_layout,
             notify::notice_dismiss_window,
             commands::log_client_error,
@@ -591,6 +594,7 @@ commands::set_chat_panel,
             floating_ball::floating_ball_get_state,
             floating_ball::floating_ball_save_settings,
             floating_ball::floating_ball_drag_begin,
+            floating_ball::floating_ball_drag_cancel,
             floating_ball::floating_ball_expand,
             floating_ball::floating_ball_trigger,
             floating_ball::floating_ball_context_menu,

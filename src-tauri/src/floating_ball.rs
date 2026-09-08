@@ -95,13 +95,42 @@ const DRAG_SETTLE_COOLDOWN_MS: u64 = 800;
 #[cfg(target_os = "windows")]
 static LAST_DRAG_SETTLE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// 拖拽进行中标志：前端 `floating_ball_drag_begin`（位移超阈值、移交系统原生拖动
-/// 时）置位；真正的松手由边缘监视循环检测——左键释放后的第一跳执行 `settle_drag`。
-/// **绝不能用 `startDragging()` 的 promise 当拖动结束信号**：实测它在拖动开始时就
-/// resolve，松手钩子里读到的是拖动中途位置（与最终位置差几百 px），吸附/记忆全错，
-/// 冷却后「落位补齐」再把球从屏边搬回中途——表现为「拖到边缘松手，球弹回屏幕中间」
+/// 拖拽武装时刻（ms；0 = 未武装）：前端 `floating_ball_drag_begin`（位移超阈值、
+/// 移交系统原生拖动时）记录；真正的松手由边缘监视循环检测——左键释放后的第一跳执行
+/// `settle_drag`。**绝不能用 `startDragging()` 的 promise 当拖动结束信号**：实测它在
+/// 拖动开始时就 resolve，松手钩子里读到的是拖动中途位置（与最终位置差几百 px），
+/// 吸附/记忆全错，冷却后「落位补齐」再把球从屏边搬回中途——表现为「拖到边缘松手，
+/// 球弹回屏幕中间」。**附带 TTL + cancel**：`floating_ball_drag_cancel`（startDragging
+/// 启动失败）清零；武装超 TTL 未消费视为残留自动失效——否则拖拽武装后窗口被隐藏等
+/// 异常链路下，用户下一次无关的左键单击松开会被当成拖拽落位（「带外绝不移动」被破坏）
 #[cfg(target_os = "windows")]
-static DRAG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DRAG_ARMED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 拖拽武装有效期：按住左键拖动超过该时长视为异常残留（正常拖拽几秒内结束），
+/// 落位标志自动作废，防无关单击被误消费
+#[cfg(target_os = "windows")]
+const DRAG_ARMED_TTL_MS: u64 = 30_000;
+
+/// 记忆球心进程内缓存：edge_tick 100ms 一跳，不能每跳读配置文件（同 AUTO_HIDE 缓存的
+/// 理由——常态「贴边停靠/自由位驻留」下每跳 config::load() = 每秒 10 次读盘 + JSON
+/// 解析的永久后台 IO）。None = 未初始化（首跳回落读盘填充）。它是配置盘上值的镜像，
+/// **只在写盘成功时更新**；写点：unpop_to_inside / 救球 / settle_drag
+#[cfg(target_os = "windows")]
+fn memo_ball() -> &'static std::sync::Mutex<Option<(f64, f64)>> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<Option<(f64, f64)>>> =
+        std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(target_os = "windows")]
+fn memo_ball_get() -> Option<(f64, f64)> {
+    *memo_ball().lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(target_os = "windows")]
+fn memo_ball_set(x: f64, y: f64) {
+    *memo_ball().lock().unwrap_or_else(|p| p.into_inner()) = Some((x, y));
+}
 
 /// 当前系统时间（ms）
 #[cfg(target_os = "windows")]
@@ -330,7 +359,10 @@ fn unpop_to_inside(app: &AppHandle) {
         let mut cfg = config::load();
         cfg.floating_ball_x = Some((nx + w / 2) as f64);
         cfg.floating_ball_y = Some((ny + w / 2) as f64);
-        let _ = config::save(&cfg);
+        let ok = config::save(&cfg).is_ok();
+        if ok {
+            memo_ball_set((nx + w / 2) as f64, (ny + w / 2) as f64);
+        }
     }
 }
 
@@ -359,9 +391,10 @@ fn edge_tick(app: &AppHandle) {
         return;
     }
     // 左键已释放且拖拽标志还在 = 拖拽刚结束的第一跳：模态循环已退出、窗口位置
-    // 已稳定，在这里统一做钳制/吸附/落位/写记忆（DRAG_ARMED 注释：为什么松手
-    // 检测必须在这里而不是 startDragging 的 promise）
-    if DRAG_ARMED.swap(false, Ordering::Relaxed) {
+    // 已稳定，在这里统一做钳制/吸附/落位/写记忆（DRAG_ARMED_MS 注释：为什么松手
+    // 检测必须在这里而不是 startDragging 的 promise；超 TTL 的残留标志作废不消费）
+    let armed = DRAG_ARMED_MS.swap(0, Ordering::Relaxed);
+    if armed > 0 && now_ms().saturating_sub(armed) < DRAG_ARMED_TTL_MS {
         settle_drag(app);
         return;
     }
@@ -384,7 +417,9 @@ fn edge_tick(app: &AppHandle) {
                 let mut cur = config::load();
                 cur.floating_ball_x = Some(ncx as f64);
                 cur.floating_ball_y = Some(ncy as f64);
-                let _ = config::save(&cur);
+                if config::save(&cur).is_ok() {
+                    memo_ball_set(ncx as f64, ncy as f64);
+                }
             }
             LAST_DRAG_SETTLE_MS.store(now_ms(), Ordering::Relaxed);
             log::info!(
@@ -413,8 +448,20 @@ fn edge_tick(app: &AppHandle) {
     {
         return;
     }
-    let cfg = config::load();
-    let (Some(cx), Some(cy)) = (cfg.floating_ball_x, cfg.floating_ball_y) else { return };
+    // 记忆球心走进程内缓存（100ms 一跳不能每跳读盘）；未初始化时回落读盘填充一次
+    let (cx, cy) = match memo_ball_get() {
+        Some(v) => v,
+        None => {
+            let cfg = config::load();
+            match (cfg.floating_ball_x, cfg.floating_ball_y) {
+                (Some(x), Some(y)) => {
+                    memo_ball_set(x, y);
+                    (x, y)
+                }
+                _ => return,
+            }
+        }
+    };
     let Some((l, t, r, b)) = nearest_work_rect(&win) else { return };
     let scale = window_scale(&win);
     // 停靠边（可同时双侧=角落斜隐）：记忆球心落在该侧工作区边缘容差内
@@ -495,7 +542,8 @@ fn edge_tick(app: &AppHandle) {
             && py >= pos.y.max(t)
             && py < (pos.y + w).min(b);
         if inside {
-            log::info!(
+            // 高频交互（每次悬停触发）走 debug，防文件日志持续增长
+            log::debug!(
                 "[悬浮球] 悬停滑出: 窗口=({},{}) 滑出位=({},{}) 光标=({},{}) 停靠方向=({},{})",
                 pos.x,
                 pos.y,
@@ -761,14 +809,16 @@ fn apply_geometry(win: &tauri::WebviewWindow, expanded: bool, scale_override: Op
     // 左上角本来就在屏幕外（x 为负或超出右缘），钳回屏内会让收起菜单后的球离开半隐位，
     // 边缘监视随即判成「位置漂移」再搬回去——表现为收起菜单后球弹一下
     if expanded {
-        if let Ok(Some(mon)) = win.current_monitor() {
+        // 钳到工作区（扣任务栏）而非整屏：贴底边停靠时展开的菜单下缘不得伸进任务栏
+        // （6 点方向按钮会被任务栏遮挡）——与 dock_snap/救球/落位同口径（约定 42）；
+        // 球态不可钳（见上），钳制只发生在展开态
+        if let Some((wl, wt, wr, wb)) = nearest_work_rect(win) {
             let m = 4.0 * scale;
-            let min_x = mon.position().x as f64 + m;
-            let min_y = mon.position().y as f64 + m;
-            let max_x = (mon.position().x + mon.size().width as i32) as f64 - new_size - m;
-            let max_y = (mon.position().y + mon.size().height as i32) as f64 - new_size - m;
+            let min_x = wl as f64 + m;
+            let min_y = wt as f64 + m;
             // 小屏保护：max 可能小于 min（f64::clamp 在 min > max 时 panic）
-            let (max_x, max_y) = (max_x.max(min_x), max_y.max(min_y));
+            let max_x = (wr as f64 - new_size - m).max(min_x);
+            let max_y = (wb as f64 - new_size - m).max(min_y);
             nx = nx.clamp(min_x, max_x);
             ny = ny.clamp(min_y, max_y);
         }
@@ -920,13 +970,21 @@ pub fn floating_ball_save_settings(
     Ok(())
 }
 
-/// 拖拽开始：前端在位移超阈值、移交系统原生拖动（startDragging）时调用，仅武装
-/// DRAG_ARMED。真正的松手由边缘监视循环检测（左键释放后的第一跳 → settle_drag）——
-/// startDragging 的 promise 在拖动开始时就 resolve，不能当结束信号（见 DRAG_ARMED 注释）。
+/// 拖拽开始：前端在位移超阈值、移交系统原生拖动（startDragging）时调用，仅记录
+/// 武装时刻。真正的松手由边缘监视循环检测（左键释放后的第一跳 → settle_drag）——
+/// startDragging 的 promise 在拖动开始时就 resolve，不能当结束信号（见 DRAG_ARMED_MS 注释）。
 #[tauri::command]
-pub async fn floating_ball_drag_begin() {
+pub fn floating_ball_drag_begin() {
     #[cfg(target_os = "windows")]
-    DRAG_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+    DRAG_ARMED_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 拖拽取消：startDragging 启动失败（回退指针收尾路径）时清落位标志，
+/// 防止残留标志把用户下一次无关的左键单击松开当成拖拽落位（「带外绝不移动」）
+#[tauri::command]
+pub fn floating_ball_drag_cancel() {
+    #[cfg(target_os = "windows")]
+    DRAG_ARMED_MS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 拖拽落位（松手后由 edge_tick 在监视线程调用，此时窗口位置已稳定）：
@@ -935,9 +993,7 @@ pub async fn floating_ball_drag_begin() {
 #[cfg(target_os = "windows")]
 fn settle_drag(app: &AppHandle) {
     use tauri::Emitter;
-    #[cfg(target_os = "windows")]
-    {
-        use std::sync::atomic::Ordering;
+    use std::sync::atomic::Ordering;
         // 先武装监视冷却再动手：下面 set_position 是异步 IPC，配置却是立即写盘，
         // 监视循环若在间隙轮询会读到旧窗口位置而误判（见 DRAG_SETTLE_COOLDOWN_MS）
         LAST_DRAG_SETTLE_MS.store(now_ms(), Ordering::Relaxed);
@@ -1032,23 +1088,32 @@ fn settle_drag(app: &AppHandle) {
         } else {
             (dock_nx, dock_ny)
         };
-        if (fx, fy) != (pos.x, pos.y) {
-            // set_position 是异步 IPC：主线程忙导致丢失时不必在此补搬——冷却结束后
-            // edge_tick 的「落位补齐」会按记忆位收敛（窗口向记忆），这里把搬移与
-            // 写记忆一次做完即可
-            let _ = win.set_position(PhysicalPosition::new(fx, fy));
+        // 先写盘成功再搬窗：写盘失败（磁盘满/占用）时窗口与记忆保持一致（都在旧位），
+        // 拖拽整体未生效且有日志——否则 set_position（异步 IPC）成功 + save 失败会让
+        // 「记忆=唯一真相」在 800ms 后按旧记忆把球拉回，整次拖拽等于没发生且无线索
+        let save_ok = {
+            let _guard = config::lock();
+            let mut cfg = config::load();
+            // 记忆的一律是「半隐停靠球心」：滑出态只是窗口临时偏移，不写回
+            cfg.floating_ball_x = Some(cx.round());
+            cfg.floating_ball_y = Some(cy.round());
+            config::save(&cfg).is_ok()
+        };
+        if save_ok {
+            // memo 是盘上值的镜像，只在写盘成功时更新
+            memo_ball_set(cx.round(), cy.round());
+            if (fx, fy) != (pos.x, pos.y) {
+                // set_position 是异步 IPC：主线程忙导致丢失时不必在此补搬——冷却结束后
+                // edge_tick 的「落位补齐」会按记忆位收敛（窗口向记忆）
+                let _ = win.set_position(PhysicalPosition::new(fx, fy));
+            }
+        } else {
+            log::warn!("[悬浮球] 拖拽落位写配置失败，球保持原位");
         }
-        let _guard = config::lock();
-        let mut cfg = config::load();
-        // 记忆的一律是「半隐停靠球心」：滑出态只是窗口临时偏移，不写回
-        cfg.floating_ball_x = Some(cx.round());
-        cfg.floating_ball_y = Some(cy.round());
-        let _ = config::save(&cfg);
         // 通知前端重拉状态（停靠边决定菜单/滑出方向）——旧流程由前端在
         // startDragging 的 promise then 里 refreshState，现在落位时机移到
-        // 监视循环，改用事件驱动
-        let _ = app.emit("floating-ball-settled", ());
-    }
+        // 监视循环，改用事件驱动。只发给悬浮球窗（广播会无谓唤醒主窗等全部窗口）
+        let _ = app.emit_to(LABEL, "floating-ball-settled", ());
 }
 
 /// 展开/收起环形菜单：以球心为锚切换窗口几何（球态 100 ↔ 菜单态 260，一次原子

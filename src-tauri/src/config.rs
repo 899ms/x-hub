@@ -168,8 +168,10 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub floating_ball_enabled: bool,
     /// 悬浮球贴边自动隐藏：拖到屏幕边缘附近松手 → 球心落在屏边，只露出半个球体；
-    /// 悬停时球体完整滑出。取代旧「贴边吸附」（用户反馈吸附从未生效，改为本交互）
-    #[serde(default = "default_true")]
+    /// 悬停时球体完整滑出。取代旧「贴边吸附」（用户反馈吸附从未生效，改为本交互）。
+    /// alias：v0.5.2 及更早字段名为 floating_ball_snap，用户显式关闭过的偏好经别名
+    /// 自动迁移（同 theme→theme_mode 先例），否则升级后被丢弃回落 default_true
+    #[serde(default = "default_true", alias = "floating_ball_snap")]
     pub floating_ball_auto_hide: bool,
     /// 与主窗口同时显示：默认 false = 球仅在主窗隐藏/最小化时出现；
     /// 开启后球常驻桌面，主窗显示也不隐藏（sync_with_main 读此字段联动）
