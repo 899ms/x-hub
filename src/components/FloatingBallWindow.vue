@@ -1,12 +1,14 @@
 <script setup lang="ts">
 // 桌面悬浮球（ADR 0004）：透明置顶小窗（label=floating-ball），「全息能量核」视觉方案。
-// 拖拽移动（系统原生拖动循环 + 松手吸附/记忆位置）、单击展开环形菜单（螺旋扫出/倒序收回）、
-// 双击显示主窗口、右键托盘同款菜单；窗口尺寸恒定（菜单态几何 260），展开/收起只切换
-// Rust 侧椭圆命中区域（球态小圆 ↔ 菜单态大圆），不 resize——避免 WebView 重排滞后帧跳动。
+// 拖拽移动（系统原生拖动循环 + 松手贴边自动隐藏/记忆位置）、单击展开环形菜单
+// （螺旋扫出/倒序收回）、双击显示主窗口、右键托盘同款菜单；开合由 Rust 以球心为锚
+// 原子切换窗口几何（球态 100 ↔ 菜单态 260），重排滞后帧用整窗淡出掩盖。
+// 贴边半隐时（st.dock）球体贴屏幕边缘只显示一半，悬停/拖拽时 CSS 滑出完整露出，
+// 展开态由 Rust 把菜单窗口整体钳回屏内（不平移，避免与环形按钮中心错位）。
 // 视觉构成：canvas 粒子球（斐波那契点云 + 能量网 + 脉冲能量核 + 雷达刻度）
 //          + CSS 3D 陀螺环（三环自旋 + 悬停指针倾转）+ 光晕呼吸 + 接触阴影 + 悬停微升起；
 //          球体为玻璃质感、配色跟随设置「外观」的主题强调色（--fb-accent）。
-import { computed, onBeforeUnmount, onMounted, ref, type CSSProperties } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, type CSSProperties } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { isTauri, tauriApi, type FloatingBallState } from '../api/tauri'
@@ -38,8 +40,9 @@ const buttons = computed(() =>
     .filter((b) => b.label),
 )
 
-/** 按钮轨道半径：菜单窗 260 → 中心 130 - 按钮外沿 26 - 余量 12 = 92（与 Rust MENU_SIZE 匹配） */
-const ringR = computed(() => Math.round((st.value?.menu_size ?? 260) / 2) - 38)
+/** 按钮轨道半径：菜单窗 260 → 中心 130 - 按钮外沿 26 - 余量 14 = 90（与 Rust MENU_SIZE 匹配；
+ *  余量给足 14px 吸收非整数 DPI 的视口取整误差，避免按钮外圈被窗口边缘裁出一条切痕） */
+const ringR = computed(() => Math.round((st.value?.menu_size ?? 260) / 2) - 40)
 
 /** 环形布局：第一个按钮在正上方顺时针均分；rotate/translate 链式定位，供螺旋动画插值 */
 function btnVars(i: number): CSSProperties {
@@ -54,19 +57,20 @@ function btnVars(i: number): CSSProperties {
 }
 
 // ---- 菜单开合：窗口几何（球态 100 ↔ 菜单态 260）由 Rust expand 以球心为锚原子切换，
-// 页面只管动画态。窗口 resize 时 WebView2 内容重排滞后一帧（旧帧按旧视口渲染，
-// 球会先跳向窗口移动方向再弹回）——开合前先把整窗内容淡出、重排落定后恢复，
-// 把跳动帧掩盖在「球化开成菜单」的过渡里 ----
-const FADE_MS = 140
-const RESIZE_SETTLE_MS = 170
+// 页面只管动画态。窗口 resize 时 WebView2 内容重排滞后一帧（旧帧按旧视口贴在新窗口
+// 左上角渲染）——切换若发生在内容还未完全不可见时，球会「闪一下到左上角」（用户反馈，
+// 上一版淡出仅 40/90ms 就切几何，残留半透明帧漏出跳动）。对策：整窗 opacity:0 且
+// transition:none（隐藏立即生效），等两帧确保隐藏真正合成上屏后再发几何 IPC；
+// 恢复时移除类按基础 0.09s transition 平滑淡入。总延迟≈两帧+IPC+落定等待 ----
+const RESIZE_SETTLE_MS = 70
 const resizing = ref(false)
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms))
 }
 
-/** 收回动画总时长：末位按钮延迟 (n-1)*45ms + 时长 420ms，8 键 ≈ 735ms */
-const RETREAT_MS = 740
+/** 收回动画总时长：末位按钮延迟 (n-1)*28ms + 时长 300ms，8 键 ≈ 496ms（含缓冲取 540） */
+const RETREAT_MS = 540
 let closeTimer: number | null = null
 let settledTimer: number | null = null
 
@@ -76,7 +80,7 @@ function armSettled() {
   settledTimer = window.setTimeout(() => {
     settledTimer = null
     settledAll.value = true
-  }, 550 + (n - 1) * 60 + 80)
+  }, 380 + (n - 1) * 35 + 60)
 }
 
 /** 窗口操作超时兜底：Rust 侧意外卡住时也要继续走完开合流程，不能让球永久停在淡出态 */
@@ -96,9 +100,17 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   })
 }
 
+/** 等两帧实际合成上屏：rAF 回调在绘制前触发，第二帧回调时上一帧（opacity:0）已合成 */
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  )
+}
+
 async function resizeSettle(expanded: boolean) {
   resizing.value = true
-  await sleep(FADE_MS)
+  await nextTick()
+  await nextPaint()
   try {
     await withTimeout(tauriApi.floatingBallExpand(expanded), 1200)
   } catch {
@@ -106,6 +118,9 @@ async function resizeSettle(expanded: boolean) {
   }
   await sleep(RESIZE_SETTLE_MS)
   resizing.value = false
+  // 展开/收拢落定后校验一次视口：非整数 DPI 下窗口物理尺寸若仍偏小，
+  // 按钮外圈会被窗口边缘裁切（携带实测视口宽让 Rust 反推真实缩放自愈）
+  window.setTimeout(checkViewportSync, 50)
 }
 
 async function openMenu() {
@@ -154,7 +169,7 @@ function closeMenu() {
 // IPC 逐帧 set_position 的两条路（串行 await / rAF 单飞）在 Windows 透明窗口上
 // 跟随指针都有滞后抖动（鬼畜）。根治：位移超阈值后调 startDragging 进入系统
 // 模态拖动循环——以输入速率原生移动窗口，丝滑跟手；模态循环随松键退出，
-// promise resolve 即拖拽结束，再做钳制进屏/吸附/记忆位置。
+// promise resolve 即拖拽结束，再做钳制进屏/贴边半隐/记忆位置。
 interface DragCtx {
   startClientX: number
   startClientY: number
@@ -164,7 +179,9 @@ interface DragCtx {
   native: boolean
 }
 const DRAG_THRESHOLD = 6
-const CLICK_DELAY_MS = 200
+// 单击展开前的双击甄别等待：压到 150ms（双击两段间隔通常 <150ms；稍慢的误双击
+// 也只是菜单刚开又被 act:main 隐藏主窗联动收掉，代价可接受，换单击明显跟手）
+const CLICK_DELAY_MS = 150
 
 let drag: DragCtx | null = null
 let menuClickArmed = false
@@ -231,11 +248,15 @@ function onBallPointerMove(e: PointerEvent) {
     getCurrentWindow()
       .startDragging()
       .then(() => {
-        // 模态循环随松键退出 = 拖拽结束：钳制进屏 + 吸附 + 记忆位置（Rust 侧）
+        // 模态循环随松键退出 = 拖拽结束：钳制进屏 + 贴边半隐 + 记忆位置（Rust 侧），
+        // 完成后重拉状态刷新停靠边（dock 决定悬停滑出方向）
         drag = null
         dragging.value = false
         targetEnergy = hovered.value ? 1 : 0
-        tauriApi.floatingBallDragEnd().catch(() => {})
+        tauriApi
+          .floatingBallDragEnd()
+          .then(refreshState)
+          .catch(() => {})
       })
       .catch(() => {
         // 启动失败回退指针收尾路径，避免卡在拖拽态
@@ -262,11 +283,12 @@ async function onBallPointerUp() {
       void openMenu()
     }, CLICK_DELAY_MS)
   } else {
-    // 松手：钳制进屏 + 吸附 + 记忆位置（Rust 侧）
+    // 松手：钳制进屏 + 贴边半隐 + 记忆位置（Rust 侧），随后重拉状态刷新停靠边
     try {
       await tauriApi.floatingBallDragEnd()
+      refreshState()
     } catch {
-      // 忽略：吸附失败不影响使用
+      // 忽略：收尾失败不影响使用
     }
     targetEnergy = hovered.value ? 1 : 0
   }
@@ -295,6 +317,35 @@ function onBallPointerLeave() {
     targetEnergy = 0
   }
 }
+
+// ---- 贴边半隐的悬停滑出：Rust 把停靠球心精确落在屏边（球体一半在视口/屏幕外，
+// 天然只露一半）；悬停/拖拽时把球体装饰整体向屏内平移 BALL_R 完整露出，移开隐回。
+// 注意方向：不悬停 = 不平移（保持半隐），悬停/拖拽 = 平移露出。曾把条件写反
+// （空闲平移露出、悬停反而半隐），用户实机看到的就是「贴边自动隐藏没生效」 ----
+const DOCK_PEEK = 24
+
+function refreshState() {
+  tauriApi
+    .floatingBallGetState()
+    .then((s) => {
+      st.value = s
+    })
+    .catch(() => {})
+}
+
+const dockStyle = computed<CSSProperties>(() => {
+  const s = st.value
+  const d = s?.dock
+  if (!s || !s.auto_hide || !d) return {}
+  // 展开态不平移：Rust 已把整块菜单窗口钳回屏内（球心离开屏边，天然完整可见），
+  // 再平移会与环形按钮中心错位
+  if (menuOpen.value) return {}
+  if (!hovered.value && !dragging.value) return {}
+  const x = (d.left ? DOCK_PEEK : 0) - (d.right ? DOCK_PEEK : 0)
+  const y = (d.top ? DOCK_PEEK : 0) - (d.bottom ? DOCK_PEEK : 0)
+  if (x === 0 && y === 0) return {}
+  return { transform: `translate(${x}px, ${y}px)` }
+})
 
 // ---- 动作分发：先收起菜单再触发（剪贴板/视图等互不遮挡） ----
 function onButton(id: string) {
@@ -518,7 +569,7 @@ function checkViewportSync() {
     Math.abs(document.documentElement.clientWidth - expected) > VIEWPORT_TOLERANCE ||
     Math.abs(document.documentElement.clientHeight - expected) > VIEWPORT_TOLERANCE
   ) {
-    tauriApi.floatingBallReapply().catch(() => {})
+    tauriApi.floatingBallReapply(document.documentElement.clientWidth).catch(() => {})
   }
 }
 
@@ -569,24 +620,11 @@ onMounted(async () => {
     menuVisual.value = 'closed'
     settledAll.value = false
     targetEnergy = 0
+    // 隐藏期间可能错过 DPI 变化且收拢几何不触发 resize 事件：显示后主动校验视口
+    window.setTimeout(checkViewportSync, 100)
   })
-  // 设置页调整按钮集/吸附开关后即时生效
-  unlistenConfig = await listen<{ buttons?: string[]; snap?: boolean }>(
-    'floating-ball-config-changed',
-    (e) => {
-      if (!st.value) {
-        void tauriApi
-          .floatingBallGetState()
-          .then((s) => {
-            st.value = s
-          })
-          .catch(() => {})
-        return
-      }
-      if (e.payload?.buttons) st.value.buttons = e.payload.buttons
-      if (typeof e.payload?.snap === 'boolean') st.value.snap = e.payload.snap
-    },
-  )
+  // 设置页调整按钮集/贴边自动隐藏开关后即时生效：整体重拉（含停靠边）
+  unlistenConfig = await listen('floating-ball-config-changed', () => refreshState())
   // 窗口失焦收起菜单（ADR：窗口失焦为四种收起方式之一）
   unlistenFocus = await appWindow.onFocusChanged(({ payload }) => {
     if (!payload) closeMenu()
@@ -633,30 +671,33 @@ onBeforeUnmount(() => {
       <span class="fb-btn-label">{{ b.label }}</span>
     </button>
 
-    <!-- 接触阴影（悬停收窄 / 拖拽摊开）+ 光晕呼吸 -->
-    <div class="fb-shadow"></div>
-    <div class="fb-halo"></div>
+    <!-- 贴边半隐平移层：停靠时悬停/拖拽/展开把球体装饰整体滑出屏边（见 dockStyle） -->
+    <div class="fb-dock" :style="dockStyle">
+      <!-- 接触阴影（悬停收窄 / 拖拽摊开）+ 光晕呼吸 -->
+      <div class="fb-shadow"></div>
+      <div class="fb-halo"></div>
 
-    <!-- 球体：全息能量核（canvas 粒子球 + CSS 3D 陀螺环） -->
-    <div
-      ref="ballEl"
-      class="fb-ball"
-      @pointerdown="onBallPointerDown"
-      @pointermove="onBallPointerMove"
-      @pointerup="onBallPointerUp"
-      @pointercancel="onBallPointerUp"
-      @lostpointercapture="onBallLostCapture"
-      @pointerenter="onBallPointerEnter"
-      @pointerleave="onBallPointerLeave"
-      @dblclick.stop="onBallDblClick"
-      @contextmenu.prevent.stop="onContextMenu"
-    >
-      <canvas ref="cvsEl" class="fb-canvas" width="240" height="240"></canvas>
-      <!-- 陀螺环组：三环不同轴自旋 + 悬停指针倾转（最外层全息装饰） -->
-      <div class="fb-gyro" :style="gyroStyle" aria-hidden="true">
-        <div class="fb-oring fb-or1"></div>
-        <div class="fb-oring fb-or2"></div>
-        <div class="fb-oring fb-or3"></div>
+      <!-- 球体：全息能量核（canvas 粒子球 + CSS 3D 陀螺环） -->
+      <div
+        ref="ballEl"
+        class="fb-ball"
+        @pointerdown="onBallPointerDown"
+        @pointermove="onBallPointerMove"
+        @pointerup="onBallPointerUp"
+        @pointercancel="onBallPointerUp"
+        @lostpointercapture="onBallLostCapture"
+        @pointerenter="onBallPointerEnter"
+        @pointerleave="onBallPointerLeave"
+        @dblclick.stop="onBallDblClick"
+        @contextmenu.prevent.stop="onContextMenu"
+      >
+        <canvas ref="cvsEl" class="fb-canvas" width="240" height="240"></canvas>
+        <!-- 陀螺环组：三环不同轴自旋 + 悬停随指针倾转（最外层全息装饰） -->
+        <div class="fb-gyro" :style="gyroStyle" aria-hidden="true">
+          <div class="fb-oring fb-or1"></div>
+          <div class="fb-oring fb-or2"></div>
+          <div class="fb-oring fb-or3"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -667,16 +708,28 @@ onBeforeUnmount(() => {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  transition: opacity 0.14s ease;
+  transition: opacity 0.09s ease;
 }
-/* 几何切换期间整窗淡出：掩盖 WebView2 重排滞后帧的球体跳动（开合时序见 script） */
+/* 几何切换期间整窗隐藏：transition:none 让隐藏帧立即生效——窗口尺寸切换必须发生在
+   完全不可见时，否则 WebView2 旧帧会把球画到新窗口左上角（闪一下）；
+   恢复时移除本类，按基础 transition 平滑淡入 */
 .fb-root.resizing {
   opacity: 0;
+  transition: none;
 }
 .fb-root.resizing .fb-ball,
 .fb-root.resizing .fb-btn,
 .fb-root.resizing .fb-backdrop {
   pointer-events: none;
+}
+
+/* ---- 贴边半隐平移层：绝对定位容器承载球体，悬停/拖拽时靠内联 transform 平滑滑出；
+   展开态不平移（Rust 已把菜单窗口钳回屏内，平移会与环形按钮中心错位） ---- */
+.fb-dock {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: transform 0.2s ease;
 }
 
 /* ---- 菜单态底座 ---- */
@@ -697,9 +750,9 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .fb-arc1 {
-  width: 184px;
-  height: 184px;
-  margin: -92px 0 0 -92px;
+  width: 180px;
+  height: 180px;
+  margin: -90px 0 0 -90px;
   border: 1px dashed color-mix(in srgb, var(--fb-accent, #7c6cff) 28%, transparent);
   animation: fb-arc-in 0.4s ease-out both;
 }
@@ -756,8 +809,8 @@ onBeforeUnmount(() => {
     box-shadow 0.14s ease,
     border-color 0.14s ease,
     color 0.14s ease;
-  animation: fb-sweep 0.55s cubic-bezier(0.3, 1.4, 0.45, 1) both;
-  animation-delay: calc(var(--i) * 60ms);
+  animation: fb-sweep 0.38s cubic-bezier(0.3, 1.4, 0.45, 1) both;
+  animation-delay: calc(var(--i) * 35ms);
 }
 /* 播完后移除 animation：fill 会盖住 hover 的 transform */
 .fb-btn.settled {
@@ -780,8 +833,8 @@ onBeforeUnmount(() => {
 /* 收回：沿原轨迹倒序逐个螺旋退回球心 */
 .fb-btn.closing {
   pointer-events: none;
-  animation: fb-retreat 0.42s cubic-bezier(0.5, 0, 0.75, 0.4) both;
-  animation-delay: calc((var(--n) - 1 - var(--i)) * 45ms);
+  animation: fb-retreat 0.3s cubic-bezier(0.5, 0, 0.75, 0.4) both;
+  animation-delay: calc((var(--n) - 1 - var(--i)) * 28ms);
 }
 .fb-btn-label {
   font-size: 9px;

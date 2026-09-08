@@ -40,8 +40,8 @@ fn tick_once(app: &AppHandle) -> Result<(), String> {
 
         if !missed {
             let _ = app.emit("todo-remind", &item);
-            // 真 Toast 通知（notify.rs），与倒计时提醒同一通道
-            crate::notify::show_system_notification(app, &format!("待办提醒 · {}", item.title), "提醒时间到");
+            // 自绘右下角通知窗（notify.rs），与倒计时提醒同一通道
+            crate::notify::show_notice(app, "todo", &format!("待办提醒 · {}", item.title), "提醒时间到");
             log::info!("待办提醒: id={} title={}", item.id, item.title);
         } else {
             log::info!("待办提醒错过(不补发): id={} title={}", item.id, item.title);

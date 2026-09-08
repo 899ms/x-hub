@@ -4,7 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { ChevronDown, Download, FolderCog, Keyboard, LocateFixed, Lock, MapPin, Trash2, Upload } from 'lucide-vue-next'
 import { isTauri, tauriApi } from '../api/tauri'
-import type { DataPathInfo } from '../api/tauri'
+import type { AutostartStatus, DataPathInfo } from '../api/tauri'
 import AppSelect from './AppSelect.vue'
 import AiProviders from './AiProviders.vue'
 import AboutSection from './AboutSection.vue'
@@ -70,15 +70,15 @@ function onGlassOpacityInput(e: Event) {
   void store.setGlassOpacity(Number((e.target as HTMLInputElement).value))
 }
 
-// ---- 桌面悬浮球（ADR 0004）：启用 / 吸附 / 与主窗同显 / 环形按钮增删排序 ----
+// ---- 桌面悬浮球（ADR 0004）：启用 / 贴边自动隐藏 / 与主窗同显 / 环形按钮增删排序 ----
 const ballButtons = computed(() => store.state.config.floating_ball_buttons ?? [])
 
 function onToggleFloatingBall() {
   void store.setFloatingBallEnabled(!store.state.config.floating_ball_enabled)
 }
 
-function onToggleFloatingBallSnap() {
-  void store.setFloatingBallSnap(!store.state.config.floating_ball_snap)
+function onToggleFloatingBallAutoHide() {
+  void store.setFloatingBallAutoHide(!store.state.config.floating_ball_auto_hide)
 }
 
 function onToggleFloatingBallWithMain() {
@@ -105,6 +105,7 @@ async function moveBallButton(index: number, delta: number) {
 // ---- 分类导航（左侧分类 = 右侧区块锚点，点击平滑滚动定位，不做内容切换） ----
 const SECTIONS = [
   { id: 'general', label: '常规' },
+  { id: 'ball', label: '悬浮球' },
   { id: 'ai', label: 'AI 助手' },
   { id: 'appearance', label: '外观' },
   { id: 'workbench', label: '工作台' },
@@ -193,6 +194,7 @@ onMounted(async () => {
   clipTtlDays.value = store.state.config.clipboard_ttl_days ?? 7
   pasteMethod.value = store.state.config.clipboard_paste_method ?? 'auto'
   void loadDataPath()
+  void refreshAutostartStatus()
   // 支持外部定位到指定分类（如 AI 对话面板「去配置」跳转）
   if (props.initialSection) {
     const target = props.initialSection as SectionId
@@ -213,6 +215,43 @@ function onToggleSidebar() {
 
 // ---- 开机自启动 ----
 const autostartBusy = ref(false)
+// 系统真实状态探测：区分「用户开了开关」与「登录时是否真的会拉起」
+const autostartStatus = ref<AutostartStatus | null>(null)
+// 意图为开、但实际不会生效 → 判定失效，提示修复
+const autostartFailed = computed(
+  () => !!autostartStatus.value && autostartStatus.value.configured && !autostartStatus.value.enabled,
+)
+const autostartFailReason = computed(() => {
+  const s = autostartStatus.value
+  if (!s) return ''
+  if (s.os_disabled) return '已被系统或安全软件在「启动项」中禁用'
+  if (!s.registered) return '注册信息丢失或程序路径已变更'
+  return '当前不会开机自启'
+})
+
+async function refreshAutostartStatus() {
+  if (!isTauri()) return
+  try {
+    autostartStatus.value = await tauriApi.getRunAtStartup()
+  } catch {
+    // 探测失败不影响开关本身，保持上次值
+  }
+}
+
+// 一键修复：重新按当前 exe 写入 Run 键并清掉系统的「禁用启动项」标记
+async function repairAutostart() {
+  if (autostartBusy.value) return
+  autostartBusy.value = true
+  try {
+    await store.setRunAtStartup(true)
+    await refreshAutostartStatus()
+    showToast(autostartFailed.value ? '修复未完全生效，请检查安全软件启动项设置' : '开机自启动已修复')
+  } catch (e) {
+    showToast(`修复失败：${String(e)}`)
+  } finally {
+    autostartBusy.value = false
+  }
+}
 
 async function onToggleAutostart() {
   if (autostartBusy.value) return
@@ -220,6 +259,7 @@ async function onToggleAutostart() {
   const next = !store.state.config.run_at_startup
   try {
     await store.setRunAtStartup(next)
+    await refreshAutostartStatus()
     showToast(next ? '已开启开机自启动' : '已关闭开机自启动')
   } catch (e) {
     showToast(`设置失败：${String(e)}`)
@@ -574,6 +614,12 @@ function onAccentInput(e: Event) {
             <div class="setting-info">
               <span class="setting-name">开机自动启动</span>
               <span class="setting-desc">登录 Windows 后自动在后台运行并驻留托盘（不弹出主窗口，点托盘图标可随时唤出）</span>
+              <span v-if="autostartFailed" class="autostart-warn">
+                ⚠ 开机自启动已失效：{{ autostartFailReason }}
+                <button type="button" class="autostart-repair" :disabled="autostartBusy" @click="repairAutostart">
+                  重新启用
+                </button>
+              </span>
             </div>
             <button
               class="toggle"
@@ -587,11 +633,16 @@ function onAccentInput(e: Event) {
               <span class="toggle-knob"></span>
             </button>
           </div>
+        </section>
+
+        <!-- 悬浮球（桌面快捷入口，ADR 0004）：启用/贴边自动隐藏/同显/环形按钮集中在此分类 -->
+        <section id="sv-sec-ball" class="sv-sec" aria-label="悬浮球">
+          <h3 class="sv-sec-title">悬浮球</h3>
 
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-name">桌面悬浮球</span>
-              <span class="setting-desc">主窗口隐藏/最小化时在桌面显示悬浮球（可开启下方「与主窗口同时显示」常驻）：单击展开环形快捷菜单，双击显示主窗口，右键快捷菜单，可拖拽并贴边停靠</span>
+              <span class="setting-desc">主窗口隐藏/最小化时在桌面显示悬浮球（可开启下方「与主窗口同时显示」常驻）：单击展开环形快捷菜单，双击显示主窗口，右键快捷菜单，可拖拽，贴边自动隐藏一半</span>
             </div>
             <button
               class="toggle"
@@ -607,17 +658,17 @@ function onAccentInput(e: Event) {
 
           <div class="setting-row">
             <div class="setting-info">
-              <span class="setting-name">悬浮球贴边吸附</span>
-              <span class="setting-desc">拖到屏幕边缘附近松手时自动贴边停靠：球体完整留在屏内，不滑出屏幕</span>
+              <span class="setting-name">悬浮球贴边自动隐藏</span>
+              <span class="setting-desc">拖到屏幕边缘附近松手时自动半隐：球体贴边只露出一半，鼠标悬停时完整滑出，移开再隐回</span>
             </div>
             <button
               class="toggle"
               role="switch"
               type="button"
-              :aria-checked="store.state.config.floating_ball_snap"
-              :class="{ on: store.state.config.floating_ball_snap }"
+              :aria-checked="store.state.config.floating_ball_auto_hide"
+              :class="{ on: store.state.config.floating_ball_auto_hide }"
               :disabled="!store.state.config.floating_ball_enabled"
-              @click="onToggleFloatingBallSnap"
+              @click="onToggleFloatingBallAutoHide"
             >
               <span class="toggle-knob"></span>
             </button>
@@ -1499,6 +1550,30 @@ function onAccentInput(e: Event) {
 .setting-desc {
   font-size: 0.75rem;
   color: var(--text-3);
+}
+.autostart-warn {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: var(--c-red-ink, #d03050);
+}
+.autostart-repair {
+  padding: 2px 10px;
+  font-size: 0.72rem;
+  color: var(--text-1);
+  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.autostart-repair:hover:not(:disabled) {
+  background: var(--bg-active, rgba(127, 127, 127, 0.2));
+}
+.autostart-repair:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* 悬浮球环形按钮配置：已选 chips + 可添加 chips */

@@ -181,8 +181,8 @@ pub fn cleanup_with(conn: &Connection, max_items: i64, ttl_days: i64) -> Result<
     Ok(())
 }
 
-/// 置顶优先，其次最近复制；可选关键字搜索（内容/来源应用）
-pub fn list(conn: &Connection, keyword: Option<&str>, limit: i64) -> Result<Vec<ClipboardItem>> {
+/// 置顶优先，其次最近复制；可选关键字搜索（内容/来源应用）；offset 支持滚动加载后续页
+pub fn list(conn: &Connection, keyword: Option<&str>, limit: i64, offset: i64) -> Result<Vec<ClipboardItem>> {
     let kw = keyword.map(|k| k.trim()).filter(|k| !k.is_empty());
     let mut sql = String::from(
         "SELECT id, content, html, source_app, is_pinned, kind, image_path, file_paths, created_at, updated_at
@@ -193,14 +193,14 @@ pub fn list(conn: &Connection, keyword: Option<&str>, limit: i64) -> Result<Vec<
         sql.push_str(
             "WHERE content LIKE ?1 OR html LIKE ?1 OR COALESCE(source_app,'') LIKE ?1 ",
         );
-        sql.push_str("ORDER BY is_pinned DESC, updated_at DESC, id DESC LIMIT ?2");
+        sql.push_str("ORDER BY is_pinned DESC, updated_at DESC, id DESC LIMIT ?2 OFFSET ?3");
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![pattern, limit], row_to_item)?;
+        let rows = stmt.query_map(params![pattern, limit, offset], row_to_item)?;
         rows.collect()
     } else {
-        sql.push_str("ORDER BY is_pinned DESC, updated_at DESC, id DESC LIMIT ?1");
+        sql.push_str("ORDER BY is_pinned DESC, updated_at DESC, id DESC LIMIT ?1 OFFSET ?2");
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![limit], row_to_item)?;
+        let rows = stmt.query_map(params![limit, offset], row_to_item)?;
         rows.collect()
     }
 }
@@ -278,7 +278,7 @@ mod tests {
         let conn = setup();
         insert(&conn, "first", None, None).unwrap();
         insert(&conn, "second", Some("<b>html</b>"), Some("浏览器")).unwrap();
-        let list = list(&conn, None, 50).unwrap();
+        let list = list(&conn, None, 50, 0).unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].content, "second");
         assert_eq!(list[0].html.as_deref(), Some("<b>html</b>"));
@@ -298,7 +298,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all[0].source_app.as_deref(), Some("B"));
         assert!(first > 0);
     }
@@ -308,7 +308,7 @@ mod tests {
         let conn = setup();
         let long = "x".repeat(MAX_ITEM_LEN + 100);
         insert(&conn, &long, Some("<b>html</b>"), None).unwrap();
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all[0].content.chars().count(), MAX_ITEM_LEN);
         assert!(all[0].html.is_none());
     }
@@ -328,7 +328,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM clipboard_history", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "相同内容不新增条目");
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all[0].source_app.as_deref(), Some("B"));
         assert!(all[0].updated_at.as_str() > "2000-01-01");
     }
@@ -338,10 +338,10 @@ mod tests {
         let conn = setup();
         insert(&conn, "a", None, None).unwrap();
         insert(&conn, "b", None, None).unwrap();
-        let a_id = list(&conn, None, 50).unwrap()[1].id;
+        let a_id = list(&conn, None, 50, 0).unwrap()[1].id;
         std::thread::sleep(std::time::Duration::from_millis(5));
         touch(&conn, a_id).unwrap();
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all[0].id, a_id, "touch 后条目挪到最前");
     }
 
@@ -364,7 +364,7 @@ mod tests {
         )
         .unwrap();
         cleanup(&conn).unwrap();
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].content, "pinned");
     }
@@ -382,7 +382,7 @@ mod tests {
         insert(&conn, "d", None, None).unwrap();
 
         cleanup_with(&conn, 3, 7).unwrap();
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all.len(), 3);
         assert!(!all.iter().any(|i| i.content == "a"));
     }
@@ -392,7 +392,7 @@ mod tests {
         let conn = setup();
         insert(&conn, "https://github.com/tauri", None, None).unwrap();
         insert(&conn, "别的文本", None, None).unwrap();
-        let found = list(&conn, Some("github"), 50).unwrap();
+        let found = list(&conn, Some("github"), 50, 0).unwrap();
         assert_eq!(found.len(), 1);
         assert!(found[0].content.contains("github"));
     }
@@ -401,7 +401,7 @@ mod tests {
     fn toggle_pin_and_delete() {
         let conn = setup();
         insert(&conn, "x", None, None).unwrap();
-        let item = list(&conn, None, 50).unwrap().remove(0);
+        let item = list(&conn, None, 50, 0).unwrap().remove(0);
         let pinned = toggle_pin(&conn, item.id).unwrap();
         assert!(pinned.is_pinned);
         delete(&conn, item.id).unwrap();
@@ -419,7 +419,7 @@ mod tests {
             Some("资源管理器"),
         )
         .unwrap();
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all.len(), 2);
         // 后插入的文件在最前
         assert_eq!(all[0].kind, "file");
@@ -439,7 +439,7 @@ mod tests {
         insert_image(&conn, "samehash", "C:/img/a.png", Some("A")).unwrap();
         insert_image(&conn, "samehash", "C:/img/b.png", Some("B")).unwrap();
         assert_eq!(count(&conn).unwrap(), 1, "相同图片哈希不新增条目");
-        let all = list(&conn, None, 50).unwrap();
+        let all = list(&conn, None, 50, 0).unwrap();
         assert_eq!(all[0].source_app.as_deref(), Some("B"));
         assert_eq!(all[0].image_path.as_deref(), Some("C:/img/a.png"));
     }

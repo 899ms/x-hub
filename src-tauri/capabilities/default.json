@@ -10,7 +10,8 @@
     "ext-*",
     "prompt-float",
     "todo-float",
-    "floating-ball"
+    "floating-ball",
+    "notice"
   ],
   "permissions": [
     "core:default",
@@ -31,7 +32,6 @@
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-is-registered",
     "dialog:allow-open",
-    "dialog:allow-save",
-    "notification:default"
+    "dialog:allow-save"
   ]
 }

@@ -34,6 +34,12 @@ export function applyTheme(opts: { mode: string; preset: string; accent: string 
   // 此处负责运行时跟随；球未启用/窗口不存在时静默失败）
   if (isTauri()) {
     emitTo('floating-ball', 'floating-ball-theme', { accent: opts.accent, dark }).catch(() => {})
+    // 推送通知窗（独立 WebView，运行时跟随主窗主题）
+    emitTo('notice', 'notice-theme', {
+      mode: opts.mode,
+      preset: opts.preset,
+      accent: opts.accent,
+    }).catch(() => {})
   }
 }
 

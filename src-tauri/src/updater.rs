@@ -800,6 +800,10 @@ pub fn relaunch_app(app: &tauri::AppHandle) {
             // 子进程已创建：此刻释放互斥与隐藏窗口（幂等），保证新实例的
             // CreateMutexW 拿到的是全新互斥、必然成为主实例；随后本进程退出。
             tauri_plugin_single_instance::destroy(app);
+            // 托盘图标同样要补发 NIM_DELETE：relaunch 走硬退不触发 RunEvent::Exit，
+            // 不清理的话自动重启/手动重启后托盘会留一个悬停才消失的幽灵图标。
+            // 新实例按自己的 hwnd+id 重新 NIM_ADD，二者互不影响。
+            let _ = app.remove_tray_by_id("main-tray");
             log::info!("已拉起新进程接管启动，当前进程退出");
             std::process::exit(0);
         }

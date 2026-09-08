@@ -107,7 +107,7 @@ const state = reactive<StoreState>({
     update_interval_hours: 4,
     skipped_update_version: '',
     floating_ball_enabled: true,
-    floating_ball_snap: true,
+    floating_ball_auto_hide: true,
     floating_ball_with_main: false,
     floating_ball_buttons: [
       'view:dashboard',
@@ -832,21 +832,21 @@ export function useStore() {
     }
   }
 
-  // ---- 桌面悬浮球（ADR 0004）：开关/吸附/同显/按钮统一经 floating_ball_save_settings 落盘，
+  // ---- 桌面悬浮球（ADR 0004）：开关/贴边隐藏/同显/按钮统一经 floating_ball_save_settings 落盘，
   // 不走 saveConfig（后端对悬浮球字段做磁盘合并保护，见 commands::save_config） ----
   async function setFloatingBallEnabled(value: boolean) {
     state.config.floating_ball_enabled = value
     if (!isTauri()) return
     await tauriApi.floatingBallSaveSettings(
       value,
-      state.config.floating_ball_snap,
+      state.config.floating_ball_auto_hide,
       state.config.floating_ball_with_main,
       state.config.floating_ball_buttons,
     )
   }
 
-  async function setFloatingBallSnap(value: boolean) {
-    state.config.floating_ball_snap = value
+  async function setFloatingBallAutoHide(value: boolean) {
+    state.config.floating_ball_auto_hide = value
     if (!isTauri()) return
     await tauriApi.floatingBallSaveSettings(
       state.config.floating_ball_enabled,
@@ -861,7 +861,7 @@ export function useStore() {
     if (!isTauri()) return
     await tauriApi.floatingBallSaveSettings(
       state.config.floating_ball_enabled,
-      state.config.floating_ball_snap,
+      state.config.floating_ball_auto_hide,
       value,
       state.config.floating_ball_buttons,
     )
@@ -873,7 +873,7 @@ export function useStore() {
     if (!isTauri()) return
     await tauriApi.floatingBallSaveSettings(
       state.config.floating_ball_enabled,
-      state.config.floating_ball_snap,
+      state.config.floating_ball_auto_hide,
       state.config.floating_ball_with_main,
       state.config.floating_ball_buttons,
     )
@@ -1124,7 +1124,7 @@ export function useStore() {
     setExtensionOpenMode,
     setRunAtStartup,
     setFloatingBallEnabled,
-    setFloatingBallSnap,
+    setFloatingBallAutoHide,
     setFloatingBallWithMain,
     setFloatingBallButtons,
     setClipboardShortcut,

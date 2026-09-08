@@ -1,8 +1,8 @@
 //! 桌面悬浮球（ADR 0004）：常驻透明置顶小球，仅主窗口隐藏时显示。
 //! 单击展开环形快捷菜单、双击切换主窗口（开着则收起）、右键托盘同款菜单；
-//! 拖拽记忆位置，靠近屏幕边缘自动吸附——停靠姿态为「完整贴边」：球缘距屏边
-//! SNAP_GAP 停住、球体完整可见（与交互原型一致；曾实现为「半挂」球心贴屏边、
-//! 半个球藏屏外，用户实测觉得吸附没用且难拖回，已改回完整贴边）。
+//! 拖拽记忆位置，开启「贴边自动隐藏」时靠近屏幕边缘松手 → 球心落在屏边，
+//! 只露出半个球体（悬停/拖拽/展开时完整滑出，前端按 dock 状态 CSS 平移实现）。
+//! 曾用「贴边吸附」（完整贴边停靠），用户反馈从未生效且不需要，已替换。
 //! Windows-only：独立透明无边框窗口，与 countdown_window 同模式复用。
 //!
 //! 几何模型：球态窗口 = BALL_SIZE，菜单态 = MENU_SIZE，均以「球心」（窗口中心）为锚
@@ -36,15 +36,16 @@ pub const BALL_SIZE: f64 = 100.0;
 /// 用户反馈 312 太空旷——按钮内沿距球缘 45px，收紧到 260 后空隙约 19px，8 键 hover 仍不重叠）
 pub const MENU_SIZE: f64 = 260.0;
 /// 球体半径（逻辑 px）：前端 .fb-ball 视觉 48px 直径的半径；
-/// 用于默认初始位置与吸附停靠的贴边定位（球心距屏边 = BALL_R + SNAP_GAP）
+/// 用于默认初始位置留白与贴边自动隐藏的触发判定
 const BALL_R: f64 = 24.0;
-/// 吸附触发距离（逻辑 px，球心距屏幕边缘）：拖拽松手时小于该值 → 完整贴边停靠。
-/// 曾为 60（球缘 ~36px 内才吸附）：贴边松手时球本来就离停靠位只差 SNAP_GAP，
-/// 视觉上开与不开毫无区别（用户反馈）。120 ≈ 一个球宽：球缘距屏边 96px 内松手
-/// 即被明显吸到贴边位，吸附开/关差异一目了然
-const SNAP_TRIGGER: f64 = 120.0;
-/// 贴边停靠留白：默认初始位置与吸附停靠共用——球缘距屏幕边缘的视觉间距（逻辑 px），
-/// 球整体完整可见地停在屏内（不做「半挂」藏球，用户实测半挂觉得吸附没用）
+/// 贴边自动隐藏触发距离（逻辑 px，球心距工作区边缘）：拖拽松手时球缘距屏边
+/// 在 DOCK_TRIGGER - BALL_R（24px，约一个球半径）内 → 球心落到屏边，半隐。
+/// 再远说明用户是「放」不是「贴」，保持原位
+const DOCK_TRIGGER: f64 = 48.0;
+/// 停靠判定容差（物理 px）：已存储球心距屏边在该值内即视为该侧停靠态
+/// （半隐位置是精确落在屏边的，容差只吸收 DPI 取整误差）
+const DOCK_TOL: f64 = 6.0;
+/// 默认初始位置留白：球缘距工作区边缘的视觉间距（逻辑 px）
 const SNAP_GAP: f64 = 7.0;
 /// 环形按钮上限（超过会互相重叠；保存命令与设置页双重钳制）
 pub const MAX_BUTTONS: usize = 8;
@@ -77,19 +78,54 @@ pub fn set_main_minimized(app: &AppHandle, minimized: bool) {
     }
 }
 
+/// 贴边停靠状态：球心落在某侧工作区边缘（该侧球体藏屏外一半）。
+/// 前端据此做 CSS 平移：悬停/拖拽/菜单展开时向屏内滑出 BALL_R 完整露出。
+#[derive(Debug, Default, Serialize, Clone, Copy)]
+pub struct DockState {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct FloatingBallState {
     pub enabled: bool,
-    pub snap: bool,
+    /// 贴边自动隐藏（取代旧「贴边吸附」）
+    pub auto_hide: bool,
     /// 与主窗口同时显示（主窗可见时球保持常驻）
     pub with_main: bool,
     pub buttons: Vec<String>,
     /// 记忆的球心位置（物理 px，拖拽松手后由后端记忆；None = 从未拖拽过）
     pub x: Option<f64>,
     pub y: Option<f64>,
+    /// 当前停靠边（半隐态）：前端悬停露出的平移方向依据
+    pub dock: DockState,
     /// 球态窗口逻辑边长（前端 resize 失配自检的期望值之一）
     pub ball_size: f64,
     pub menu_size: f64,
+}
+
+/// 停靠判定：存储球心（物理 px）距所在显示器工作区边缘在 DOCK_TOL 内 → 该侧停靠
+#[cfg(target_os = "windows")]
+fn dock_state(win: &tauri::WebviewWindow, cx: Option<f64>, cy: Option<f64>) -> DockState {
+    let (Some(cx), Some(cy)) = (cx, cy) else {
+        return DockState::default();
+    };
+    let Ok(Some(mon)) = win.current_monitor() else {
+        return DockState::default();
+    };
+    let wa = mon.work_area();
+    let left = wa.position.x as f64;
+    let top = wa.position.y as f64;
+    let right = left + wa.size.width as f64;
+    let bottom = top + wa.size.height as f64;
+    DockState {
+        left: (cx - left).abs() <= DOCK_TOL,
+        right: (right - cx).abs() <= DOCK_TOL,
+        top: (cy - top).abs() <= DOCK_TOL,
+        bottom: (bottom - cy).abs() <= DOCK_TOL,
+    }
 }
 
 /// 窗口实时 DPI 缩放系数：直接查 GetDpiForWindow，不用 tao 缓存的 scale_factor。
@@ -177,7 +213,7 @@ fn ensure_window(app: &AppHandle) -> tauri::Result<()> {
             // 对应值（失配会让球体陀螺环被窗口边缘裁掉一截，见 apply_geometry 注释）
             tauri::WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(w) = handle.get_webview_window(LABEL) {
-                    apply_geometry(&w, is_expanded(&w));
+                    apply_geometry(&w, is_expanded(&w), None);
                 }
             }
             _ => {}
@@ -209,9 +245,11 @@ fn place_initial(app: &AppHandle, win: &tauri::WebviewWindow) {
     if let Ok(Some(mon)) = app.primary_monitor() {
         let gap = (SNAP_GAP * scale).round() as i32;
         let ball_r = (BALL_R * scale).round() as i32;
-        // 默认右下角：球缘距屏右/下各 SNAP_GAP
-        let cx = mon.position().x + mon.size().width as i32 - ball_r - gap;
-        let cy = mon.position().y + mon.size().height as i32 - ball_r - gap;
+        // 默认右下角：按工作区（扣除任务栏）定位，球缘距工作区右/下各 SNAP_GAP，
+        // 否则任务栏在底部时默认位会被任务栏盖住
+        let wa = mon.work_area();
+        let cx = wa.position.x + wa.size.width as i32 - ball_r - gap;
+        let cy = wa.position.y + wa.size.height as i32 - ball_r - gap;
         let _ = win.set_position(PhysicalPosition::new(cx - half, cy - half));
     }
 }
@@ -235,7 +273,7 @@ pub fn sync_with_main(app: &AppHandle) {
         let keep_ball = !main_visible || cfg.floating_ball_with_main;
         if keep_ball {
             // 曾以菜单态被隐藏时先回到球态几何再显示（隐藏期间收拢，跳动不可见）
-            apply_geometry(&win, false);
+            apply_geometry(&win, false, None);
             let _ = win.show();
             // 通知页面复位菜单态（几何已在上面收拢）
             use tauri::Emitter;
@@ -269,10 +307,15 @@ fn is_expanded(win: &tauri::WebviewWindow) -> bool {
 /// 期望（隐藏期间错过 WM_DPICHANGED 等）时，任何一次开合/显示都会被本函数拉回：
 /// SetWindowPos 同时修正尺寸 → WM_SIZE → wry 同步 WebView2 bounds → 视口恢复。
 /// 换用 tao 缓存 scale 的话，缓存过期时目标尺寸永远算成旧值，失配无法自愈。
+/// `scale_override`：前端视口实测 DPI（窗口物理宽 / CSS 视口宽）。窗口 DPI 上下文
+/// 过期（隐藏期间错过 WM_DPICHANGED 且 GetDpiForWindow 仍返回旧值）时，
+/// window_scale 算出的目标物理尺寸依然偏小 → WebView2 按真实光栅 DPI 渲染，
+/// 视口 < 逻辑尺寸，菜单按钮外圈被窗口边缘裁掉。此时以「视口实测」为唯一真相，
+/// 前端 checkViewportSync 失配时携带 clientWidth 调 floating_ball_reapply 自愈。
 #[cfg(target_os = "windows")]
-fn apply_geometry(win: &tauri::WebviewWindow, expanded: bool) {
+fn apply_geometry(win: &tauri::WebviewWindow, expanded: bool, scale_override: Option<f64>) {
     let Ok(pos) = win.outer_position() else { return };
-    let scale = window_scale(win);
+    let scale = scale_override.unwrap_or_else(|| window_scale(win));
     let was_expanded = is_expanded(win);
 
     // 当前球心 = 窗口实际中心；取不到实际尺寸（极端）才退回逻辑换算
@@ -378,15 +421,26 @@ fn apply_enabled(app: &AppHandle, enabled: bool) {
 /// 命令名 = 函数名（Tauri v2 注册规则），前端统一以 `floating_ball_*` 调用，
 /// 故函数名带模块前缀，与 src/api/tauri.ts 的 invoke 名一一对应。
 #[tauri::command]
-pub fn floating_ball_get_state() -> FloatingBallState {
+pub fn floating_ball_get_state(app: tauri::AppHandle) -> FloatingBallState {
     let cfg = config::load();
+    #[cfg(target_os = "windows")]
+    let dock = app
+        .get_webview_window(LABEL)
+        .map(|w| dock_state(&w, cfg.floating_ball_x, cfg.floating_ball_y))
+        .unwrap_or_default();
+    #[cfg(not(target_os = "windows"))]
+    let dock = {
+        let _ = &app;
+        DockState::default()
+    };
     FloatingBallState {
         enabled: cfg.floating_ball_enabled,
-        snap: cfg.floating_ball_snap,
+        auto_hide: cfg.floating_ball_auto_hide,
         with_main: cfg.floating_ball_with_main,
         buttons: cfg.floating_ball_buttons,
         x: cfg.floating_ball_x,
         y: cfg.floating_ball_y,
+        dock,
         ball_size: BALL_SIZE,
         menu_size: MENU_SIZE,
     }
@@ -398,7 +452,7 @@ pub fn floating_ball_get_state() -> FloatingBallState {
 pub fn floating_ball_save_settings(
     app: AppHandle,
     enabled: bool,
-    snap: bool,
+    auto_hide: bool,
     with_main: bool,
     buttons: Vec<String>,
 ) -> Result<(), String> {
@@ -414,7 +468,7 @@ pub fn floating_ball_save_settings(
         let _guard = config::lock();
         let mut cfg = config::load();
         cfg.floating_ball_enabled = enabled;
-        cfg.floating_ball_snap = snap;
+        cfg.floating_ball_auto_hide = auto_hide;
         cfg.floating_ball_with_main = with_main;
         cfg.floating_ball_buttons = buttons;
         config::save(&cfg)?;
@@ -423,32 +477,27 @@ pub fn floating_ball_save_settings(
     #[cfg(target_os = "windows")]
     apply_enabled(&app, enabled);
 
-    // 通知球窗口刷新按钮集（未启用/非 Windows 时窗口不存在，跳过）
+    // 通知球窗口重拉状态（按钮集/自动隐藏/停靠边一并刷新）
     #[cfg(target_os = "windows")]
     if enabled {
         use tauri::Emitter;
-        let cfg = config::load();
-        let _ = app.emit_to(
-            LABEL,
-            "floating-ball-config-changed",
-            serde_json::json!({ "buttons": cfg.floating_ball_buttons, "snap": cfg.floating_ball_snap }),
-        );
+        let _ = app.emit_to(LABEL, "floating-ball-config-changed", ());
     }
 
     #[cfg(not(target_os = "windows"))]
-    let _ = (&app, snap);
+    let _ = (&app, auto_hide);
 
     log::info!(
-        "悬浮球设置已保存: enabled={} snap={} with_main={}",
+        "悬浮球设置已保存: enabled={} auto_hide={} with_main={}",
         enabled,
-        snap,
+        auto_hide,
         with_main
     );
     Ok(())
 }
 
-/// 拖拽结束：球心钳在显示器内（不能整个出屏，否则拖不回来）+ 可选贴边吸附
-/// （球缘距屏边 SNAP_GAP 完整停靠，见模块注释）+ 记忆球心到配置。
+/// 拖拽结束：球心钳在工作区内 + 可选贴边自动隐藏（球心落到屏边、半隐，
+/// 见模块注释）+ 记忆球心到配置。
 /// 拖拽只发生在球态，窗口位置 = 球心 - 球态半边长。
 /// async：配置读写是文件 IO，必须离开主线程（前端在系统拖动循环结束后调用）。
 #[tauri::command]
@@ -463,32 +512,33 @@ pub async fn floating_ball_drag_end(app: AppHandle) {
         let mut cx = pos.x as f64 + half;
         let mut cy = pos.y as f64 + half;
         if let Ok(Some(mon)) = win.current_monitor() {
-            let mx = mon.position().x as f64;
-            let my = mon.position().y as f64;
-            let mw = mon.size().width as f64;
-            let mh = mon.size().height as f64;
-            // 球心只能钳在显示器内（球整体不能出屏，否则拖不回来）
-            cx = cx.clamp(mx, (mx + mw).max(mx));
-            cy = cy.clamp(my, (my + mh).max(my));
-            if config::load().floating_ball_snap {
-                let trigger = SNAP_TRIGGER * scale;
+            // 以工作区为界（扣除任务栏）：球心落在工作区边缘外会被任务栏盖住
+            let wa = mon.work_area();
+            let mx = wa.position.x as f64;
+            let my = wa.position.y as f64;
+            let mr = mx + wa.size.width as f64;
+            let mb = my + wa.size.height as f64;
+            // 球心钳在显示器内（整个球不出屏，否则拖不回来）
+            cx = cx.clamp(mx, mr.max(mx));
+            cy = cy.clamp(my, mb.max(my));
+            if config::load().floating_ball_auto_hide {
+                let trigger = DOCK_TRIGGER * scale;
                 let d_left = cx - mx;
-                let d_right = mx + mw - cx;
+                let d_right = mr - cx;
                 let d_top = cy - my;
-                let d_bottom = my + mh - cy;
-                // 完整贴边停靠：球心距屏边 < trigger（球基本贴到屏边）→ 吸附到
-                // 「球缘距屏边 SNAP_GAP」的停靠位，球体完整可见——不做半挂藏球
-                // （曾实现为球心贴屏边、半个球在屏外，用户实测觉得吸附没用且难拖回）
-                let edge = (BALL_R + SNAP_GAP) * scale; // 贴边后球心距屏边距离
+                let d_bottom = mb - cy;
+                // 贴边判定：球缘距屏边 < trigger - BALL_R*scale（约一个球半径）
+                // → 球心精确落在屏边，只露出半个球体（悬停时前端 CSS 滑出露全）。
+                // 两轴独立判定，角上可双侧停靠
                 if d_left < trigger && d_left <= d_right {
-                    cx = mx + edge;
+                    cx = mx;
                 } else if d_right < trigger {
-                    cx = mx + mw - edge;
+                    cx = mr;
                 }
                 if d_top < trigger && d_top <= d_bottom {
-                    cy = my + edge;
+                    cy = my;
                 } else if d_bottom < trigger {
-                    cy = my + mh - edge;
+                    cy = mb;
                 }
             }
         }
@@ -514,7 +564,7 @@ pub async fn floating_ball_drag_end(app: AppHandle) {
 pub async fn floating_ball_expand(app: AppHandle, expanded: bool) {
     #[cfg(target_os = "windows")]
     if let Some(win) = app.get_webview_window(LABEL) {
-        apply_geometry(&win, expanded);
+        apply_geometry(&win, expanded, None);
     }
     #[cfg(not(target_os = "windows"))]
     let _ = (app, expanded);
@@ -545,16 +595,23 @@ pub fn floating_ball_context_menu(app: AppHandle) -> Result<(), String> {
     crate::tray::popup_context_menu(&app).map_err(|e| e.to_string())
 }
 
-/// 前端失配自检兜底：检测到视口尺寸偏离期望（window.innerWidth 与球态/菜单态
-/// 逻辑尺寸差超容差，见 FloatingBallWindow 的 resize 监听）时调用，按当前态
-/// 重算窗口几何。与 expand 的区别：不切换态，只把当前态的几何拉回正确值。
+/// 前端失配自检兜底：视口尺寸（CSS clientWidth）偏离期望逻辑尺寸时调用。
+/// 携带 clientWidth 让 Rust 反推 WebView2 实际光栅缩放（窗口物理宽 ÷ 视口宽）——
+/// 窗口 DPI 上下文过期时 GetDpiForWindow 也会返回旧值，只有视口实测值不会骗人，
+/// 据此重设物理尺寸即可把视口拉回期望逻辑尺寸（118% 等自定义缩放下菜单按钮
+/// 外圈被裁的根治路径）。与 expand 的区别：不切换态，只把当前态几何拉回正确值。
 /// async 与 expand 同理（窗口操作离开主线程）。
 #[tauri::command]
-pub async fn floating_ball_reapply(app: AppHandle) {
+pub async fn floating_ball_reapply(app: AppHandle, viewport_w: f64) {
     #[cfg(target_os = "windows")]
     if let Some(win) = app.get_webview_window(LABEL) {
-        apply_geometry(&win, is_expanded(&win));
+        let override_scale = win.outer_size().ok().and_then(|sz| {
+            let s = sz.width as f64 / viewport_w;
+            // 合理性区间外的值不可信（视口未就绪/异常），退回 GetDpiForWindow
+            (viewport_w > 20.0 && (0.8..=4.0).contains(&s)).then_some(s)
+        });
+        apply_geometry(&win, is_expanded(&win), override_scale);
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = app;
+    let _ = (app, viewport_w);
 }

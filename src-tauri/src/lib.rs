@@ -219,7 +219,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         // 笔记图片协议：笔记 Markdown 内嵌 http://xhub-note.localhost/<hash>.<ext>，
         // 按「数据根/notes/images/<文件名>」读取（URL 不含数据根绝对路径，迁数据目录后仍有效）；
         // 文件名严格校验为 16 位十六进制哈希 + 白名单扩展名，杜绝路径穿越
@@ -277,18 +276,6 @@ pub fn run() {
                 .asset_protocol_scope()
                 .allow_directory(crate::paths::data_root(), true);
 
-            // 系统通知权限：Prompt 时请求一次（Windows 通常直接放行）
-            {
-                use tauri::plugin::PermissionState;
-                use tauri_plugin_notification::NotificationExt;
-                if matches!(
-                    app.notification().permission_state(),
-                    Ok(PermissionState::Prompt) | Ok(PermissionState::PromptWithRationale)
-                ) {
-                    let _ = app.notification().request_permission();
-                }
-            }
-
             // 旧版本（com.workbench.desktop 标识）数据迁移到 x-hub 目录
             migrate_legacy_data();
 
@@ -332,6 +319,15 @@ pub fn run() {
             // 若 show 早于首帧绘制，也只会闪主题色而非纯白
             // 主题三态：dark，或 system 且系统偏好深色 → 暗色底色；light / 系统浅色 → 亮色
             let config = config::load();
+            // 开机自启动自愈：用户开了自启动、但 Run 键因换目录/被清理工具删除/路径变更而失效时，
+            // 按当前 exe 重写。放在主窗显示前，静默修复，不阻断启动。
+            if config.run_at_startup {
+                match autostart::ensure_registered() {
+                    Ok(true) => log::info!("开机自启动：启动时自愈完成"),
+                    Ok(false) => {}
+                    Err(e) => log::warn!("开机自启动自愈失败: {e}"),
+                }
+            }
             let mut dark = config.theme_mode == "dark";
             if config.theme_mode == "system" {
                 dark = matches!(
@@ -395,6 +391,9 @@ pub fn run() {
             // 预创建剪贴板浮层窗口（隐藏常驻）：运行时现场创建 WebView2 窗口曾与
             // 悬浮球操作交错导致整窗未响应（见 clipboard.rs::init_overlay_window 注释）
             clipboard::init_overlay_window(app.handle());
+
+            // 预创建通知窗（隐藏常驻）：右下角自绘通知，跨 Win10/11 一致（详见 notify.rs）
+            notify::init(app.handle());
 
             // 关闭事件：拦截默认关闭，改为隐藏至托盘
             if let Some(window) = app.get_webview_window("main") {
@@ -510,6 +509,8 @@ pub fn run() {
             commands::get_run_at_startup,
             commands::set_run_at_startup,
             commands::get_startup_hidden,
+            notify::notice_layout,
+            notify::notice_dismiss_window,
             commands::log_client_error,
             commands::minimize_window,
             commands::toggle_maximize,
@@ -602,7 +603,12 @@ commands::set_chat_panel,
             // 宿主退出：停止所有 service 后端进程，避免 Node 子进程残留
             if let tauri::RunEvent::Exit = event {
                 service::stop_all(app);
-                // Windows 上 WebView2 子窗口/托盘销毁偶发把退出流程拖死（托盘点「退出」
+                // 先显式移除托盘图标：set_visible/destroy 那类 API 会 run_on_main_thread 回投到
+                // 事件循环（本回调正在主线程里跑，投回去没人处理，就是当年「退出流程被拖死」的
+                // 真凶）；remove_tray_by_id 是同步移除 + 析构发 Shell_NotifyIcon(NIM_DELETE)，
+                // 不依赖事件循环，既不解架也消掉 Explorer 里悬停才清的幽灵图标。
+                app.remove_tray_by_id("main-tray");
+                // Windows 上 WebView2 子窗口销毁偶发把退出流程拖死（托盘点「退出」
                 // 后进程不消失），清理完成后直接结束进程，保证退出 100% 生效
                 std::process::exit(0);
             }

@@ -972,7 +972,7 @@ pub fn save_config(config: AppConfig) -> Result<AppConfig, String> {
     // 悬浮球字段均由后端管理（位置由 drag_end 记忆、开关经 save_settings 变更），
     // 同样以磁盘为准，防止主窗旧快照把拖拽后的位置/设置覆盖回去
     merged.floating_ball_enabled = disk.floating_ball_enabled;
-    merged.floating_ball_snap = disk.floating_ball_snap;
+    merged.floating_ball_auto_hide = disk.floating_ball_auto_hide;
     merged.floating_ball_with_main = disk.floating_ball_with_main;
     merged.floating_ball_buttons = disk.floating_ball_buttons;
     merged.floating_ball_x = disk.floating_ball_x;
@@ -1064,15 +1064,29 @@ pub fn set_global_shortcut(app: tauri::AppHandle, value: String) -> Result<Strin
 /// 自启动当前状态
 #[derive(serde::Serialize)]
 pub struct RunAtStartupStatus {
+    /// 是否真正会开机自启：已开启 + Run 键指向当前 exe + 未被系统禁用。供 UI 如实反映。
     pub enabled: bool,
+    /// 用户开关意图（config.run_at_startup）。
+    pub configured: bool,
+    /// Run 键是否存在且指向当前 exe（路径不符/被删 = false）。
+    pub registered: bool,
+    /// 是否被任务管理器/安全软件在启动项里禁用（StartupApproved 置 0x03）。
+    pub os_disabled: bool,
 }
 
-/// 读取自启动状态（配置为准；若系统注册与配置不一致，下次启用/关闭会同步）
+/// 读取自启动状态：以系统真实注册为准，而非仅配置值。
+/// 配置开着但注册丢失/路径变更/被禁用时，`enabled=false`，UI 可据此提示「失效」。
 #[tauri::command]
 pub fn get_run_at_startup() -> Result<RunAtStartupStatus, String> {
     let config = crate::config::load();
+    let configured = config.run_at_startup;
+    let (registered, os_disabled) = crate::autostart::probe();
+    let enabled = configured && registered && !os_disabled;
     Ok(RunAtStartupStatus {
-        enabled: config.run_at_startup,
+        enabled,
+        configured,
+        registered,
+        os_disabled,
     })
 }
 
@@ -2467,15 +2481,22 @@ pub struct ClipboardInfo {
     pub shortcut: String,
 }
 
-/// 历史列表：Q8 异步加载，首次唤起只拉最近 50 条；搜索时传 keyword
+/// 历史列表：Q8 异步加载，首次唤起只拉最近 50 条；滚动到底按 offset 续拉；搜索时传 keyword
 #[tauri::command]
 pub fn clipboard_list(
     state: State<'_, DbState>,
     keyword: Option<String>,
     limit: Option<i64>,
+    offset: Option<i64>,
 ) -> Result<Vec<ClipboardItem>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    clipboard::list(&conn, keyword.as_deref(), limit.unwrap_or(50)).map_err(err_str)
+    clipboard::list(
+        &conn,
+        keyword.as_deref(),
+        limit.unwrap_or(50),
+        offset.unwrap_or(0),
+    )
+    .map_err(err_str)
 }
 
 /// 按条目类型把内容写入系统剪贴板（文本 / 图片 / 文件）

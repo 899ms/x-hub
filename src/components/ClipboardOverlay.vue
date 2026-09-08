@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
@@ -22,6 +22,11 @@ const info = ref<ClipboardInfo>({ paused: false, max_items: 500, ttl_days: 7, to
 const listRef = ref<HTMLElement | null>(null)
 const toasts = ref<{ id: number; text: string }[]>([])
 
+// 滚动分页：徽标显示的是 DB 总条数（info.total），列表按页续拉
+const PAGE_SIZE = 50
+const loadingMore = ref(false)
+const pageFull = ref(true) // 搜索态没有总数可判，用「上一页是否拉满」推断还有更多
+
 // 右键菜单状态
 const ctx = ref<{ x: number; y: number; item: ClipboardItem } | null>(null)
 
@@ -36,8 +41,12 @@ document.documentElement.dataset.clipboardWindow = ''
 
 const countText = computed(() => {
   if (!keyword.value.trim()) return `${info.value.total} 条`
-  return `${items.value.length} 条`
+  return pageFull.value ? `${items.value.length}+ 条` : `${items.value.length} 条`
 })
+
+const hasMore = computed(() =>
+  keyword.value.trim() ? pageFull.value : items.value.length < info.value.total,
+)
 
 const hasPinned = computed(() => items.value.some((i) => i.is_pinned))
 
@@ -59,11 +68,40 @@ async function loadList() {
   loading.value = true
   try {
     const kw = keyword.value.trim()
-    items.value = await tauriApi.clipboardList(kw || undefined, 50)
+    items.value = await tauriApi.clipboardList(kw || undefined, PAGE_SIZE, 0)
+    pageFull.value = items.value.length >= PAGE_SIZE
     selected.value = 0
+    await nextTick()
+    if (listRef.value) listRef.value.scrollTop = 0
   } finally {
     loading.value = false
   }
+}
+
+// 滚动到底拉下一页；offset=已加载条数（后端 LIMIT/OFFSET）
+async function loadMore() {
+  if (!isTauri() || loading.value || loadingMore.value || !hasMore.value) return
+  loadingMore.value = true
+  try {
+    const kw = keyword.value.trim()
+    const page = await tauriApi.clipboardList(kw || undefined, PAGE_SIZE, items.value.length)
+    pageFull.value = page.length >= PAGE_SIZE
+    if (page.length > 0) {
+      // 分页期间若来了新复制记录，offset 窗口会整体平移导致跨页重复，按 id 去重
+      const seen = new Set(items.value.map((i) => i.id))
+      items.value = [...items.value, ...page.filter((p) => !seen.has(p.id))]
+    }
+  } catch {
+    pageFull.value = false // 拉取失败即止损，避免滚动事件反复重试打后端
+  } finally {
+    loadingMore.value = false
+  }
+}
+
+function onListScroll() {
+  const el = listRef.value
+  if (!el) return
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 140) void loadMore()
 }
 
 async function loadInfo() {
@@ -238,6 +276,7 @@ async function onClear() {
   try {
     await tauriApi.clipboardClear()
     items.value = []
+    pageFull.value = false
     info.value.total = 0
     toast('历史已清空')
   } catch (e) {
@@ -311,6 +350,7 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'ArrowDown') {
     e.preventDefault()
     if (items.value.length === 0) return
+    if (selected.value === items.value.length - 1) void loadMore()
     selected.value = (selected.value + 1) % items.value.length
     scrollSelectedIntoView()
   } else if (e.key === 'ArrowUp') {
@@ -392,7 +432,7 @@ function fileName(item: ClipboardItem): string {
       </div>
 
       <!-- 列表 -->
-      <div ref="listRef" class="cb-list">
+      <div ref="listRef" class="cb-list" @scroll="onListScroll">
         <template v-if="items.length">
           <div v-if="hasPinned" class="cb-section">置顶</div>
           <div

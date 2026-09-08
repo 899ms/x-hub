@@ -192,8 +192,8 @@ export interface AppConfig {
   skipped_update_version: string
   /** 桌面悬浮球总开关（ADR 0004，默认开启）：主窗口隐藏时在桌面显示悬浮球 */
   floating_ball_enabled: boolean
-  /** 悬浮球贴边吸附（拖到屏幕边缘附近自动贴边停靠，球完整留在屏内） */
-  floating_ball_snap: boolean
+  /** 悬浮球贴边自动隐藏（拖到屏幕边缘附近松手 → 半隐只露一半，悬停完整露出） */
+  floating_ball_auto_hide: boolean
   /** 与主窗口同时显示：主窗可见时球保持常驻（默认 false = 仅主窗隐藏/最小化时出现） */
   floating_ball_with_main: boolean
   /** 环形快捷菜单按钮 id 列表（view:xxx / act:xxx，去重后最多 8 个） */
@@ -209,16 +209,27 @@ export interface AppInfo {
   latest_section: string
 }
 
+/** 悬浮球停靠边（球心落在该侧屏幕/工作区边缘，球体一半藏屏外） */
+export interface BallDock {
+  left: boolean
+  right: boolean
+  top: boolean
+  bottom: boolean
+}
+
 /** 悬浮球状态（Rust floating_ball::get_state） */
 export interface FloatingBallState {
   enabled: boolean
-  snap: boolean
+  /** 贴边自动隐藏开关（取代旧「贴边吸附」） */
+  auto_hide: boolean
   /** 与主窗口同时显示（主窗可见时球保持常驻） */
   with_main: boolean
   buttons: string[]
   /** 记忆的球心位置（物理 px，拖拽后由后端记忆） */
   x: number | null
   y: number | null
+  /** 当前停靠边：前端据此做「悬停滑出露全」的 CSS 平移 */
+  dock: BallDock
   /** 球态窗口逻辑边长（前端 resize 失配自检的期望值之一） */
   ball_size: number
   menu_size: number
@@ -344,6 +355,18 @@ export interface DataPathInfo {
   path: string
   /** default（默认 %APPDATA% 路径）/ custom（用户自定义）/ portable（便携模式，跟随程序目录） */
   mode: 'default' | 'custom' | 'portable'
+}
+
+/** 开机自启动真实状态：区分「用户意图」与「系统里是否真的会生效」 */
+export interface AutostartStatus {
+  /** 是否真正会开机自启 = configured && registered && !os_disabled */
+  enabled: boolean
+  /** 用户开关意图（config.run_at_startup） */
+  configured: boolean
+  /** Run 键存在且指向当前 exe */
+  registered: boolean
+  /** 被任务管理器/安全软件在启动项里禁用 */
+  os_disabled: boolean
 }
 
 export interface WeatherCurrent {
@@ -589,9 +612,14 @@ export const tauriApi = {
     invoke<void>('set_always_on_top_config', { value }),
   getGlobalShortcut: () => invoke<string>('get_global_shortcut'),
   setGlobalShortcut: (value: string) => invoke<string>('set_global_shortcut', { value }),
-  getRunAtStartup: () => invoke<{ enabled: boolean }>('get_run_at_startup'),
+  getRunAtStartup: () =>
+    invoke<AutostartStatus>('get_run_at_startup'),
   setRunAtStartup: (enabled: boolean) => invoke<void>('set_run_at_startup', { enabled }),
   getStartupHidden: () => invoke<boolean>('get_startup_hidden'),
+  /** 右下角通知窗：前端上报内容高度→后端锚定工作区右下角并显示 */
+  noticeLayout: (height: number) => invoke<void>('notice_layout', { height }),
+  /** 通知队列清空后收起通知窗 */
+  noticeDismiss: () => invoke<void>('notice_dismiss_window'),
   logClientError: (payload: ClientErrorPayload) =>
     invoke<void>('log_client_error', { message: payload.message, detail: payload.detail }),
   minimizeWindow: () => invoke<void>('minimize_window'),
@@ -601,16 +629,18 @@ export const tauriApi = {
   floatingBallGetState: () => invoke<FloatingBallState>('floating_ball_get_state'),
   floatingBallSaveSettings: (
     enabled: boolean,
-    snap: boolean,
+    autoHide: boolean,
     withMain: boolean,
     buttons: string[],
-  ) => invoke<void>('floating_ball_save_settings', { enabled, snap, withMain, buttons }),
+  ) => invoke<void>('floating_ball_save_settings', { enabled, autoHide, withMain, buttons }),
   floatingBallDragEnd: () => invoke<void>('floating_ball_drag_end'),
   floatingBallExpand: (expanded: boolean) => invoke<void>('floating_ball_expand', { expanded }),
   floatingBallTrigger: (id: string) => invoke<void>('floating_ball_trigger', { id }),
   floatingBallContextMenu: () => invoke<void>('floating_ball_context_menu'),
-  /** 前端失配自检兜底：视口尺寸偏离期望时让 Rust 按当前态重算窗口几何（DPI 自愈） */
-  floatingBallReapply: () => invoke<void>('floating_ball_reapply'),
+  /** 前端失配自检兜底：携带视口 CSS 宽度，让 Rust 按「物理宽÷视口宽」实测缩放重算
+   * 窗口几何（窗口 DPI 上下文过期时 GetDpiForWindow 也是旧值，只有视口实测可信） */
+  floatingBallReapply: (viewportW: number) =>
+    invoke<void>('floating_ball_reapply', { viewportW }),
   getThemeConfig: () => invoke<ThemeConfig>('get_theme_config'),
   getSystemInfo: () => invoke<SystemInfo>('get_system_info'),
   listSnippets: () => invoke<Snippet[]>('list_snippets'),
@@ -698,8 +728,12 @@ export const tauriApi = {
   setCountdownCardVisible: (visible: boolean) =>
     invoke<void>('set_countdown_card_visible', { visible }),
   // ---- 剪贴板历史 ----
-  clipboardList: (keyword?: string, limit?: number) =>
-    invoke<ClipboardItem[]>('clipboard_list', { keyword: keyword ?? null, limit: limit ?? 50 }),
+  clipboardList: (keyword?: string, limit?: number, offset?: number) =>
+    invoke<ClipboardItem[]>('clipboard_list', {
+      keyword: keyword ?? null,
+      limit: limit ?? 50,
+      offset: offset ?? 0,
+    }),
   clipboardCopy: (id: number) => invoke<void>('clipboard_copy', { id }),
   clipboardPaste: (id: number) => invoke<void>('clipboard_paste', { id }),
   clipboardTogglePin: (id: number) => invoke<ClipboardItem>('clipboard_toggle_pin', { id }),

@@ -167,9 +167,10 @@ pub struct AppConfig {
     /// 桌面悬浮球总开关（ADR 0004，默认开启）：主窗口隐藏时在桌面显示悬浮球
     #[serde(default = "default_true")]
     pub floating_ball_enabled: bool,
-    /// 悬浮球贴边吸附：拖到屏幕边缘附近自动贴边停靠（球完整留在屏内，不藏球）
+    /// 悬浮球贴边自动隐藏：拖到屏幕边缘附近松手 → 球心落在屏边，只露出半个球体；
+    /// 悬停时球体完整滑出。取代旧「贴边吸附」（用户反馈吸附从未生效，改为本交互）
     #[serde(default = "default_true")]
-    pub floating_ball_snap: bool,
+    pub floating_ball_auto_hide: bool,
     /// 与主窗口同时显示：默认 false = 球仅在主窗隐藏/最小化时出现；
     /// 开启后球常驻桌面，主窗显示也不隐藏（sync_with_main 读此字段联动）
     #[serde(default)]
@@ -304,7 +305,7 @@ impl Default for AppConfig {
             update_interval_hours: default_update_interval_hours(),
             skipped_update_version: String::new(),
             floating_ball_enabled: true,
-            floating_ball_snap: true,
+            floating_ball_auto_hide: true,
             floating_ball_with_main: false,
             floating_ball_buttons: default_floating_ball_buttons(),
             floating_ball_x: None,

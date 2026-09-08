@@ -122,15 +122,14 @@ fn advance(conn: &rusqlite::Connection, item: &Countdown, now: i64, missed: bool
 }
 
 fn send_notification(app: &AppHandle, item: &Countdown) -> Result<(), String> {
-    // 便携版无安装器，系统 toast 依赖 AUMID 注册会静默失败；
-    // 统一走托盘气泡（Win10/11 渲染为操作中心的系统级通知）。
+    // 走自绘右下角通知窗（跨 Win10/11 一致）；系统 WinRT Toast 在 Win10 对便携版会静默失败。
     let title = format!("倒计时提醒 · {}", item.name);
     let body = match item.repeat_mode.as_str() {
         "daily" => "每日提醒时间到",
         "interval" => "间隔提醒时间到",
         _ => "时间到",
     };
-    crate::notify::show_system_notification(app, &title, body);
+    crate::notify::show_notice(app, "countdown", &title, body);
     log::info!("已发送系统通知: id={} name={}", item.id, item.name);
     Ok(())
 }
