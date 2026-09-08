@@ -3,8 +3,8 @@
 // 拖拽移动（系统原生拖动循环 + 松手贴边自动隐藏/记忆位置）、单击展开环形菜单
 // （螺旋扫出/倒序收回）、双击显示主窗口、右键托盘同款菜单；开合由 Rust 以球心为锚
 // 原子切换窗口几何（球态 100 ↔ 菜单态 260），重排滞后帧用整窗淡出掩盖。
-// 贴边半隐时（st.dock）球体贴屏幕边缘只显示一半，悬停/拖拽时 CSS 滑出完整露出，
-// 展开态由 Rust 把菜单窗口整体钳回屏内（不平移，避免与环形按钮中心错位）。
+// 贴边半隐/悬停滑出/离开隐回全部由 Rust 边缘监视循环移动窗口实现
+// （floating_ball.rs edge_tick，参考 tiez-clipboard）——页面不再做任何 dock 平移。
 // 视觉构成：canvas 粒子球（斐波那契点云 + 能量网 + 脉冲能量核 + 雷达刻度）
 //          + CSS 3D 陀螺环（三环自旋 + 悬停指针倾转）+ 光晕呼吸 + 接触阴影 + 悬停微升起；
 //          球体为玻璃质感、配色跟随设置「外观」的主题强调色（--fb-accent）。
@@ -245,18 +245,18 @@ function onBallPointerMove(e: PointerEvent) {
   // 位移超阈值 → 移交系统原生拖动
   if (!drag.native && drag.moved >= DRAG_THRESHOLD) {
     drag.native = true
+    // 通知 Rust「拖拽开始」。真正的松手由后端边缘监视循环检测（左键释放后的第一跳
+    // 统一钳制/吸附/落位/记忆，随后发 floating-ball-settled 事件）——
+    // startDragging 的 promise 在拖动开始时就 resolve，不能当拖动结束信号：
+    // 曾因此在松手钩子里读到拖动中途位置（与最终位置差几百 px），
+    // 球被落位补齐搬回中途——表现为「拖到边缘松手，球弹回屏幕中间」
+    void tauriApi.floatingBallDragBegin()
     getCurrentWindow()
       .startDragging()
       .then(() => {
-        // 模态循环随松键退出 = 拖拽结束：钳制进屏 + 贴边半隐 + 记忆位置（Rust 侧），
-        // 完成后重拉状态刷新停靠边（dock 决定悬停滑出方向）
         drag = null
         dragging.value = false
         targetEnergy = hovered.value ? 1 : 0
-        tauriApi
-          .floatingBallDragEnd()
-          .then(refreshState)
-          .catch(() => {})
       })
       .catch(() => {
         // 启动失败回退指针收尾路径，避免卡在拖拽态
@@ -283,13 +283,8 @@ async function onBallPointerUp() {
       void openMenu()
     }, CLICK_DELAY_MS)
   } else {
-    // 松手：钳制进屏 + 贴边半隐 + 记忆位置（Rust 侧），随后重拉状态刷新停靠边
-    try {
-      await tauriApi.floatingBallDragEnd()
-      refreshState()
-    } catch {
-      // 忽略：收尾失败不影响使用
-    }
+    // 非原生回退路径：松手后窗口位置由后端监视循环统一落位（drag begin 已武装），
+    // 落位完成会发 floating-ball-settled 事件刷新停靠边
     targetEnergy = hovered.value ? 1 : 0
   }
 }
@@ -318,11 +313,9 @@ function onBallPointerLeave() {
   }
 }
 
-// ---- 贴边半隐的悬停滑出：Rust 把停靠球心精确落在屏边（球体一半在视口/屏幕外，
-// 天然只露一半）；悬停/拖拽时把球体装饰整体向屏内平移 BALL_R 完整露出，移开隐回。
-// 注意方向：不悬停 = 不平移（保持半隐），悬停/拖拽 = 平移露出。曾把条件写反
-// （空闲平移露出、悬停反而半隐），用户实机看到的就是「贴边自动隐藏没生效」 ----
-const DOCK_PEEK = 24
+// ---- 贴边停靠：露出/隐回由 Rust 边缘监视循环直接移动窗口（见 floating_ball.rs
+// edge_tick）；页面不再参与——旧的 CSS 平移方案依赖 pointerenter/leave，在原生拖拽
+// 模态循环吞指针事件、半截屏外窗口命中不稳等场景下时好时坏，已整体移除 ----
 
 function refreshState() {
   tauriApi
@@ -332,20 +325,6 @@ function refreshState() {
     })
     .catch(() => {})
 }
-
-const dockStyle = computed<CSSProperties>(() => {
-  const s = st.value
-  const d = s?.dock
-  if (!s || !s.auto_hide || !d) return {}
-  // 展开态不平移：Rust 已把整块菜单窗口钳回屏内（球心离开屏边，天然完整可见），
-  // 再平移会与环形按钮中心错位
-  if (menuOpen.value) return {}
-  if (!hovered.value && !dragging.value) return {}
-  const x = (d.left ? DOCK_PEEK : 0) - (d.right ? DOCK_PEEK : 0)
-  const y = (d.top ? DOCK_PEEK : 0) - (d.bottom ? DOCK_PEEK : 0)
-  if (x === 0 && y === 0) return {}
-  return { transform: `translate(${x}px, ${y}px)` }
-})
 
 // ---- 动作分发：先收起菜单再触发（剪贴板/视图等互不遮挡） ----
 function onButton(id: string) {
@@ -548,6 +527,7 @@ function drawFrame(t: number) {
 
 let unlistenShown: (() => void) | null = null
 let unlistenConfig: (() => void) | null = null
+let unlistenSettled: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
 let unlistenTheme: (() => void) | null = null
 
@@ -625,6 +605,8 @@ onMounted(async () => {
   })
   // 设置页调整按钮集/贴边自动隐藏开关后即时生效：整体重拉（含停靠边）
   unlistenConfig = await listen('floating-ball-config-changed', () => refreshState())
+  // 拖拽落位完成（后端监视循环在左键释放后统一钳制/吸附/记忆）→ 重拉停靠边
+  unlistenSettled = await listen('floating-ball-settled', () => refreshState())
   // 窗口失焦收起菜单（ADR：窗口失焦为四种收起方式之一）
   unlistenFocus = await appWindow.onFocusChanged(({ payload }) => {
     if (!payload) closeMenu()
@@ -641,6 +623,7 @@ onBeforeUnmount(() => {
   if (settledTimer != null) window.clearTimeout(settledTimer)
   unlistenShown?.()
   unlistenConfig?.()
+  unlistenSettled?.()
   unlistenFocus?.()
   unlistenTheme?.()
 })
@@ -671,8 +654,8 @@ onBeforeUnmount(() => {
       <span class="fb-btn-label">{{ b.label }}</span>
     </button>
 
-    <!-- 贴边半隐平移层：停靠时悬停/拖拽/展开把球体装饰整体滑出屏边（见 dockStyle） -->
-    <div class="fb-dock" :style="dockStyle">
+    <!-- 球体容器（纯布局层；贴边露出/隐回由 Rust 移动窗口实现，这里无平移逻辑） -->
+    <div class="fb-dock">
       <!-- 接触阴影（悬停收窄 / 拖拽摊开）+ 光晕呼吸 -->
       <div class="fb-shadow"></div>
       <div class="fb-halo"></div>
@@ -723,13 +706,11 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-/* ---- 贴边半隐平移层：绝对定位容器承载球体，悬停/拖拽时靠内联 transform 平滑滑出；
-   展开态不平移（Rust 已把菜单窗口钳回屏内，平移会与环形按钮中心错位） ---- */
+/* ---- 球体容器：绝对定位布局层（贴边露出/隐回由 Rust 移动窗口实现，无平移动画） ---- */
 .fb-dock {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  transition: transform 0.2s ease;
 }
 
 /* ---- 菜单态底座 ---- */

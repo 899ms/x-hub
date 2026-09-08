@@ -1,7 +1,15 @@
 //! 桌面悬浮球（ADR 0004）：常驻透明置顶小球，仅主窗口隐藏时显示。
 //! 单击展开环形快捷菜单、双击切换主窗口（开着则收起）、右键托盘同款菜单；
 //! 拖拽记忆位置，开启「贴边自动隐藏」时靠近屏幕边缘松手 → 球心落在屏边，
-//! 只露出半个球体（悬停/拖拽/展开时完整滑出，前端按 dock 状态 CSS 平移实现）。
+//! 只露出半个球体。露出/隐回由「边缘监视循环」完成（参考 tiez-clipboard 的
+//! edge docking 设计）：100ms 轮询 GetCursorPos + 窗口矩形，命中屏边可见窄条
+//! → 把窗口整体搬回屏内（滑出量 = 窗口半边长，整窗完全屏内 → 球体 + 粒子 +
+//! 陀螺环一并露出）；光标离开滑出矩形 → 搬回半隐位。
+//! 停靠身份由「记忆球心 + 窗口实际位置」双方一致才成立：窗口实际位置既不等于
+//! 半隐位也不等于滑出位 → 说明球已被拖到别处，监视循环以窗口为准刷新记忆并
+//! 停止干预（否则旧记忆会把球拽回屏边，表现为「拖到任意位置都弹回去」）。
+//! 全程移动窗口位置、不依赖 WebView 指针事件/CSS——原生拖拽模态循环吞事件、
+//! 半截屏外透明窗命中区不稳等老翻车点从根上消除。
 //! 曾用「贴边吸附」（完整贴边停靠），用户反馈从未生效且不需要，已替换。
 //! Windows-only：独立透明无边框窗口，与 countdown_window 同模式复用。
 //!
@@ -35,20 +43,74 @@ pub const BALL_SIZE: f64 = 100.0;
 /// 环形菜单展开态窗口尺寸（逻辑 px：按钮轨道半径 92 + 按钮 26 → 外沿 118，中心 130 留 12px 余量；
 /// 用户反馈 312 太空旷——按钮内沿距球缘 45px，收紧到 260 后空隙约 19px，8 键 hover 仍不重叠）
 pub const MENU_SIZE: f64 = 260.0;
-/// 球体半径（逻辑 px）：前端 .fb-ball 视觉 48px 直径的半径；
-/// 用于默认初始位置留白与贴边自动隐藏的触发判定
+/// 球体半径（逻辑 px）：前端 .fb-ball 视觉 48px 直径的半径；用于默认初始位置留白
 const BALL_R: f64 = 24.0;
-/// 贴边自动隐藏触发距离（逻辑 px，球心距工作区边缘）：拖拽松手时球缘距屏边
-/// 在 DOCK_TRIGGER - BALL_R（24px，约一个球半径）内 → 球心落到屏边，半隐。
-/// 再远说明用户是「放」不是「贴」，保持原位
-const DOCK_TRIGGER: f64 = 48.0;
-/// 停靠判定容差（物理 px）：已存储球心距屏边在该值内即视为该侧停靠态
+/// 贴边自动隐藏触发距离（逻辑 px，球心距工作区边缘）：拖拽松手时球心距屏边在该值内
+/// → 球心吸附到屏边（+PEEK），半隐。按用户实测数据定界：真贴边的松手点球心距边
+/// 4~103px（103 是「靠边了但不吸附」的抱怨点，必须覆盖）；而用户明确称为
+/// 「不靠边的地方」的松手点最小是 146px——200 的宽吸附带把这些位置也吞了，
+/// 球从松手点滑到屏边，用户感知为「没靠边也自己挪一下/抖动」（反馈实录）。
+/// 取 120：>103 覆盖贴边直觉，<146 不打扰自由放置。
+/// **铁律：必须 > 滑出量（窗口半边长 BALL_SIZE/2 = 50 逻辑 px）+ 位置容差 POS_TOL 的
+/// 物理换算**，否则「完整屏内、刚好贴边的自由位置」与「滑出位」在几何上无法区分，
+/// 边缘监视会把用户放好的球当成停靠残留拽回屏边。
+/// 注意：吸附动作本身 = 球从松手点平滑滑到屏边（slide_to ~80ms），吸附带内的
+/// 「自己挪一下」是预期行为，不要当 bug 修；带外绝不移动。
+const DOCK_TRIGGER: f64 = 120.0;
+/// 半隐停靠位向屏内多露的距离（逻辑 px）：半隐窗口 = 停靠球心位 + dx·PEEK。
+/// 球心精确压屏边时视觉只露 24px 一条弧，观感像「球直接没了」（用户反馈）；
+/// 向屏内收 8px 后露出约 2/3 球体，保留「贴边藏着」语义的同时一眼能看到球。
+/// 悬停滑出仍是整窗进屏（球 + 粒子 + 陀螺环全出），两态差异依旧明显
+const PEEK: f64 = 8.0;
+/// 停靠判定容差（物理 px）：记忆球心距屏边在该值内即视为该侧停靠态
 /// （半隐位置是精确落在屏边的，容差只吸收 DPI 取整误差）
 const DOCK_TOL: f64 = 6.0;
+/// 位置一致容差（物理 px）：窗口实际左上角与「半隐位/滑出位」的偏差在该值内，
+/// 才认为球确实停在停靠几何上——边缘监视据此决定接管还是撒手（见 edge_tick）
+const POS_TOL: i32 = 10;
 /// 默认初始位置留白：球缘距工作区边缘的视觉间距（逻辑 px）
 const SNAP_GAP: f64 = 7.0;
 /// 环形按钮上限（超过会互相重叠；保存命令与设置页双重钳制）
 pub const MAX_BUTTONS: usize = 8;
+
+/// 以下三个常量是「边缘监视循环」（tiez-clipboard 同款思路）的时序参数
+/// 轮询间隔：100ms 足够跟手（悬停露出感知 ≈0.1s），CPU 成本可忽略
+#[cfg(target_os = "windows")]
+const EDGE_POLL_MS: u64 = 100;
+/// 已滑出后光标离开窗矩形多少物理 px 内不隐回（边界防抖）
+#[cfg(target_os = "windows")]
+const EDGE_MARGIN: i32 = 12;
+/// 滑出/隐回的动画帧数与帧距（5×16ms ≈ 80ms 平滑滑动，tiez 是瞬移，这里体验更好一点）
+#[cfg(target_os = "windows")]
+const SLIDE_STEPS: i32 = 5;
+#[cfg(target_os = "windows")]
+const SLIDE_STEP_MS: u64 = 16;
+/// 拖拽落位后的监视冷却（ms）：落位搬窗是异步 IPC 到主线程，写配置却是
+/// 立即完成的——监视循环在这个间隙会读到「窗口旧位置 + 新记忆」而误判，
+/// 把刚吸附的球当成位置漂移。冷却期内整跳跳过，窗口落定后监视再接管
+#[cfg(target_os = "windows")]
+const DRAG_SETTLE_COOLDOWN_MS: u64 = 800;
+
+/// 最近一次拖拽落位时间戳（ms）；0 = 从未拖拽。见 DRAG_SETTLE_COOLDOWN_MS
+#[cfg(target_os = "windows")]
+static LAST_DRAG_SETTLE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 拖拽进行中标志：前端 `floating_ball_drag_begin`（位移超阈值、移交系统原生拖动
+/// 时）置位；真正的松手由边缘监视循环检测——左键释放后的第一跳执行 `settle_drag`。
+/// **绝不能用 `startDragging()` 的 promise 当拖动结束信号**：实测它在拖动开始时就
+/// resolve，松手钩子里读到的是拖动中途位置（与最终位置差几百 px），吸附/记忆全错，
+/// 冷却后「落位补齐」再把球从屏边搬回中途——表现为「拖到边缘松手，球弹回屏幕中间」
+#[cfg(target_os = "windows")]
+static DRAG_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 当前系统时间（ms）
+#[cfg(target_os = "windows")]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// 展开前的窗口位置（物理 px）：收起时恢复，靠边挪位后球能回到原吸附点。
 /// 用全局 Mutex 而非 thread_local：拖拽/展开命令是 async（跑在tokio线程池），
@@ -79,7 +141,7 @@ pub fn set_main_minimized(app: &AppHandle, minimized: bool) {
 }
 
 /// 贴边停靠状态：球心落在某侧工作区边缘（该侧球体藏屏外一半）。
-/// 前端据此做 CSS 平移：悬停/拖拽/菜单展开时向屏内滑出 BALL_R 完整露出。
+/// 露出/隐回由边缘监视循环移动窗口实现（见 edge_tick），前端不再做 CSS 平移。
 #[derive(Debug, Default, Serialize, Clone, Copy)]
 pub struct DockState {
     pub left: bool,
@@ -99,7 +161,7 @@ pub struct FloatingBallState {
     /// 记忆的球心位置（物理 px，拖拽松手后由后端记忆；None = 从未拖拽过）
     pub x: Option<f64>,
     pub y: Option<f64>,
-    /// 当前停靠边（半隐态）：前端悬停露出的平移方向依据
+    /// 当前停靠边（半隐态）；露出/隐回由边缘监视循环移动窗口，前端仅只读展示
     pub dock: DockState,
     /// 球态窗口逻辑边长（前端 resize 失配自检的期望值之一）
     pub ball_size: f64,
@@ -126,6 +188,349 @@ fn dock_state(win: &tauri::WebviewWindow, cx: Option<f64>, cy: Option<f64>) -> D
         top: (cy - top).abs() <= DOCK_TOL,
         bottom: (bottom - cy).abs() <= DOCK_TOL,
     }
+}
+
+// ---------- 贴边边缘监视（tiez-clipboard edge docking 同款思路）----------
+// 半隐/露出全部由后台轮询「系统光标位置 + 窗口矩形」并移动窗口实现，物理像素口径，
+// 不依赖 WebView pointerenter/leave 与 CSS 平移。前端 hover 判定在真实桌面上不可靠：
+// 原生拖拽模态循环期间 WebView 收不到任何指针事件（hovered 卡旧值）、半截屏外的
+// 透明窗口命中区随 DPI/阴影抖动——这些都曾导致「贴边隐藏时好时坏」。
+
+/// 贴边自动隐藏开关缓存：监视循环 100ms 一跳，不能每跳读配置文件；
+/// init / floating_ball_save_settings 负责写入
+#[cfg(target_os = "windows")]
+static AUTO_HIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+// 不再维护「当前是否滑出态」的进程内布尔缓存：它一旦与窗口实际位置分叉（DPI 自愈、
+// 菜单展开钳制、拖拽收尾丢失）就会把球拽到错误位置，改为每跳由窗口位置实时推导
+// （见 edge_tick 的 at_hidden / at_popped）
+
+/// 系统光标位置（物理 px）
+#[cfg(target_os = "windows")]
+fn cursor_pos() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt: POINT = unsafe { std::mem::zeroed() };
+    (unsafe { GetCursorPos(&mut pt) } != 0).then_some((pt.x, pt.y))
+}
+
+/// 左键是否按下（原生拖拽循环 / 按住操作中：禁止移动窗口抢位）
+#[cfg(target_os = "windows")]
+fn lmb_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    // VK_LBUTTON = 0x01，高位 0x8000 = 当前按下
+    unsafe { (GetAsyncKeyState(0x01) as u16 & 0x8000) != 0 }
+}
+
+/// 窗口所在显示器工作区矩形（l, t, r, b）物理 px——底部按工作区判定，不被任务栏吃掉。
+/// `current_monitor()` 对**完全离屏**的窗口返回 None（手速快把球整个甩出屏外的
+/// 死锁源：drag_end 与监视循环都拿不到矩形 → 不钳制不救球），此时退化为
+/// 「中心离窗口中心最近」的显示器
+#[cfg(target_os = "windows")]
+fn nearest_work_rect(win: &tauri::WebviewWindow) -> Option<(i32, i32, i32, i32)> {
+    if let Some(mon) = win.current_monitor().ok().flatten() {
+        let wa = mon.work_area();
+        let (l, t) = (wa.position.x, wa.position.y);
+        return Some((l, t, l + wa.size.width as i32, t + wa.size.height as i32));
+    }
+    let pos = win.outer_position().ok()?;
+    let size = win.outer_size().ok()?;
+    let cx = pos.x + size.width as i32 / 2;
+    let cy = pos.y + size.height as i32 / 2;
+    let mut best: Option<(i64, (i32, i32, i32, i32))> = None;
+    for mon in win.available_monitors().ok()? {
+        let wa = mon.work_area();
+        let (l, t) = (wa.position.x, wa.position.y);
+        let (r, b) = (l + wa.size.width as i32, t + wa.size.height as i32);
+        let d = ((cx - (l + r) / 2) as i64).pow(2) + ((cy - (t + b) / 2) as i64).pow(2);
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, (l, t, r, b)));
+        }
+    }
+    best.map(|(_, rect)| rect)
+}
+
+/// 分步线性平滑移动窗口（仅位置不改尺寸，透明窗移动无重排开销）
+#[cfg(target_os = "windows")]
+fn slide_to(win: &tauri::WebviewWindow, from: (i32, i32), to: (i32, i32)) {
+    if from == to {
+        return;
+    }
+    for i in 1..=SLIDE_STEPS {
+        let x = from.0 + (to.0 - from.0) * i / SLIDE_STEPS;
+        let y = from.1 + (to.1 - from.1) * i / SLIDE_STEPS;
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+        if i != SLIDE_STEPS {
+            std::thread::sleep(std::time::Duration::from_millis(SLIDE_STEP_MS));
+        }
+    }
+}
+
+/// 按「贴边自动隐藏」语义把球心吸附到工作区边缘（物理 px 口径，边缘监视与拖拽落位共用）：
+/// 两轴独立判定，角上可双侧停靠。返回吸附后的球心与方向
+/// （dx/dy：+1 = 贴左/上边，-1 = 贴右/下边，0 = 该轴未停靠）。
+/// `auto_hide=false` 时不吸附，只回传原值与零方向。
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn dock_snap(
+    cx: f64,
+    cy: f64,
+    l: f64,
+    t: f64,
+    r: f64,
+    b: f64,
+    scale: f64,
+    auto_hide: bool,
+) -> (f64, f64, i32, i32) {
+    if !auto_hide {
+        return (cx, cy, 0, 0);
+    }
+    let mut cx = cx;
+    let mut cy = cy;
+    let mut dx = 0i32;
+    let mut dy = 0i32;
+    let trigger = DOCK_TRIGGER * scale;
+    let (d_left, d_right) = (cx - l, r - cx);
+    let (d_top, d_bottom) = (cy - t, b - cy);
+    // 球心距屏边 < trigger → 精确落在屏边、只露半个球体（滑出/隐回交 edge_tick）
+    if d_left < trigger && d_left <= d_right {
+        cx = l;
+        dx = 1;
+    } else if d_right < trigger {
+        cx = r;
+        dx = -1;
+    }
+    if d_top < trigger && d_top <= d_bottom {
+        cy = t;
+        dy = 1;
+    } else if d_bottom < trigger {
+        cy = b;
+        dy = -1;
+    }
+    (cx, cy, dx, dy)
+}
+
+/// 关闭贴边自动隐藏时：停靠中的球从半隐位拉回完全屏内，并同步记忆球心
+/// （否则关了开关球反而卡在屏边缺一半）
+#[cfg(target_os = "windows")]
+fn unpop_to_inside(app: &AppHandle) {
+    let Some(win) = app.get_webview_window(LABEL) else { return };
+    if !win.is_visible().unwrap_or(false) || is_expanded(&win) {
+        return;
+    }
+    let Ok(pos) = win.outer_position() else { return };
+    let Ok(size) = win.outer_size() else { return };
+    let Some((l, t, r, b)) = nearest_work_rect(&win) else { return };
+    let w = size.width.min(size.height) as i32;
+    let nx = pos.x.clamp(l, (r - w).max(l));
+    let ny = pos.y.clamp(t, (b - w).max(t));
+    if (nx, ny) != (pos.x, pos.y) {
+        let _ = win.set_position(PhysicalPosition::new(nx, ny));
+        let _guard = config::lock();
+        let mut cfg = config::load();
+        cfg.floating_ball_x = Some((nx + w / 2) as f64);
+        cfg.floating_ball_y = Some((ny + w / 2) as f64);
+        let _ = config::save(&cfg);
+    }
+}
+
+/// 半隐停靠位的窗口左上角（物理 px）：记忆球心位 - 半边长，再向屏内多露 peek。
+/// edge_tick 与 drag_end 必须共用本函数（约定 42：两处口径分叉会互相判成「位置漂移」）
+#[cfg(target_os = "windows")]
+fn dock_hidden_pos(cx: f64, cy: f64, dx: i32, dy: i32, half: f64, peek: i32) -> (i32, i32) {
+    (
+        (cx - half).round() as i32 + dx * peek,
+        (cy - half).round() as i32 + dy * peek,
+    )
+}
+
+/// 边缘监视单跳：对照「半隐位/滑出位」与系统光标，决定滑出或隐回。
+/// 停靠身份必须「记忆球心」与「窗口实际位置」双方一致才成立——只信记忆会把
+/// 用户刚拖走的球按旧记忆拽回屏边（表现为拖到任意位置都弹回去）。
+#[cfg(target_os = "windows")]
+fn edge_tick(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    let Some(win) = app.get_webview_window(LABEL) else { return };
+    if !win.is_visible().unwrap_or(false) {
+        return;
+    }
+    // 左键按下 = 原生拖拽/按住操作中，窗口位置正被模态循环接管，跳过本跳
+    if lmb_down() {
+        return;
+    }
+    // 左键已释放且拖拽标志还在 = 拖拽刚结束的第一跳：模态循环已退出、窗口位置
+    // 已稳定，在这里统一做钳制/吸附/落位/写记忆（DRAG_ARMED 注释：为什么松手
+    // 检测必须在这里而不是 startDragging 的 promise）
+    if DRAG_ARMED.swap(false, Ordering::Relaxed) {
+        settle_drag(app);
+        return;
+    }
+    let Ok(pos) = win.outer_position() else { return };
+    let Ok(size) = win.outer_size() else { return };
+    let w = size.width.min(size.height) as i32;
+    let half = w / 2;
+    // 救球（无条件，AUTO_HIDE 关闭也生效）：球心被甩出工作区 = 手速快把球整个拖出
+    // 屏外的死锁场景——窗口完全离屏时 current_monitor 返回 None，drag_end 的钳制
+    // 整段被跳过、记忆也写成屏外坐标，球点不到也拖不回。钳回工作区 + 写记忆。
+    // 半隐/角落停靠的球心恰在边缘线上（含边界），不会误触发
+    if let Some((l, t, r, b)) = nearest_work_rect(&win) {
+        let (cx, cy) = (pos.x + half, pos.y + half);
+        if cx < l || cx > r || cy < t || cy > b {
+            let ncx = cx.clamp(l, r.max(l));
+            let ncy = cy.clamp(t, b.max(t));
+            let _ = win.set_position(PhysicalPosition::new(ncx - half, ncy - half));
+            {
+                let _guard = config::lock();
+                let mut cur = config::load();
+                cur.floating_ball_x = Some(ncx as f64);
+                cur.floating_ball_y = Some(ncy as f64);
+                let _ = config::save(&cur);
+            }
+            LAST_DRAG_SETTLE_MS.store(now_ms(), Ordering::Relaxed);
+            log::info!(
+                "[悬浮球] 救球: 窗口=({},{}) 球心=({},{}) 出工作区 → 钳回 ({},{})",
+                pos.x,
+                pos.y,
+                cx,
+                cy,
+                ncx,
+                ncy
+            );
+            return;
+        }
+    }
+    if !AUTO_HIDE.load(Ordering::Relaxed) {
+        return;
+    }
+    // 菜单展开态：窗口几何归 expand/收起流程管，监视不插队
+    if is_expanded(&win) {
+        return;
+    }
+    // 拖拽刚落位：窗口搬移（异步 IPC）可能还没被主线程处理完，此时读到的位置是旧的，
+    // 任何判定都会失真——冷却期内整跳跳过（见 DRAG_SETTLE_COOLDOWN_MS）
+    if now_ms().saturating_sub(LAST_DRAG_SETTLE_MS.load(Ordering::Relaxed))
+        < DRAG_SETTLE_COOLDOWN_MS
+    {
+        return;
+    }
+    let cfg = config::load();
+    let (Some(cx), Some(cy)) = (cfg.floating_ball_x, cfg.floating_ball_y) else { return };
+    let Some((l, t, r, b)) = nearest_work_rect(&win) else { return };
+    let scale = window_scale(&win);
+    // 停靠边（可同时双侧=角落斜隐）：记忆球心落在该侧工作区边缘容差内
+    let dock_left = (cx - l as f64).abs() <= DOCK_TOL;
+    let dock_right = (r as f64 - cx).abs() <= DOCK_TOL;
+    let dock_top = (cy - t as f64).abs() <= DOCK_TOL;
+    let dock_bottom = (b as f64 - cy).abs() <= DOCK_TOL;
+    if !(dock_left || dock_right || dock_top || dock_bottom) {
+        // 自由位记忆：窗口被搬丢（落位 IPC 丢失/被后续消息覆盖）时补齐到记忆位，
+        // 记忆不动——球被拖走必经 drag_end 重写记忆，轮询期间记忆不可能过期
+        let mx = (cx - half as f64).round() as i32;
+        let my = (cy - half as f64).round() as i32;
+        if (mx - pos.x).abs() > POS_TOL || (my - pos.y).abs() > POS_TOL {
+            let _ = win.set_position(PhysicalPosition::new(mx, my));
+            LAST_DRAG_SETTLE_MS.store(now_ms(), Ordering::Relaxed);
+            log::info!(
+                "[悬浮球] 落位补齐: 记忆球心=({:.0},{:.0}) 窗口=({},{}) → 搬到 ({},{})",
+                cx,
+                cy,
+                pos.x,
+                pos.y,
+                mx,
+                my
+            );
+        }
+        return;
+    }
+    let dx = i32::from(dock_left) - i32::from(dock_right);
+    let dy = i32::from(dock_top) - i32::from(dock_bottom);
+    // 滑出量 = 窗口半边长：滑出后整窗完全落在屏内，球体 + 粒子云 + 最外圈陀螺环
+    // （视觉半径 47 逻辑 px）一并完整露出。曾按球半径 BALL_R 只平移 24px，窗口仍有
+    // 26px 留在屏外，悬停只露出球体一小半、粒子永远看不见（用户反馈）。
+    // 滑出位向对侧 clamp（贴角时不至于整窗越出工作区）
+    let off = half;
+    // 半隐位 = 记忆球心位 - 半边长，再向屏内多露 PEEK（见常量注释：纯压边只露 24px 弧）
+    let peek = (PEEK * scale).round() as i32;
+    let hidden = dock_hidden_pos(cx, cy, dx, dy, half as f64, peek);
+    let popped = (
+        (hidden.0 + dx * off).clamp(l, (r - w).max(l)),
+        (hidden.1 + dy * off).clamp(t, (b - w).max(t)),
+    );
+    let at_hidden = (pos.x - hidden.0).abs() <= POS_TOL && (pos.y - hidden.1).abs() <= POS_TOL;
+    let at_popped = (pos.x - popped.0).abs() <= POS_TOL && (pos.y - popped.1).abs() <= POS_TOL;
+    if !at_hidden && !at_popped {
+        // 窗口不在停靠几何上 = drag_end 的落位搬窗丢了（异步 IPC 在拖动刚结束的
+        // ~200ms 内被吞/被覆盖，日志实证：补搬一次后纠偏读到的仍是旧位置）。
+        // **记忆是唯一真相**（球被拖走必经 drag_end 重写记忆），窗口向记忆收敛：
+        // 光标在窗口屏内可见区（松手时通常正停在球上）→ 直接落滑出位，否则落半隐位。
+        // 绝不反向改记忆——旧逻辑「以窗口为准改记」会把刚吸附的位置改漂
+        // （日志曾见记忆 y 在 446→435→416→365 间乱跳）
+        let Some((px, py)) = cursor_pos() else { return };
+        let inside = px >= pos.x.max(l)
+            && px < (pos.x + w).min(r)
+            && py >= pos.y.max(t)
+            && py < (pos.y + w).min(b);
+        let target = if inside { popped } else { hidden };
+        log::info!(
+            "[悬浮球] 落位补齐: 记忆球心=({:.0},{:.0}) 窗口=({},{}) → 搬到{}位 ({},{})",
+            cx,
+            cy,
+            pos.x,
+            pos.y,
+            if inside { "滑出" } else { "半隐" },
+            target.0,
+            target.1
+        );
+        slide_to(&win, (pos.x, pos.y), target);
+        return;
+    }
+    // 当前是滑出态还是半隐态由窗口实际位置判定（不采信进程内缓存，
+    // 任何来源的几何漂移——DPI 自愈、菜单展开钳制——都能自纠正）
+    let popped_now = !at_hidden && at_popped;
+    let Some((px, py)) = cursor_pos() else { return };
+    if !popped_now {
+        // 半隐态：光标进入窗口屏内可见部分 → 滑出完整露出
+        let inside = px >= pos.x.max(l)
+            && px < (pos.x + w).min(r)
+            && py >= pos.y.max(t)
+            && py < (pos.y + w).min(b);
+        if inside {
+            log::info!(
+                "[悬浮球] 悬停滑出: 窗口=({},{}) 滑出位=({},{}) 光标=({},{}) 停靠方向=({},{})",
+                pos.x,
+                pos.y,
+                popped.0,
+                popped.1,
+                px,
+                py,
+                dx,
+                dy
+            );
+            slide_to(&win, (pos.x, pos.y), popped);
+        }
+    } else {
+        // 滑出态：光标离开滑出矩形 + 防抖边距 → 隐回半隐位
+        let outside = px < pos.x - EDGE_MARGIN
+            || px >= pos.x + w + EDGE_MARGIN
+            || py < pos.y - EDGE_MARGIN
+            || py >= pos.y + w + EDGE_MARGIN;
+        if outside {
+            slide_to(&win, (pos.x, pos.y), hidden);
+        }
+    }
+}
+
+/// 启动边缘监视线程（进程内仅一次；开关由 AUTO_HIDE 原子量控制，循环常驻空转成本可忽略）
+#[cfg(target_os = "windows")]
+pub fn start_edge_watch(app: &AppHandle) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    let handle = app.clone();
+    STARTED.call_once(move || {
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(EDGE_POLL_MS));
+            edge_tick(&handle);
+        });
+    });
 }
 
 /// 窗口实时 DPI 缩放系数：直接查 GetDpiForWindow，不用 tao 缓存的 scale_factor。
@@ -155,11 +560,15 @@ fn window_scale(win: &tauri::WebviewWindow) -> f64 {
 pub fn init(app: &AppHandle) {
     #[cfg(target_os = "windows")]
     {
+        use std::sync::atomic::Ordering;
         if let Err(e) = ensure_window(app) {
             log::warn!("悬浮球窗口创建失败: {}", e);
             return;
         }
-        if !config::load().floating_ball_enabled {
+        let cfg = config::load();
+        AUTO_HIDE.store(cfg.floating_ball_auto_hide, Ordering::Relaxed);
+        start_edge_watch(app);
+        if !cfg.floating_ball_enabled {
             // 停用状态：窗口隐藏常驻，设置启用时直接 show 即可
             if let Some(win) = app.get_webview_window(LABEL) {
                 let _ = win.hide();
@@ -348,16 +757,21 @@ fn apply_geometry(win: &tauri::WebviewWindow, expanded: bool, scale_override: Op
     }
     drop(pre);
 
-    if let Ok(Some(mon)) = win.current_monitor() {
-        let m = if expanded { 4.0 * scale } else { 0.0 };
-        let min_x = mon.position().x as f64 + m;
-        let min_y = mon.position().y as f64 + m;
-        let max_x = (mon.position().x + mon.size().width as i32) as f64 - new_size - m;
-        let max_y = (mon.position().y + mon.size().height as i32) as f64 - new_size - m;
-        // 小屏保护：max 可能小于 min（f64::clamp 在 min > max 时 panic）
-        let (max_x, max_y) = (max_x.max(min_x), max_y.max(min_y));
-        nx = nx.clamp(min_x, max_x);
-        ny = ny.clamp(min_y, max_y);
+    // 钳制只在菜单展开态做（保证大圆完整显示）。球态**不可钳**：贴边半隐位的窗口
+    // 左上角本来就在屏幕外（x 为负或超出右缘），钳回屏内会让收起菜单后的球离开半隐位，
+    // 边缘监视随即判成「位置漂移」再搬回去——表现为收起菜单后球弹一下
+    if expanded {
+        if let Ok(Some(mon)) = win.current_monitor() {
+            let m = 4.0 * scale;
+            let min_x = mon.position().x as f64 + m;
+            let min_y = mon.position().y as f64 + m;
+            let max_x = (mon.position().x + mon.size().width as i32) as f64 - new_size - m;
+            let max_y = (mon.position().y + mon.size().height as i32) as f64 - new_size - m;
+            // 小屏保护：max 可能小于 min（f64::clamp 在 min > max 时 panic）
+            let (max_x, max_y) = (max_x.max(min_x), max_y.max(min_y));
+            nx = nx.clamp(min_x, max_x);
+            ny = ny.clamp(min_y, max_y);
+        }
     }
 
     // 原子应用尺寸+位置（单次 SetWindowPos）：拆成 set_size + set_position 会让窗口
@@ -475,6 +889,16 @@ pub fn floating_ball_save_settings(
     }
 
     #[cfg(target_os = "windows")]
+    {
+        use std::sync::atomic::Ordering;
+        AUTO_HIDE.store(auto_hide, Ordering::Relaxed);
+        if !auto_hide {
+            // 关闭贴边自动隐藏：停靠中的球拉回完全屏内并同步记忆球心
+            unpop_to_inside(&app);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
     apply_enabled(&app, enabled);
 
     // 通知球窗口重拉状态（按钮集/自动隐藏/停靠边一并刷新）
@@ -496,65 +920,135 @@ pub fn floating_ball_save_settings(
     Ok(())
 }
 
-/// 拖拽结束：球心钳在工作区内 + 可选贴边自动隐藏（球心落到屏边、半隐，
-/// 见模块注释）+ 记忆球心到配置。
-/// 拖拽只发生在球态，窗口位置 = 球心 - 球态半边长。
-/// async：配置读写是文件 IO，必须离开主线程（前端在系统拖动循环结束后调用）。
+/// 拖拽开始：前端在位移超阈值、移交系统原生拖动（startDragging）时调用，仅武装
+/// DRAG_ARMED。真正的松手由边缘监视循环检测（左键释放后的第一跳 → settle_drag）——
+/// startDragging 的 promise 在拖动开始时就 resolve，不能当结束信号（见 DRAG_ARMED 注释）。
 #[tauri::command]
-pub async fn floating_ball_drag_end(app: AppHandle) {
+pub async fn floating_ball_drag_begin() {
+    #[cfg(target_os = "windows")]
+    DRAG_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 拖拽落位（松手后由 edge_tick 在监视线程调用，此时窗口位置已稳定）：
+/// 球心钳在工作区内 + 可选贴边自动隐藏（球心落到屏边、半隐，见模块注释）+ 记忆球心到配置。
+/// 拖拽只发生在球态，窗口位置 = 球心 - 球态半边长。
+#[cfg(target_os = "windows")]
+fn settle_drag(app: &AppHandle) {
+    use tauri::Emitter;
     #[cfg(target_os = "windows")]
     {
+        use std::sync::atomic::Ordering;
+        // 先武装监视冷却再动手：下面 set_position 是异步 IPC，配置却是立即写盘，
+        // 监视循环若在间隙轮询会读到旧窗口位置而误判（见 DRAG_SETTLE_COOLDOWN_MS）
+        LAST_DRAG_SETTLE_MS.store(now_ms(), Ordering::Relaxed);
         let Some(win) = app.get_webview_window(LABEL) else { return };
+        // 松手由本函数检测（模态循环已退出、位置已稳定），无需再等待
         let Ok(pos) = win.outer_position() else { return };
         let scale = window_scale(&win);
-        let half = (BALL_SIZE * scale / 2.0).round();
+        // 半边长优先取窗口「实际」外框尺寸的一半（与 edge_tick 同口径；DPI 失配时
+        // 逻辑×scale 会偏，两处不同口径会让彼此判成「位置漂移」）
+        let half = match win.outer_size() {
+            Ok(sz) if sz.width.min(sz.height) > 0 => sz.width.min(sz.height) as f64 / 2.0,
+            _ => (BALL_SIZE * scale / 2.0).round(),
+        };
         // 拖拽结束时的球心（球态窗口中心即球心）
         let mut cx = pos.x as f64 + half;
         let mut cy = pos.y as f64 + half;
-        if let Ok(Some(mon)) = win.current_monitor() {
+        // 停靠方向（+1 = 贴左/上边，-1 = 贴右/下边，0 = 未停靠），落位与监视循环共用口径
+        let mut dx = 0i32;
+        let mut dy = 0i32;
+        let mut wa_rect: Option<(i32, i32, i32, i32)> = None;
+        // nearest_work_rect：完全离屏时 current_monitor 返回 None（球被甩出屏外的
+        // 死锁源），兜底取「中心最近」的显示器，钳制/吸附/落位永远有工作区可用
+        if let Some((wl, wt, wr, wb)) = nearest_work_rect(&win) {
             // 以工作区为界（扣除任务栏）：球心落在工作区边缘外会被任务栏盖住
-            let wa = mon.work_area();
-            let mx = wa.position.x as f64;
-            let my = wa.position.y as f64;
-            let mr = mx + wa.size.width as f64;
-            let mb = my + wa.size.height as f64;
+            let mx = wl as f64;
+            let my = wt as f64;
+            let mr = wr as f64;
+            let mb = wb as f64;
             // 球心钳在显示器内（整个球不出屏，否则拖不回来）
             cx = cx.clamp(mx, mr.max(mx));
             cy = cy.clamp(my, mb.max(my));
-            if config::load().floating_ball_auto_hide {
-                let trigger = DOCK_TRIGGER * scale;
-                let d_left = cx - mx;
-                let d_right = mr - cx;
-                let d_top = cy - my;
-                let d_bottom = mb - cy;
-                // 贴边判定：球缘距屏边 < trigger - BALL_R*scale（约一个球半径）
-                // → 球心精确落在屏边，只露出半个球体（悬停时前端 CSS 滑出露全）。
-                // 两轴独立判定，角上可双侧停靠
-                if d_left < trigger && d_left <= d_right {
-                    cx = mx;
-                } else if d_right < trigger {
-                    cx = mr;
-                }
-                if d_top < trigger && d_top <= d_bottom {
-                    cy = my;
-                } else if d_bottom < trigger {
-                    cy = mb;
-                }
-            }
+            wa_rect = Some((wl, wt, wr, wb));
+            // 贴边判定与边缘监视共用 dock_snap：球心距屏边 < DOCK_TRIGGER 才吸附，
+            // 超过就保持原位——用户「放」下的球不该被拽回屏边
+            let auto_hide = config::load().floating_ball_auto_hide;
+            let (free_cx, free_cy) = (cx, cy);
+            let (sx, sy, sdx, sdy) = dock_snap(cx, cy, mx, my, mr, mb, scale, auto_hide);
+            cx = sx;
+            cy = sy;
+            dx = sdx;
+            dy = sdy;
+            // 诊断（用户反馈「拖到边上不吸附」时先看这条）：吸附只取决于松手点球心
+            // 到工作区边缘的距离是否 < trigger（= DOCK_TRIGGER × scale，物理 px）
+            log::info!(
+                "[悬浮球] 拖拽松手: 球心=({:.0},{:.0}) 工作区=[{:.0},{:.0},{:.0},{:.0}] scale={:.4} \
+                 trigger={:.0} 距边 左{:.0}/右{:.0}/上{:.0}/下{:.0} auto_hide={} → 吸附后球心=({:.0},{:.0}) 方向=({},{})",
+                free_cx,
+                free_cy,
+                mx,
+                my,
+                mr,
+                mb,
+                scale,
+                DOCK_TRIGGER * scale,
+                free_cx - mx,
+                mr - free_cx,
+                free_cy - my,
+                mb - free_cy,
+                auto_hide,
+                cx,
+                cy,
+                dx,
+                dy
+            );
         }
-        let nx = (cx - half).round() as i32;
-        let ny = (cy - half).round() as i32;
-        if (nx, ny) != (pos.x, pos.y) {
-            let _ = win.set_position(PhysicalPosition::new(nx, ny));
+        // 落位：停靠时若光标仍停在球体半隐可见区内，直接落在滑出位（松手先闪半隐
+        // 再滑出的观感很怪），由监视循环在光标移开后隐回；其余落半隐停靠位。
+        // 半隐位与 edge_tick 同口径（dock_hidden_pos）
+        let peek = (PEEK * scale).round() as i32;
+        let (dock_nx, dock_ny) = dock_hidden_pos(cx, cy, dx, dy, half, peek);
+        let size_px = (half * 2.0).round() as i32;
+        let mut popped_now = false;
+        if let (Some((ml, mt, mr, mb)), true) = (wa_rect, dx != 0 || dy != 0) {
+            let (vx0, vy0) = (dock_nx.max(ml), dock_ny.max(mt));
+            let (vx1, vy1) = ((dock_nx + size_px).min(mr), (dock_ny + size_px).min(mb));
+            popped_now = cursor_pos()
+                .map(|(x, y)| x >= vx0 && x < vx1 && y >= vy0 && y < vy1)
+                .unwrap_or(false);
+        }
+        // 滑出量 = 窗口半边长（整窗完全屏内，球体与周围粒子一并露出），并与边缘监视
+        // 同口径向对侧 clamp——两处算法必须一致，否则监视循环会判成「位置漂移」而撒手
+        let off = half.round() as i32;
+        let (fx, fy) = if popped_now {
+            if let Some((ml, mt, mr, mb)) = wa_rect {
+                (
+                    (dock_nx + dx * off).clamp(ml, (mr - size_px).max(ml)),
+                    (dock_ny + dy * off).clamp(mt, (mb - size_px).max(mt)),
+                )
+            } else {
+                (dock_nx + dx * off, dock_ny + dy * off)
+            }
+        } else {
+            (dock_nx, dock_ny)
+        };
+        if (fx, fy) != (pos.x, pos.y) {
+            // set_position 是异步 IPC：主线程忙导致丢失时不必在此补搬——冷却结束后
+            // edge_tick 的「落位补齐」会按记忆位收敛（窗口向记忆），这里把搬移与
+            // 写记忆一次做完即可
+            let _ = win.set_position(PhysicalPosition::new(fx, fy));
         }
         let _guard = config::lock();
         let mut cfg = config::load();
+        // 记忆的一律是「半隐停靠球心」：滑出态只是窗口临时偏移，不写回
         cfg.floating_ball_x = Some(cx.round());
         cfg.floating_ball_y = Some(cy.round());
         let _ = config::save(&cfg);
+        // 通知前端重拉状态（停靠边决定菜单/滑出方向）——旧流程由前端在
+        // startDragging 的 promise then 里 refreshState，现在落位时机移到
+        // 监视循环，改用事件驱动
+        let _ = app.emit("floating-ball-settled", ());
     }
-    #[cfg(not(target_os = "windows"))]
-    let _ = app;
 }
 
 /// 展开/收起环形菜单：以球心为锚切换窗口几何（球态 100 ↔ 菜单态 260，一次原子
@@ -614,4 +1108,91 @@ pub async fn floating_ball_reapply(app: AppHandle, viewport_w: f64) {
     }
     #[cfg(not(target_os = "windows"))]
     let _ = (app, viewport_w);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    /// 1080p 工作区（左上角为原点，物理 px 口径下 scale=1）
+    const WA: (f64, f64, f64, f64) = (0.0, 0.0, 1920.0, 1040.0);
+
+    fn snap(cx: f64, cy: f64, auto_hide: bool) -> (f64, f64, i32, i32) {
+        dock_snap(cx, cy, WA.0, WA.1, WA.2, WA.3, 1.0, auto_hide)
+    }
+
+    /// 关键不变式（AGENTS.md 约定 42 / ADR 0004）：吸附触发距离必须大于
+    /// 「滑出量（窗口半边长）+ 位置一致容差」，否则「刚好贴边的自由位置」与
+    /// 「滑出位」几何上无法区分，边缘监视会把用户放好的球拽回屏边
+    #[test]
+    fn dock_trigger_exceeds_pop_offset_plus_tolerance() {
+        let half = BALL_SIZE / 2.0;
+        assert!(
+            DOCK_TRIGGER > half + POS_TOL as f64,
+            "DOCK_TRIGGER {DOCK_TRIGGER} 必须 > 半边长 {half} + POS_TOL {POS_TOL}"
+        );
+    }
+
+    #[test]
+    fn snaps_center_onto_edge_within_trigger() {
+        // 球心距左缘在 trigger 内 → 精确落在屏边、方向 +1（向屏内滑出）
+        let (cx, cy, dx, dy) = snap(DOCK_TRIGGER - 1.0, 500.0, true);
+        assert_eq!((cx.round() as i32, dx, dy), (0, 1, 0));
+        assert_eq!(cy.round() as i32, 500);
+    }
+
+    /// 用户反馈的主 bug：吸附过一次之后，把球拖到屏幕中间必须保持原位、不再弹回
+    #[test]
+    fn keeps_free_position_beyond_trigger() {
+        let (cx, _cy, dx, _dy) = snap(DOCK_TRIGGER + 1.0, 500.0, true);
+        assert_eq!((cx.round() as i32, dx), ((DOCK_TRIGGER + 1.0) as i32, 0));
+        // 屏幕正中更不可能被吸走
+        let (mx, my, mdx, mdy) = snap(960.0, 520.0, true);
+        assert_eq!((mx.round() as i32, my.round() as i32, mdx, mdy), (960, 520, 0, 0));
+    }
+
+    #[test]
+    fn snaps_corner_on_both_axes() {
+        let (cx, cy, dx, dy) = snap(10.0, 1035.0, true);
+        assert_eq!((dx, dy), (1, -1));
+        assert_eq!((cx.round() as i32, cy.round() as i32), (0, 1040));
+    }
+
+    #[test]
+    fn picks_the_nearest_edge_per_axis() {
+        // 距右缘更近（20 < 40）→ 吸附右缘，方向 -1
+        let (cx, _cy, dx, _dy) = snap(1900.0, 500.0, true);
+        assert_eq!((cx.round() as i32, dx), (1920, -1));
+    }
+
+    #[test]
+    fn auto_hide_off_never_snaps() {
+        let (cx, cy, dx, dy) = snap(3.0, 3.0, false);
+        assert_eq!((cx, cy, dx, dy), (3.0, 3.0, 0, 0));
+    }
+
+    /// 半隐停靠位（dock_hidden_pos）：贴边后向屏内多露 PEEK，贴左向右偏、贴右向左偏
+    #[test]
+    fn hidden_pos_peeks_inward() {
+        // 贴左（dx=1）：窗口左上 = 0 - 50 + 8 = -42（屏内可见 58px，球露约 2/3）
+        assert_eq!(dock_hidden_pos(0.0, 500.0, 1, 0, 50.0, 8), (-42, 450));
+        // 贴右（dx=-1）：窗口左上 = 1920 - 50 - 8 = 1862
+        assert_eq!(dock_hidden_pos(1920.0, 500.0, -1, 0, 50.0, 8), (1862, 450));
+        // 角落双侧（贴左 + 贴底）：y 轴向屏内 = 向上收 8
+        assert_eq!(dock_hidden_pos(0.0, 1040.0, 1, -1, 50.0, 8), (-42, 982));
+    }
+
+    /// 半隐位（球心压屏边）与滑出位（球心向屏内一个半边长）必须落在两个可区分的
+    /// 位置，且滑出位整窗在屏内 —— 悬停才能露出完整球体与周围粒子
+    #[test]
+    fn popped_offset_keeps_whole_window_on_screen() {
+        let half = (BALL_SIZE / 2.0) as i32;
+        let (cx, _, dx, _) = snap(0.0, 500.0, true);
+        assert_eq!(dx, 1);
+        let cx = cx as i32; // 半隐球心 = 左边缘
+        assert_eq!(cx, 0);
+        // 半隐位窗口左上角在屏外一个半边长；滑出位整窗进入屏内
+        assert_eq!(cx - half, -half);
+        assert_eq!((cx - half) + half, 0);
+    }
 }

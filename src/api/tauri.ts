@@ -633,7 +633,7 @@ export const tauriApi = {
     withMain: boolean,
     buttons: string[],
   ) => invoke<void>('floating_ball_save_settings', { enabled, autoHide, withMain, buttons }),
-  floatingBallDragEnd: () => invoke<void>('floating_ball_drag_end'),
+  floatingBallDragBegin: () => invoke<void>('floating_ball_drag_begin'),
   floatingBallExpand: (expanded: boolean) => invoke<void>('floating_ball_expand', { expanded }),
   floatingBallTrigger: (id: string) => invoke<void>('floating_ball_trigger', { id }),
   floatingBallContextMenu: () => invoke<void>('floating_ball_context_menu'),
