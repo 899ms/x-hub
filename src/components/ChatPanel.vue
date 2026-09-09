@@ -5,7 +5,11 @@ import { ChevronDown, MessageSquare, PanelRightClose, Plus, Send, Settings2, X }
 import { isTauri, tauriApi, type ChatMessage, type ChatModelConfig, type ChatSession, type ChatStreamEvent } from '../api/tauri'
 import AppSelect from './AppSelect.vue'
 
-const props = defineProps<{ side?: 'left' | 'right' | 'top' | 'bottom' }>()
+const props = defineProps<{
+  side?: 'left' | 'right' | 'top' | 'bottom'
+  /** dock = 主窗内嵌抽屉（默认）；window = 独立窗口内嵌（尺寸交给窗口缩放、关闭按钮语义变化） */
+  mode?: 'dock' | 'window'
+}>()
 
 const emit = defineEmits<{
   (e: 'toggle'): void
@@ -17,6 +21,10 @@ const showToast = inject<(msg: string, action?: { label: string; onClick: () => 
   'showToast',
   () => {},
 )
+
+// 独立窗口形态：不调 getChatPanel/setChatPanel（那两个只管主窗抽屉尺寸），
+// 拖拽手柄隐藏（缩放交给窗口边缘），头部收起钮变成关闭钮
+const isWindow = computed(() => props.mode === 'window')
 
 // ---- 状态 ----
 const sessions = ref<ChatSession[]>([])
@@ -55,11 +63,13 @@ function trimZero(s: string): string {
   return s.endsWith('.0') ? s.slice(0, -2) : s
 }
 
-// token 数量格式化：≥100万用 M，≥1000 用 K，否则原值
+// token 数量格式化：≥1000 用 k，舍入后跨过 1000k（如 999500~999999）自动晋升 M，
+// 否则原值（统计行三项共用；速度项单独带 tok/s）
 function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return trimZero((n / 1_000_000).toFixed(1)) + 'M'
-  if (n >= 1000) return trimZero((n / 1000).toFixed(1)) + 'K'
-  return String(n)
+  if (n < 1000) return String(n)
+  const k = trimZero((n / 1000).toFixed(1))
+  if (parseFloat(k) < 1000) return k + 'k'
+  return trimZero((n / 1_000_000).toFixed(1)) + 'M'
 }
 
 // 缓存率 = 缓存读取 / 输入
@@ -480,7 +490,8 @@ function onResizeUp() {
   document.removeEventListener('mousemove', onResizeMove)
   document.removeEventListener('mouseup', onResizeUp)
   emit('resized', panelWidth.value, panelHeight.value)
-  if (isTauri()) void tauriApi.setChatPanel(panelWidth.value, panelHeight.value, true)
+  // 独立窗口形态的尺寸由窗口自身管理，不写回抽屉尺寸配置
+  if (isTauri() && !isWindow.value) void tauriApi.setChatPanel(panelWidth.value, panelHeight.value, true)
 }
 
 onMounted(async () => {
@@ -488,11 +499,14 @@ onMounted(async () => {
   window.addEventListener('keydown', onWindowKeydown)
   window.addEventListener('resize', onWindowResize)
   if (!isTauri()) return
-  const [w, h] = await tauriApi.getChatPanel()
-  panelWidth.value = w
-  panelHeight.value = h
-  emit('resized', w, h)
+  if (!isWindow.value) {
+    const [w, h] = await tauriApi.getChatPanel()
+    panelWidth.value = w
+    panelHeight.value = h
+    emit('resized', w, h)
+  }
   await Promise.all([loadSessions(), loadModels()])
+  if (isWindow.value) focusInput()
 })
 
 onBeforeUnmount(() => {
@@ -502,8 +516,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize)
 })
 
-defineExpose({ refreshModels: () => { void loadModels() } })
-
 // 输入框自动增高（最多 6 行）
 function autosize() {
   const el = inputEl.value
@@ -511,11 +523,27 @@ function autosize() {
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 132) + 'px'
 }
+
+/** 聚焦输入框（独立窗口每次唤起时调用，省一次点击） */
+function focusInput() {
+  void nextTick(() => inputEl.value?.focus())
+}
+
+defineExpose({
+  refreshModels: () => {
+    void loadModels()
+  },
+  /** 独立窗口唤起时重新拉会话与模型（期间主窗可能新建会话/改动模型配置） */
+  refresh: () => {
+    void Promise.all([loadSessions(), loadModels()])
+  },
+  focusInput,
+})
 </script>
 
 <template>
-  <div class="chat-panel" :class="'side-' + (props.side || 'right')">
-    <div class="resize-h" @mousedown="onResizeDown"></div>
+  <div class="chat-panel" :class="['side-' + (props.side || 'right'), { 'mode-window': isWindow }]">
+    <div v-if="!isWindow" class="resize-h" @mousedown="onResizeDown"></div>
 
     <div class="cp-header">
       <div class="cp-title" :title="currentTitle">{{ currentTitle }}</div>
@@ -535,7 +563,8 @@ function autosize() {
       <button class="cp-hbtn" title="模型设置" @click="openModelSettings">
         <Settings2 :size="15" />
       </button>
-      <button class="cp-hbtn" title="收起面板" @click="emit('toggle')">
+      <!-- 独立窗口形态：关闭由外层自制标题栏承担，这里不再放第二个关闭钮 -->
+      <button v-if="!isWindow" class="cp-hbtn" title="收起面板" @click="emit('toggle')">
         <PanelRightClose :size="15" />
       </button>
     </div>
@@ -607,7 +636,7 @@ function autosize() {
         <span class="stat"><span class="stat-label">输出</span><b>{{ fmtTokens(activeSession?.tokens_output ?? 0) }}</b></span>
         <span class="stat"><span class="stat-label">缓存</span><b>{{ fmtTokens(activeSession?.tokens_cache_read ?? 0) }}</b></span>
         <span class="stat"><span class="stat-label">缓存率</span><b>{{ cacheRate }}%</b></span>
-        <span class="stat"><span class="stat-label">TPS</span><b>{{ trimZero(tps.toFixed(1)) }}</b></span>
+        <span class="stat"><span class="stat-label">速度</span><b>{{ trimZero(tps.toFixed(1)) }} tok/s</b></span>
       </div>
       <textarea
         ref="inputEl"
@@ -725,6 +754,19 @@ function autosize() {
   border-top-left-radius: var(--radius-lg);
   border-top-right-radius: var(--radius-lg);
   box-shadow: 0 -6px 24px rgba(38, 35, 29, 0.06);
+}
+
+/* 独立窗口形态：外层 ChatWindow 负责圆角/描边/落影与玻璃底，这里去掉抽屉自带的
+   左侧描边与单侧圆角（避免双重边框）。必须排在四个方位规则之后——同为两类选择器，
+   靠后才赢得过 .chat-panel.side-* 的描边与圆角 */
+.chat-panel.mode-window,
+.chat-panel.mode-window.side-left,
+.chat-panel.mode-window.side-top,
+.chat-panel.mode-window.side-bottom {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
 }
 
 /* 拖拽手柄：水平方位（左右）在侧边，垂直方位（上下）在底边/顶边 */

@@ -286,6 +286,19 @@ async function onChatPanelSideChange(value: string) {
   showToast(`AI 对话面板已改为从${['右侧', '左侧', '顶部', '底部'][['right', 'left', 'top', 'bottom'].indexOf(side)]}滑出`)
 }
 
+// AI 对话形态：独立小窗 / 主窗内嵌抽屉（互斥）。开关经后端专用命令落地建窗/隐窗
+const chatWindowMode = computed(() => !!store.state.config.chat_window_mode)
+
+async function onToggleChatWindowMode() {
+  const next = !chatWindowMode.value
+  try {
+    await store.setChatWindowMode(next)
+    showToast(next ? 'AI 对话已改为独立窗口打开' : 'AI 对话已改回主窗内嵌面板')
+  } catch {
+    showToast('切换失败，请重试')
+  }
+}
+
 // ---- 字体大小（全局 + 单模块） ----
 const FONT_MODULES = [
   { key: 'sticky', label: '便签', configKey: 'font_sticky' },
@@ -695,7 +708,7 @@ function onAccentInput(e: Event) {
           <div class="setting-row fb-btn-row">
             <div class="setting-info">
               <span class="setting-name">环形菜单按钮</span>
-              <span class="setting-desc">单击悬浮球展开的按钮集合（最多 {{ FLOATING_BALL_MAX_BUTTONS }} 个）：下方按钮点击添加，已选中的可上移/下移/移除</span>
+              <span class="setting-desc">单击悬浮球展开的按钮集合（最多 {{ FLOATING_BALL_MAX_BUTTONS }} 个）：下方按钮点击添加，已选中的可上移/下移/移除。「AI 对话」按「AI 助手 → 以独立窗口打开」的设置决定唤起独立小窗还是主窗抽屉</span>
             </div>
             <div class="fb-btn-cfg">
               <div class="fb-btn-list">
@@ -729,8 +742,25 @@ function onAccentInput(e: Event) {
 
           <div class="setting-row">
             <div class="setting-info">
+              <span class="setting-name">以独立窗口打开 AI 对话</span>
+              <span class="setting-desc">开启后对话变为可缩放、可置顶的独立小窗：标题栏按钮、Ctrl+Shift+K 与悬浮球「AI 对话」入口都唤起它，主窗内嵌抽屉随之停用（两种形态互斥）</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="chatWindowMode"
+              :class="{ on: chatWindowMode }"
+              @click="onToggleChatWindowMode"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
               <span class="setting-name">AI 对话面板透明度</span>
-              <span class="setting-desc">对话抽屉的整体不透明度（50% – 100%）</span>
+              <span class="setting-desc">{{ chatWindowMode ? '仅内嵌面板生效（当前为独立窗口形态）' : '对话抽屉的整体不透明度（50% – 100%）' }}</span>
             </div>
             <div class="opacity-edit">
               <input
@@ -741,6 +771,7 @@ function onAccentInput(e: Event) {
                 step="0.05"
                 :value="store.state.config.chat_panel_opacity ?? 1"
                 :aria-label="'AI 对话面板透明度'"
+                :disabled="chatWindowMode"
                 @input="onChatPanelOpacityInput"
               />
               <span class="opacity-value">{{ Math.round((store.state.config.chat_panel_opacity ?? 1) * 100) }}%</span>
@@ -750,13 +781,14 @@ function onAccentInput(e: Event) {
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-name">AI 对话面板位置</span>
-              <span class="setting-desc">对话抽屉从上下左右哪个方位滑出（左右方位可拖拽调宽，上下方位可拖拽调高）</span>
+              <span class="setting-desc">{{ chatWindowMode ? '仅内嵌面板生效（独立窗口可自由拖动摆放）' : '对话抽屉从上下左右哪个方位滑出（左右方位可拖拽调宽，上下方位可拖拽调高）' }}</span>
             </div>
             <AppSelect
               :model-value="store.state.config.chat_panel_side ?? 'right'"
               :options="CHAT_PANEL_SIDE_OPTIONS"
               aria-label="AI 对话面板位置"
               class="chat-panel-side"
+              :disabled="chatWindowMode"
               @update:model-value="onChatPanelSideChange"
             />
           </div>
@@ -1767,6 +1799,15 @@ function onAccentInput(e: Event) {
 }
 .chat-panel-side {
   min-width: 200px;
+}
+/* 独立窗口形态下内嵌面板专属项禁用（下拉触发器经 $attrs 同时收到 disabled 与该 class） */
+.chat-panel-side:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.opacity-slider:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .quote-edit {
   min-width: 240px;

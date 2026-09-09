@@ -86,6 +86,12 @@ const state = reactive<StoreState>({
     chat_panel_side: 'right',
     chat_panel_height: 380,
     chat_panel_opacity: 1,
+    chat_window_mode: false,
+    chat_window_width: 460,
+    chat_window_height: 640,
+    chat_window_x: null,
+    chat_window_y: null,
+    chat_window_pinned: false,
     clipboard_shortcut: IS_MAC_PREVIEW ? 'CommandOrControl+Alt+V' : 'Ctrl+`',
     clipboard_max_items: 500,
     clipboard_ttl_days: 7,
@@ -761,6 +767,26 @@ export function useStore() {
     await tauriApi.saveConfig(state.config)
   }
 
+  /** 仅刷新配置（AI 对话独立窗唤起用）：get_initial_data 会全量拉业务数据，独立窗只要 config */
+  async function refreshConfig() {
+    if (!isTauri()) return
+    state.config = await tauriApi.getUiConfig()
+  }
+
+  /** AI 对话形态：独立窗口 / 主窗内嵌抽屉（互斥）。走专用命令——后端据此建窗/隐窗；
+   *  失败时回滚本地状态再抛出，避免「界面已切换、后端没落盘」的漂移（同 togglePin 口径） */
+  async function setChatWindowMode(value: boolean) {
+    const prev = state.config.chat_window_mode
+    state.config.chat_window_mode = value
+    if (!isTauri()) return
+    try {
+      await tauriApi.chatWindowSaveMode(value)
+    } catch (e) {
+      state.config.chat_window_mode = prev
+      throw e
+    }
+  }
+
   /** 字号缩放钳制到 0.85–1.30，保留 2 位小数 */
   function clampFontScale(value: number) {
     return Math.round(Math.min(1.3, Math.max(0.85, value)) * 100) / 100
@@ -1116,6 +1142,8 @@ export function useStore() {
   setChatModels,
   setChatPanelOpacity,
   setChatPanelSide,
+  setChatWindowMode,
+  refreshConfig,
     setFontScale,
     setModuleFontScale,
     setRuntimeStrategy,

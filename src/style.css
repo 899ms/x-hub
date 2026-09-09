@@ -786,6 +786,16 @@ html[data-notice-window] #app {
   padding: 0;
   background: transparent !important;
 }
+/* AI 对话独立窗口：窗口透明无边框，body 透明，只渲染圆角玻璃窗本体（四周留白给落影） */
+html[data-chat-window] body {
+  background: transparent !important;
+}
+html[data-chat-window] #app {
+  padding: 0;
+  background: transparent !important;
+  height: 100vh;
+  overflow: hidden;
+}
 html[data-prompt-float] .pf-root,
 html[data-todo-float] .tf-root {
   border: 1px solid var(--border-strong);

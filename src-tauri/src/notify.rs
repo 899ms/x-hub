@@ -15,7 +15,7 @@
 //! 隐藏态 WebView2 是否及时处理 IPC 事件的不确定性。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 /// 通知窗 label（App.vue 按此路由渲染 NoticeOverlay）
 pub const NOTICE_LABEL: &str = "notice";
@@ -41,27 +41,54 @@ fn pending_notices() -> &'static std::sync::Mutex<Vec<(String, String, String)>>
 /// 暂存队列上限：超出丢最旧（启动首秒积压超过 8 条通知本身就不正常）
 const PENDING_CAP: usize = 8;
 
-/// 启动时预创建通知窗（隐藏常驻）。
+/// 启动时预创建通知窗（隐藏常驻）。只在启动期（setup 主线程）建窗；
+/// 运行时（show_notice）仅取预创建实例——现场 build WebView2 窗口会与并发
+/// 窗口操作交错挂起整窗（铁律，见 clipboard.rs / floating_ball.rs 同款注释）。
+///
+/// **⚠️ 这是全工程唯一的通知窗 build 调用点，勿删**：v0.5.3 发版审查批次（2147bd9）
+/// 以「运行时禁止现场建窗」为由删 ensure_window 的 build 兜底时把它一并删了——结果
+/// 窗口从此不存在、notice_ready 永不触发、所有通知卡进暂存队列，弹窗整体静默失联
+/// （单测/类型检查全绿，只有实机暴露）。该铁律的正解 = build 恰留这一处、在 init。
 pub fn init(app: &AppHandle) {
-    match ensure_window(app) {
+    if app.get_webview_window(NOTICE_LABEL).is_some() {
+        return;
+    }
+    match build_window(app) {
         Ok(_) => log::info!("通知窗已预创建（隐藏常驻）"),
         Err(e) => log::warn!("通知窗预创建失败: {e}"),
     }
 }
 
+fn build_window(app: &AppHandle) -> Result<WebviewWindow, String> {
+    let mut builder =
+        WebviewWindowBuilder::new(app, NOTICE_LABEL, WebviewUrl::App("index.html".into()))
+            .title("通知")
+            .inner_size(NOTICE_WIDTH, NOTICE_DEFAULT_HEIGHT)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .closable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .visible(false)
+            .background_color(tauri::window::Color(0, 0, 0, 0))
+            .additional_browser_args(crate::ADDITIONAL_BROWSER_ARGS);
+
+    // 透明窗口在 Windows 上开系统阴影会渲染成黑描边；卡片自带 CSS 阴影，关掉 OS 阴影（同倒计时/剪贴板浮窗）
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.shadow(false);
+    }
+
+    builder.build().map_err(|e| e.to_string())
+}
+
 /// 推送一条通知：确保窗口存在 → 先定位并无激活显示 → emit `notice-new` 给前端渲染。
 /// `kind` 供前端选图标/配色（"countdown" | "todo" | "info" ...）。
 pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
-    // 前端未就绪：暂存等 notice_ready 重放（直接 emit 会丢事件，且丢的是不可恢复的提醒）
-    if !NOTICE_READY.load(Ordering::Relaxed) {
-        let mut q = pending_notices().lock().unwrap_or_else(|p| p.into_inner());
-        if q.len() >= PENDING_CAP {
-            q.remove(0);
-        }
-        q.push((kind.to_string(), title.to_string(), body.to_string()));
-        log::info!("通知窗前端未就绪，暂存通知: [{kind}] {title}");
-        return;
-    }
     let win = match ensure_window(app) {
         Ok(w) => w,
         Err(e) => {
@@ -69,6 +96,43 @@ pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
             return;
         }
     };
+    // 前端未就绪：暂存等 notice_ready 重放（直接 emit 会丢事件，且丢的是不可恢复的提醒）。
+    // 同时把（还空着的）窗口先显示出来：隐藏态 WebView2 可能推迟脚本/渲染，
+    // notice_ready 依赖页面 onMounted 触发——不显示的话「暂存等就绪」会自锁死，
+    // 弹窗整体失联（v0.5.3 发版批次实测踩坑）。空窗完全透明，多显示一两秒无感
+    if !NOTICE_READY.load(Ordering::Relaxed) {
+        {
+            #[cfg(target_os = "windows")]
+            anchor_default_and_show(&win);
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = win.show();
+            }
+        }
+        let mut q = pending_notices().lock().unwrap_or_else(|p| p.into_inner());
+        if q.len() >= PENDING_CAP {
+            q.remove(0);
+        }
+        q.push((kind.to_string(), title.to_string(), body.to_string()));
+        log::info!("通知窗前端未就绪，暂存通知: [{kind}] {title}");
+        // 复查竞态：上面的窗口显示是跨线程派发（毫秒级），期间前端可能恰好 notice_ready——
+        // ready 的 swap+take 发生在本条入队之前就拿不到它，而 ready 已置位、不会再有重放，
+        // 这条提醒会永久滞留队列（remind_fired 已置位不可恢复 → 静默丢失）。
+        // 入队后复查：已就绪就取回本条落回下方就绪路径直接推送；找不到说明已被
+        // 并发的 notice_ready 重放取走，无需重复推。
+        if !NOTICE_READY.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut q = pending_notices().lock().unwrap_or_else(|p| p.into_inner());
+        match q.iter().rposition(|(k, t, b)| k == kind && t == title && b == body) {
+            Some(pos) => {
+                q.remove(pos);
+            }
+            None => return,
+        }
+        drop(q);
+        log::info!("通知在暂存瞬间前端恰好就绪，直接推送: [{kind}] {title}");
+    }
     // 已在展示堆叠：只保证显示，不动尺寸/位置——重置回默认高度会让已展示的卡片
     // 被瞬时裁切、再经一次 IPC 往返校正回来（肉眼可见跳动）；高度交给 notice_layout 增量校正
     if win.is_visible().unwrap_or(false) {

@@ -1,5 +1,6 @@
 import { ref, watch } from 'vue'
 import { emitTo } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useStore } from '../stores/workbench'
 import { isTauri } from '../api/tauri'
 import { broadcastThemeToFrames } from './themeTokens'
@@ -30,9 +31,11 @@ export function applyTheme(opts: { mode: string; preset: string; accent: string 
   }
   // 主题变化后广播给所有活动扩展 iframe（扩展页面实时跟随宿主换色/换主题）
   requestAnimationFrame(() => broadcastThemeToFrames())
-  // 推送悬浮球窗口（独立 WebView：启动时经 get_theme_config 自取初始值，
-  // 此处负责运行时跟随；球未启用/窗口不存在时静默失败）
-  if (isTauri()) {
+  // 推送独立 WebView 窗口（悬浮球/通知窗/对话窗各自经 get_theme_config 自取初始值，
+  // 此处负责运行时跟随；目标窗未启用/不存在时静默失败）。
+  // **只有主窗广播**：独立窗自己 applyTheme 时若再推送，会收到自己发出的事件又触发一次
+  // applyTheme → 自激循环（并反复唤醒球/通知窗），故按窗口 label 门控。
+  if (isTauri() && isMainWindow()) {
     emitTo('floating-ball', 'floating-ball-theme', { accent: opts.accent, dark }).catch(() => {})
     // 推送通知窗（独立 WebView，运行时跟随主窗主题）
     emitTo('notice', 'notice-theme', {
@@ -40,7 +43,22 @@ export function applyTheme(opts: { mode: string; preset: string; accent: string 
       preset: opts.preset,
       accent: opts.accent,
     }).catch(() => {})
+    // 推送 AI 对话独立窗口（独立 WebView，同款机制）
+    emitTo('chat', 'chat-theme', {
+      mode: opts.mode,
+      preset: opts.preset,
+      accent: opts.accent,
+    }).catch(() => {})
   }
+}
+
+// 主窗判定（模块级缓存：一个 WebView 的 label 全程不变）
+let mainWindowFlag: boolean | null = null
+function isMainWindow(): boolean {
+  if (mainWindowFlag === null) {
+    mainWindowFlag = getCurrentWindow().label === 'main'
+  }
+  return mainWindowFlag
 }
 
 interface FontScale {

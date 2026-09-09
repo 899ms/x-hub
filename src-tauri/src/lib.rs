@@ -2,6 +2,7 @@ mod about;
 mod autostart;
 mod browsers;
 mod chat;
+mod chat_window;
 mod clipboard;
 mod commands;
 mod config;
@@ -397,6 +398,9 @@ pub fn run() {
             // 预创建通知窗（隐藏常驻）：右下角自绘通知，跨 Win10/11 一致（详见 notify.rs）
             notify::init(app.handle());
 
+            // AI 对话独立窗口（设置开启时预创建隐藏常驻，详见 chat_window.rs）
+            chat_window::init(app.handle());
+
             // 关闭事件：拦截默认关闭，改为隐藏至托盘
             if let Some(window) = app.get_webview_window("main") {
                 let app_handle = app.handle().clone();
@@ -544,13 +548,20 @@ pub fn run() {
             commands::set_chat_session_model,
             commands::list_chat_messages,
             commands::send_chat_message,
-commands::get_chat_models,
-commands::save_chat_models,
-commands::fetch_chat_provider_models,
-commands::get_chat_api_key,
-commands::set_chat_panel,
+            commands::get_chat_models,
+            commands::save_chat_models,
+            commands::fetch_chat_provider_models,
+            commands::get_chat_api_key,
+            commands::set_chat_panel,
             commands::get_chat_panel,
             commands::set_chat_panel_side,
+            commands::get_ui_config,
+            chat_window::chat_window_get_state,
+            chat_window::chat_window_toggle,
+            chat_window::chat_window_close,
+            chat_window::chat_window_set_pinned,
+            chat_window::chat_window_save_mode,
+            chat_window::chat_window_open_settings,
             commands::get_app_info,
             commands::clipboard_list,
             commands::clipboard_copy,

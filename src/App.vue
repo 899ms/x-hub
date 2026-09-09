@@ -11,6 +11,7 @@ import ExtensionWindow from './components/ExtensionWindow.vue'
 import PromptFloat from './components/PromptFloat.vue'
 import TodoFloat from './components/TodoFloat.vue'
 import FloatingBallWindow from './components/FloatingBallWindow.vue'
+import ChatWindow from './components/ChatWindow.vue'
 import NoticeOverlay from './components/NoticeOverlay.vue'
 import UpdateCheckDialog from './components/UpdateCheckDialog.vue'
 import { isTauri } from './api/tauri'
@@ -24,6 +25,7 @@ const isExtensionWindow = label.startsWith('ext-')
 const isPromptFloat = label === 'prompt-float'
 const isTodoFloat = label === 'todo-float'
 const isFloatingBall = label === 'floating-ball'
+const isChatWindow = label === 'chat'
 const isNoticeWindow = label === 'notice'
 
 // 主窗口：记录最后聚焦的可编辑元素。剪贴板浮层粘贴到主窗口输入框时，
@@ -136,6 +138,7 @@ onBeforeUnmount(() => {
   <PromptFloat v-else-if="isPromptFloat" />
   <TodoFloat v-else-if="isTodoFloat" />
   <FloatingBallWindow v-else-if="isFloatingBall" />
+  <ChatWindow v-else-if="isChatWindow" />
   <NoticeOverlay v-else-if="isNoticeWindow" />
   <Index v-else />
   <UpdateCheckDialog v-if="isMainWindow" />

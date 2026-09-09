@@ -17,6 +17,13 @@ pub struct DbState(pub Mutex<Connection>);
 /// 避免历史越长加载越慢、内存/请求体按全量历史成倍膨胀。约合 15 轮对话。
 const CHAT_CONTEXT_WINDOW: i64 = 30;
 
+/// 轻量配置读取：AI 对话独立窗唤起时专用——get_initial_data 会全量拉九类业务数据，
+/// 独立窗只需要 config（主题三件套/字号等），业务数据由 ChatPanel 自己的 refresh 拉
+#[tauri::command]
+pub fn get_ui_config() -> crate::config::AppConfig {
+    crate::config::load()
+}
+
 #[tauri::command]
 pub fn get_initial_data(state: State<'_, DbState>) -> Result<InitialData, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -968,6 +975,9 @@ pub fn save_config(config: AppConfig) -> Result<AppConfig, String> {
     // （chat_models 可能为空/过期）在保存主题/快捷键等任意设置时整体覆盖掉模型配置
     let mut merged = config;
     let disk = crate::config::load();
+    // AI 对话独立窗口：开关经 chat_window_save_mode、几何由后端拖拽/缩放记忆，同样以
+    // 磁盘为准（主窗旧快照不得覆盖）。必须在下面 move 走 disk 字段之前借用整个 disk。
+    crate::chat_window::preserve_disk_fields(&mut merged, &disk);
     merged.chat_models = disk.chat_models;
     // 悬浮球字段均由后端管理（位置由 drag_end 记忆、开关经 save_settings 变更），
     // 同样以磁盘为准，防止主窗旧快照把拖拽后的位置/设置覆盖回去

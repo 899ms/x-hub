@@ -150,6 +150,16 @@ export interface AppConfig {
   chat_panel_side: string
   /** AI 对话面板在顶部/底部方位时的高度（px） */
   chat_panel_height: number
+  /** AI 对话是否以独立窗口打开（false = 主窗内嵌抽屉） */
+  chat_window_mode: boolean
+  /** AI 对话独立窗口尺寸（逻辑 px，由后端拖拽/缩放记忆） */
+  chat_window_width: number
+  chat_window_height: number
+  /** AI 对话独立窗口位置（物理 px，由后端记忆） */
+  chat_window_x: number | null
+  chat_window_y: number | null
+  /** AI 对话独立窗口是否置顶 */
+  chat_window_pinned: boolean
   /** 剪贴板历史全局呼出快捷键 */
   clipboard_shortcut: string
   /** 剪贴板历史最大条数（含置顶） */
@@ -207,6 +217,16 @@ export interface AppInfo {
   version: string
   changelog: string
   latest_section: string
+}
+
+/** AI 对话独立窗口状态（Rust chat_window::chat_window_get_state） */
+export interface ChatWindowState {
+  /** 是否采用「独立窗口」形态（与主窗内嵌抽屉互斥） */
+  mode: boolean
+  /** 是否置顶 */
+  pinned: boolean
+  /** 当前是否可见 */
+  visible: boolean
 }
 
 /** 悬浮球停靠边（球心落在该侧屏幕/工作区边缘，球体一半藏屏外） */
@@ -504,6 +524,8 @@ export const isTauri = () => typeof window !== 'undefined' && '__TAURI_INTERNALS
 
 export const tauriApi = {
   getInitialData: () => invoke<InitialData>('get_initial_data'),
+  /** 轻量配置读取（AI 对话独立窗唤起用）：只拉 config，不拉九类业务数据 */
+  getUiConfig: () => invoke<AppConfig>('get_ui_config'),
   createResource: (payload: {
     kind: 'app' | 'web' | 'file'
     name: string
@@ -690,6 +712,15 @@ export const tauriApi = {
     invoke<void>('set_chat_panel', { width, height, open }),
   getChatPanel: () => invoke<[number, number, boolean]>('get_chat_panel'),
   setChatPanelSide: (side: string) => invoke<void>('set_chat_panel_side', { side }),
+  // ---- AI 对话独立窗口（与主窗内嵌抽屉互斥，窗口常驻隐藏、只做 show/hide） ----
+  chatWindowGetState: () => invoke<ChatWindowState>('chat_window_get_state'),
+  chatWindowToggle: () => invoke<void>('chat_window_toggle'),
+  chatWindowClose: () => invoke<void>('chat_window_close'),
+  chatWindowSetPinned: (pinned: boolean) =>
+    invoke<void>('chat_window_set_pinned', { pinned }),
+  chatWindowSaveMode: (enabled: boolean) =>
+    invoke<void>('chat_window_save_mode', { enabled }),
+  chatWindowOpenSettings: () => invoke<void>('chat_window_open_settings'),
   getAppInfo: () => invoke<AppInfo>('get_app_info'),
   createCountdown: (payload: {
     name: string

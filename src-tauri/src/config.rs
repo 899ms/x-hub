@@ -105,6 +105,23 @@ pub struct AppConfig {
     /// AI 对话右侧面板透明度（0.5–1.0，可在设置中调整）
     #[serde(default = "default_chat_panel_opacity")]
     pub chat_panel_opacity: f64,
+    /// AI 对话是否以独立窗口打开（true = 独立小窗，false = 主窗内嵌抽屉，默认）
+    #[serde(default)]
+    pub chat_window_mode: bool,
+    /// AI 对话独立窗口宽度（逻辑 px，由窗口缩放拖拽记忆）
+    #[serde(default = "default_chat_window_width")]
+    pub chat_window_width: f64,
+    /// AI 对话独立窗口高度（逻辑 px）
+    #[serde(default = "default_chat_window_height")]
+    pub chat_window_height: f64,
+    /// AI 对话独立窗口位置（物理 px，拖动松手后由后端记忆，与悬浮球/倒计时浮窗同约定）
+    #[serde(default)]
+    pub chat_window_x: Option<f64>,
+    #[serde(default)]
+    pub chat_window_y: Option<f64>,
+    /// AI 对话独立窗口是否置顶（自制标题栏的图钉按钮切换）
+    #[serde(default)]
+    pub chat_window_pinned: bool,
     /// 剪贴板历史全局呼出快捷键（默认 Ctrl+Alt+V，可配置）
     pub clipboard_shortcut: String,
     /// 剪贴板历史最大条数（含置顶；置顶豁免自动清理但计入上限）
@@ -207,6 +224,14 @@ fn default_chat_panel_height() -> f64 {
     380.0
 }
 
+fn default_chat_window_width() -> f64 {
+    460.0
+}
+
+fn default_chat_window_height() -> f64 {
+    640.0
+}
+
 fn default_true() -> bool {
     true
 }
@@ -285,6 +310,12 @@ impl Default for AppConfig {
             chat_panel_side: "right".to_string(),
             chat_panel_height: 380.0,
             chat_panel_opacity: 1.0,
+            chat_window_mode: false,
+            chat_window_width: default_chat_window_width(),
+            chat_window_height: default_chat_window_height(),
+            chat_window_x: None,
+            chat_window_y: None,
+            chat_window_pinned: false,
             clipboard_shortcut: crate::shortcut::DEFAULT_CLIPBOARD_SHORTCUT.to_string(),
             clipboard_max_items: 500,
             clipboard_ttl_days: 7,

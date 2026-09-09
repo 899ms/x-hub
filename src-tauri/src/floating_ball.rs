@@ -1141,6 +1141,12 @@ pub fn floating_ball_trigger(app: AppHandle, id: String) {
         crate::tray::toggle_main_window(&app);
         return;
     }
+    // AI 对话：设置开启「独立窗口」形态时直接唤起对话小窗（主窗不必出现），
+    // 否则仍走主窗路径（显示 + 派发事件展开内嵌抽屉）——两种形态互斥，入口行为跟随设置
+    if id == "view:chat" && crate::chat_window::mode_enabled() {
+        crate::chat_window::toggle(&app);
+        return;
+    }
     crate::tray::show_window(&app);
     if id != "act:main" {
         use tauri::Emitter;

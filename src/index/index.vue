@@ -395,6 +395,17 @@ onMounted(async () => {
         void onCreateNote()
       }
     })
+    // 独立对话窗「模型设置」入口：唤出主窗并定位到设置 → AI 助手
+    unlistenOpenChatSettings = await listen('open-chat-settings', () => {
+      onOpenChatSettings()
+    })
+    // 形态切换（设置里的开关 / 独立窗侧改动）：切到独立窗口时收起内嵌抽屉，二者互斥
+    unlistenChatMode = await listen<boolean>('chat-window-mode', (e) => {
+      if (e.payload && chatOpen.value) {
+        chatOpen.value = false
+        persistChatPanelSize()
+      }
+    })
   }
   window.addEventListener('keydown', onSearchKeydown)
   window.addEventListener('keydown', onChatKeydown)
@@ -409,6 +420,8 @@ let unlistenSnippetsChanged: (() => void) | null = null
 let unlistenTodosChanged: (() => void) | null = null
 let unlistenTodoRemind: (() => void) | null = null
 let unlistenBallAction: (() => void) | null = null
+let unlistenOpenChatSettings: (() => void) | null = null
+let unlistenChatMode: (() => void) | null = null
 
 onUnmounted(() => {
   store.stopOnlineMonitor()
@@ -420,6 +433,8 @@ onUnmounted(() => {
   unlistenTodosChanged?.()
   unlistenTodoRemind?.()
   unlistenBallAction?.()
+  unlistenOpenChatSettings?.()
+  unlistenChatMode?.()
   window.removeEventListener('keydown', onSearchKeydown)
   window.removeEventListener('keydown', onChatKeydown)
 })
@@ -503,6 +518,12 @@ const chatDockStyle = computed(() =>
 )
 
 function toggleChat() {
+  // 独立窗口形态（设置「AI 助手 → 以独立窗口打开」决定，与内嵌抽屉互斥）：
+  // 唤起/收起后端常驻的对话小窗，抽屉状态不参与
+  if (isTauri() && store.state.config.chat_window_mode) {
+    void tauriApi.chatWindowToggle().catch(() => {})
+    return
+  }
   chatOpen.value = !chatOpen.value
   // 窗口开关状态不持久化：重启后始终默认收起，仅保存尺寸
   persistChatPanelSize()
