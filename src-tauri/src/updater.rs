@@ -377,7 +377,37 @@ pub async fn download_update(
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
 
-    let (manifest, _) = fetch_manifest(&client).await?;
+    // 断点续传 + 自动重试：慢链路上长连接易被中途掐断（reqwest 统一报
+    // "error decoding response body"），每次尝试都从 tmp 已有字节数 Range 续传（R2 支持 206），
+    // 失败退避后自动再试直到成功或重试额度用完；残片不小于预期总大小时视为脏文件丢弃
+    const MAX_ATTEMPTS: u32 = 8;
+    const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+    // 清单 + 签名两次 GET：接入层瞬时异常（一次 404/超时）不该让整单失败，轻量重试兜底
+    const MANIFEST_ATTEMPTS: u32 = 3;
+    let (manifest, _) = {
+        let mut last_err = String::new();
+        let mut got = None;
+        for attempt in 1..=MANIFEST_ATTEMPTS {
+            match fetch_manifest(&client).await {
+                Ok(v) => {
+                    got = Some(v);
+                    break;
+                }
+                Err(e) => {
+                    last_err = e;
+                    log::warn!("更新清单拉取第 {attempt}/{MANIFEST_ATTEMPTS} 次失败: {last_err}");
+                    if attempt < MANIFEST_ATTEMPTS {
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+        match got {
+            Some(v) => v,
+            None => return Err(last_err),
+        }
+    };
     if !manifest.version.eq(&version) {
         return Err(format!(
             "更新源已变更（目标 v{version}，清单 v{}），请重新检查更新",
@@ -402,11 +432,7 @@ pub async fn download_update(
     let zip_path = ver_dir.join("x-hub.zip");
     let tmp_zip = ver_dir.join("x-hub.zip.tmp");
 
-    // 断点续传 + 自动重试：慢链路上长连接易被中途掐断（reqwest 统一报
-    // "error decoding response body"），每次尝试都从 tmp 已有字节数 Range 续传（R2 支持 206），
     // 失败退避后自动再试直到成功或重试额度用完；残片不小于预期总大小时视为脏文件丢弃
-    const MAX_ATTEMPTS: u32 = 8;
-    const RETRY_DELAY: Duration = Duration::from_secs(2);
     let manifest_size = if portable { entry.portable_size } else { entry.size };
     let mut attempt: u32 = 0;
     let downloaded;
@@ -452,6 +478,16 @@ pub async fn download_update(
             return Err("更新残片与服务端文件不一致，已重置下载，请重试".to_string());
         }
         if !resp.status().is_success() {
+            // 非 2xx（含 404/403 瞬态）同样退避重试：接入层抖动一次不该让用户手点失败
+            if attempt < MAX_ATTEMPTS {
+                log::warn!(
+                    "更新下载第 {attempt} 次尝试返回 HTTP {}，{}s 后重试（从 {offset} 字节处续传）",
+                    resp.status(),
+                    RETRY_DELAY.as_secs()
+                );
+                tokio::time::sleep(RETRY_DELAY).await;
+                continue;
+            }
             return Err(format!("下载失败: HTTP {}", resp.status()));
         }
         // 服务器不支持 Range（回 200 全量而非 206）时清零从头下
