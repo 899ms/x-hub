@@ -845,7 +845,7 @@ pub async fn toggle_prompt_float(app: tauri::AppHandle) -> Result<(), String> {
     if crate::float_window::is_visible(&app, label) {
         crate::float_window::destroy(&app, label);
     } else {
-        crate::float_window::create_or_focus(&app, label, "提示词", 300.0, 420.0)
+        crate::float_window::create_or_focus(&app, label, "提示词", 300.0, 420.0, false)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -858,7 +858,7 @@ pub async fn toggle_todo_float(app: tauri::AppHandle) -> Result<(), String> {
     if crate::float_window::is_visible(&app, label) {
         crate::float_window::destroy(&app, label);
     } else {
-        crate::float_window::create_or_focus(&app, label, "待办", 320.0, 440.0)
+        crate::float_window::create_or_focus(&app, label, "待办", 320.0, 440.0, true)
             .map_err(|e| e.to_string())?;
     }
     Ok(())

@@ -398,7 +398,7 @@ pub fn run() {
             // 预创建通知窗（隐藏常驻）：右下角自绘通知，跨 Win10/11 一致（详见 notify.rs）
             notify::init(app.handle());
 
-            // AI 对话独立窗口（设置开启时预创建隐藏常驻，详见 chat_window.rs）
+            // AI 对话独立窗口（无条件预创建隐藏常驻，运行期绝不建窗，详见 chat_window.rs）
             chat_window::init(app.handle());
 
             // 关闭事件：拦截默认关闭，改为隐藏至托盘

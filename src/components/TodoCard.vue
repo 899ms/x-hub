@@ -4,6 +4,7 @@ import { ListTodo, PanelTopClose } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 import type { Todo } from '../api/tauri'
 import { parseTodoItems } from '../utils/todoParse'
+import { useTodoChildren } from '../composables/useTodoChildren'
 import TodoRow from './TodoRow.vue'
 import {
   addDays,
@@ -64,21 +65,8 @@ const pendingGroups = computed<TodoGroup[]>(() => {
   return groups
 })
 
-/** 父待办 → 子待办列表（创建时间倒序）。
- *  一次建 Map 供所有 TodoRow 查找，避免每行各自过滤全部待办 */
-const childrenMap = computed(() => {
-  const map = new Map<number, Todo[]>()
-  for (const t of store.state.todos) {
-    if (t.parent_id == null) continue
-    const list = map.get(t.parent_id)
-    if (list) list.push(t)
-    else map.set(t.parent_id, [t])
-  }
-  for (const list of map.values()) {
-    list.sort((a, b) => b.created_at.localeCompare(a.created_at))
-  }
-  return map
-})
+/** 父待办 → 子待办列表（与待办浮窗共用，见 useTodoChildren） */
+const childrenMap = useTodoChildren()
 
 // ---- 新增：回车建待办，粘贴「1. a 2. b」序号列表一次拆成多条 ----
 async function onAdd() {
@@ -132,6 +120,8 @@ async function restoreTodo(parent: Todo, kids: readonly Todo[]) {
 provide('todoOpenSchedule', openSchedule)
 provide('todoRemoveTodo', removeTodo)
 provide('todoChildren', childrenMap)
+// 当前视图：子待办拖拽仅待办视图开放（同顶级行的约束）
+provide('todoView', view)
 
 // ---- 组内上下拖动排序 ----
 // 指针实现而非 HTML5 DnD：Tauri 主窗口的原生拖放拦截（dragDropEnabled）与

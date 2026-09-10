@@ -19,13 +19,16 @@ fn centered_position(app: &AppHandle, width: f64, height: f64) -> Option<(f64, f
 }
 
 /// 创建（或聚焦）浮窗。已存在同 label 窗口时复用（show + focus）。
-/// 固定尺寸、无边框、透明、置顶、不进任务栏，与便签/倒计时浮窗风格一致。
+/// 无边框、透明、置顶、不进任务栏，与便签/倒计时浮窗风格一致。
+/// resizable 为 true 时窗口可拖边缘改变大小（并设最小尺寸防拖瘫），
+/// 目前仅待办浮窗开启；提示词浮窗保持固定尺寸。
 pub fn create_or_focus(
     app: &AppHandle,
     label: &str,
     title: &str,
     width: f64,
     height: f64,
+    resizable: bool,
 ) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
@@ -36,7 +39,7 @@ pub fn create_or_focus(
     let mut builder = tauri::WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(title)
         .inner_size(width, height)
-        .resizable(false)
+        .resizable(resizable)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -56,6 +59,10 @@ pub fn create_or_focus(
     }
 
     let win = builder.build()?;
+    if resizable {
+        // 可拖大小时限制最小尺寸，防止把标题栏/输入框挤没（与前端拖拽把手配合）
+        let _ = win.set_min_size(Some(tauri::LogicalSize::new(280.0, 200.0)));
+    }
     log::info!("浮窗已创建: {} {}", label, title);
     Ok(win)
 }

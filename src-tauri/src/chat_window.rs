@@ -3,12 +3,14 @@
 //! 与主窗内嵌形态**互斥**：开关决定唯一形态，标题栏按钮 / Ctrl+Shift+K / 悬浮球
 //! 「AI 对话」入口都按该开关分流。
 //!
-//! 窗口生命周期（约定 41 铁律：运行时禁止现场创建/销毁 WebView2 窗口）：
-//! - 启动期 `init` 按配置预创建 + 隐藏常驻；唤起/收起只做 show/hide（ShowWindow 级快操作）；
+//! 窗口生命周期（约定 41 铁律：运行时禁止现场创建/销毁 WebView2 窗口，**零例外**）：
+//! - 启动期 `init` **无条件**预创建 + 隐藏常驻，与悬浮球/剪贴板/通知窗同口径。曾有过的
+//!   「按配置惰性建窗」把建窗推到了设置开关从关切到开的那一刻（apply_mode 现场 build），
+//!   实测整 app 挂死：窗口打不开、主线程卡死后同步命令（供应商列表）永不返回、托盘退出
+//!   无反应（v0.5.5 用户实机踩中）。「用户在设置页没有并发窗口操作」是伪论证——悬浮球边缘
+//!   监视循环 100ms 一次搬窗、通知/剪贴板隐藏窗常驻，任何运行期 build 都在赌窗口操作不并存；
 //! - 关闭按钮 / Alt+F4 只 `prevent_close` + 隐藏，窗口常驻复用，**绝不 destroy**；
-//! - 运行期唯一一次现场 build 发生在用户于设置页把开关从关切到开的那一刻——该时机在
-//!   设置视图内、不与悬浮球菜单收拢/拖拽等窗口操作并发，且此后永不 rebuild，符合铁律意图。
-//!   关闭开关只隐藏窗口（renderer 常驻内存，换取再次开启零建窗延迟）。
+//! - 形态开关（chat_window_save_mode/apply_mode）只改内存镜像 + 显隐，运行期绝不 build。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow};
@@ -145,8 +147,8 @@ fn initial_center(app: &AppHandle, width: f64, height: f64) -> Option<(i32, i32)
     ))
 }
 
-/// 建窗（visible=false 时常驻隐藏；显示由调用方决定）
-fn build(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow> {
+/// 建窗（一律隐藏常驻，唤起/收起由 show_window/hide_window 做显隐；启动 init 唯一调用点）
+fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let cfg = config::load();
     let mut builder =
         tauri::WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
@@ -162,7 +164,7 @@ fn build(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow> {
             .always_on_top(cfg.chat_window_pinned)
             // 独立对话窗是正常窗体：进任务栏，便于 Alt+Tab 唤回（主窗隐藏时也能找到它）
             .skip_taskbar(false)
-            .visible(visible)
+            .visible(false)
             .additional_browser_args(crate::ADDITIONAL_BROWSER_ARGS);
 
     // 透明窗口在 Windows 上启用系统阴影会把边缘渲染成黑色描边（便签/剪贴板浮窗同款坑），
@@ -185,7 +187,7 @@ fn build(app: &AppHandle, visible: bool) -> tauri::Result<WebviewWindow> {
     }
 
     attach_events(app, &win);
-    log::info!("对话独立窗口已创建（visible={}）", visible);
+    log::info!("对话独立窗口已创建（隐藏常驻）");
     Ok(win)
 }
 
@@ -204,18 +206,16 @@ fn attach_events(app: &AppHandle, win: &WebviewWindow) {
     });
 }
 
-/// 启动期预创建：仅当配置开启独立窗口模式时建窗（默认关闭 → 不为不用的用户常驻一份
-/// renderer 内存）。开启状态下由 `chat_window_save_mode` 负责补齐建窗。
+/// 启动期预创建：**无条件**建窗 + 隐藏常驻（同悬浮球/剪贴板/通知窗口径）。
+/// 不做「按配置惰性建窗、开启时运行期补建」——运行期现场 build WebView2 会挂死主线程
+/// （v0.5.4 实测事故，见模块头注释）。未开启形态多付一份隐藏 renderer 内存 = 铁律
+/// 已接受的既定代价。
 pub fn init(app: &AppHandle) {
-    let enabled = config::load().chat_window_mode;
-    MODE.store(enabled, Ordering::Relaxed);
-    if !enabled {
-        return;
-    }
+    MODE.store(config::load().chat_window_mode, Ordering::Relaxed);
     if app.get_webview_window(LABEL).is_some() {
         return;
     }
-    match build(app, false) {
+    match build(app) {
         Ok(_) => log::info!("对话独立窗口已预创建（隐藏常驻）"),
         Err(e) => log::warn!("对话独立窗口预创建失败: {e}"),
     }
@@ -229,6 +229,17 @@ pub fn show_window(app: &AppHandle) {
         log::warn!("对话独立窗口不存在（预创建失败？），跳过本次唤起");
         return;
     };
+    // 建窗已提前到启动期（主窗可能隐藏/未就绪，拿不到「主窗中央」落点）：
+    // 尚无位置记忆时在首次唤起（主窗必然可见）补一次落位，Moved 事件会随之持久化
+    {
+        let cfg = config::load();
+        if (cfg.chat_window_x, cfg.chat_window_y) == (None, None) {
+            if let Some((x, y)) = initial_center(app, cfg.chat_window_width, cfg.chat_window_height)
+            {
+                let _ = win.set_position(PhysicalPosition::new(x, y));
+            }
+        }
+    }
     if win.is_minimized().unwrap_or(false) {
         let _ = win.unminimize();
     }
@@ -257,8 +268,7 @@ pub fn hide_window(app: &AppHandle) {
 }
 
 /// 唤起/收起（标题栏按钮、Ctrl+Shift+K、悬浮球「AI 对话」入口共用）。
-/// 门禁：内嵌形态（mode=false）下入口一律忽略——前端虽已分流，这里再拦一道，
-/// 防前端竞态/旧前端误触发在运行期建窗（违反「默认 false 时完全不建窗」承诺）。
+/// 门禁：内嵌形态（mode=false）下入口一律忽略——独立窗虽常驻隐藏，未开启时也不许被唤起。
 pub fn toggle(app: &AppHandle) {
     if !mode_enabled() {
         return;
@@ -276,15 +286,14 @@ pub fn is_visible(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-/// 模式切换落地：开启 → 确保窗口已建好（此刻用户正在设置页，无并发窗口操作，
-/// 现场建一次后从此常驻）；关闭 → 隐藏常驻（不 destroy，避免下次开启再建）。
+/// 模式切换落地：只改内存镜像 + 显隐。窗口由启动 init 常驻，**这里绝不 build**
+/// （约定 41：v0.5.4 在此现场建窗挂死整 app 的事故实录见模块头）。
+/// 开启 → 无事（等入口按 mode_enabled 唤起）；关闭 → 隐藏常驻（不 destroy）。
 pub fn apply_mode(app: &AppHandle, enabled: bool) {
     MODE.store(enabled, Ordering::Relaxed);
     if enabled {
         if app.get_webview_window(LABEL).is_none() {
-            if let Err(e) = build(app, false) {
-                log::warn!("对话独立窗口建窗失败: {e}");
-            }
+            log::warn!("对话独立窗口不存在（启动期建窗失败），本次开启无法恢复，重启后可用");
         }
         return;
     }

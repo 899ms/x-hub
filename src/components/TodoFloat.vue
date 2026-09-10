@@ -1,15 +1,27 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
-import { Check, ListTodo, Pin, PinOff, Trash2, X } from 'lucide-vue-next'
-import { isTauri } from '../api/tauri'
+import { ListTodo, Pin, PinOff, X } from 'lucide-vue-next'
+import { isTauri, type Todo } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 import { useTheme } from '../composables/useTheme'
 import { parseTodoItems } from '../utils/todoParse'
 import { compareByOrder } from '../utils/todoSchedule'
+import { useTodoChildren } from '../composables/useTodoChildren'
+import TodoRow from './TodoRow.vue'
 
 const store = useStore()
+
+// ---- 子待办支持（与工作台待办卡共用 TodoRow）----
+// 不提供 todoOpenSchedule：浮窗无排期弹层，TodoRow 内日期徽标转只读、隐藏「日期」按钮；
+// 不提供 todoDragStart：顶级行按下仍走窗口拖动，子待办组内拖拽由 TodoRow 自带。
+const childrenMap = useTodoChildren()
+provide('todoChildren', childrenMap)
+provide('todoRemoveTodo', (t: Todo) => {
+  // 浮窗无 toast 撤销体系，直接删（后端级联删子待办）
+  void store.deleteTodo(t.id)
+})
 
 // 从窗口 label 取浮窗标识（todo-float），用于置顶切换
 const floatLabel = isTauri() ? getCurrentWindow().label : 'todo-float'
@@ -67,14 +79,6 @@ function onAddKeydown(e: KeyboardEvent) {
   void onAdd()
 }
 
-async function toggle(id: number) {
-  await store.toggleTodo(id)
-}
-
-async function remove(id: number) {
-  await store.deleteTodo(id)
-}
-
 async function onClose() {
   if (isTauri()) await getCurrentWindow().close()
 }
@@ -87,7 +91,8 @@ let dragPending: { x: number; y: number } | null = null
 function onMouseDown(e: MouseEvent) {
   if (!appWindow || e.button !== 0) return
   const target = e.target as HTMLElement
-  if (target.closest('button, input')) return
+  // 子待办行是行内交互区（勾选/编辑/组内拖拽），让给 TodoRow；编辑框同理不触发窗口拖动
+  if (target.closest('button, input, textarea, .todo-row.sub')) return
   dragPending = { x: e.screenX, y: e.screenY }
 }
 function onMouseMove(e: MouseEvent) {
@@ -101,6 +106,29 @@ function onMouseMove(e: MouseEvent) {
 }
 function onDragEnd() {
   dragPending = null
+}
+
+// ---- 边缘拖拽改变窗口大小 ----
+// 无边框窗口没有系统缩放边，用 8 个隐形边缘区手动触发系统级 resize；
+// stopPropagation 拦掉冒泡，避免同时进入「拖动窗口」流程
+// 与 @tauri-apps/api window 的 ResizeDirection 同构（该类型未导出，此处本地声明）
+type ResizeDirection = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West'
+const RESIZE_DIRECTIONS: ResizeDirection[] = [
+  'North',
+  'South',
+  'East',
+  'West',
+  'NorthEast',
+  'NorthWest',
+  'SouthEast',
+  'SouthWest',
+]
+
+function onResizeStart(e: MouseEvent, dir: ResizeDirection) {
+  if (!appWindow || e.button !== 0) return
+  e.preventDefault()
+  e.stopPropagation()
+  void appWindow.startResizeDragging(dir)
 }
 </script>
 
@@ -150,24 +178,22 @@ function onDragEnd() {
         <p>暂无待办</p>
       </div>
 
+      <!-- 与工作台待办卡同一行组件：子待办缩进/折叠/级联勾选/组内拖拽全部一致 -->
       <div v-else>
-        <div v-for="t in pendingTodos" :key="t.id" class="tf-row">
-          <button
-            class="tf-check"
-            :class="{ checked: t.done }"
-            :title="'标记完成'"
-            aria-label="标记完成"
-            @click="toggle(t.id)"
-          >
-            <Check v-if="t.done" :size="11" :stroke-width="3" />
-          </button>
-          <span class="tf-label">{{ t.title }}</span>
-          <button class="tf-del" title="删除" aria-label="删除" @click="remove(t.id)">
-            <Trash2 :size="12" :stroke-width="2" />
-          </button>
-        </div>
+        <TodoRow v-for="t in pendingTodos" :key="t.id" :todo="t" />
       </div>
     </div>
+
+    <!-- 8 方向隐形缩放边缘（仅 Tauri 窗口内渲染） -->
+    <template v-if="appWindow">
+      <div
+        v-for="dir in RESIZE_DIRECTIONS"
+        :key="dir"
+        class="rz"
+        :class="'rz-' + dir.toLowerCase()"
+        @mousedown="onResizeStart($event, dir)"
+      ></div>
+    </template>
   </div>
 </template>
 
@@ -181,6 +207,68 @@ function onDragEnd() {
   box-sizing: border-box;
   -webkit-app-region: no-drag;
   font-size: calc(1rem * var(--fs-todo, 1));
+  position: relative;
+}
+/* 缩放边缘区：边 6px、角 14px，叠加在内容之上但平时不可见 */
+.rz {
+  position: absolute;
+  z-index: 60;
+}
+.rz-north {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+.rz-south {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+.rz-east {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+.rz-west {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+.rz-northeast {
+  top: 0;
+  right: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+.rz-southwest {
+  bottom: 0;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+.rz-northwest {
+  top: 0;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+}
+.rz-southeast {
+  bottom: 0;
+  right: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
 }
 .tf-header {
   display: flex;
@@ -264,76 +352,8 @@ function onDragEnd() {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
   margin: 0 -4px;
   padding: 0 4px;
-}
-.tf-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px;
-  border-radius: var(--radius-sm);
-}
-.tf-row:hover {
-  background: var(--bg-card-soft);
-}
-.tf-row.done {
-  opacity: 0.6;
-}
-.tf-check {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  border: 1.5px solid var(--border-strong);
-  border-radius: var(--radius-pill);
-  background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-on-accent);
-  padding: 0;
-  cursor: pointer;
-}
-.tf-check.checked {
-  background: var(--brand-500);
-  border-color: var(--brand-500);
-}
-.tf-label {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.8125em;
-  color: var(--text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tf-row.done .tf-label {
-  text-decoration: line-through;
-  color: var(--text-3);
-}
-.tf-del {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border: none;
-  background: transparent;
-  border-radius: var(--radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-3);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.18s, background 0.18s, color 0.18s;
-}
-.tf-row:hover .tf-del,
-.tf-row:focus-within .tf-del {
-  opacity: 1;
-}
-.tf-del:hover {
-  background: var(--c-red-soft);
-  color: var(--c-red-ink);
 }
 .tf-empty {
   flex: 1;

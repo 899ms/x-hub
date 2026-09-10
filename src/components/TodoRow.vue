@@ -28,12 +28,18 @@ const props = withDefaults(
     /** 子待办行：小号勾选、无优先级圆点、无「+」按钮 */
     isSub?: boolean
     highlightId?: number | null
+    /** 拖拽中的子待办行（由宿主父行传入；多根组件无法继承 class，走 prop） */
+    dragging?: boolean
   }>(),
-  { isSub: false, highlightId: null },
+  { isSub: false, highlightId: null, dragging: false },
 )
 
+const emit = defineEmits<{ subdrag: [e: PointerEvent] }>()
+
 const store = useStore()
-const openSchedule = inject<(t: Todo, el: HTMLElement) => void>('todoOpenSchedule', () => {})
+/** 排期弹层（卡片层提供）：浮窗等宿主没有弹层时为 null，日期徽标转只读展示、隐藏「日期」按钮 */
+const openSchedule = inject<((t: Todo, el: HTMLElement) => void) | null>('todoOpenSchedule', null)
+const canSchedule = openSchedule != null
 const removeTodo = inject<(t: Todo) => void>('todoRemoveTodo', () => {})
 /** 卡片层统一构建的 父id → 子待办 列表（创建时间倒序），避免每行各自过滤 */
 const childrenMap = inject<ComputedRef<Map<number, Todo[]>>>(
@@ -43,6 +49,8 @@ const childrenMap = inject<ComputedRef<Map<number, Todo[]>>>(
 /** 组内上下拖动：仅顶级行上报给卡片层（子待办不支持拖动），由卡片决定落点与持久化 */
 const dragStart = inject<(t: Todo, e: PointerEvent) => void>('todoDragStart', () => {})
 const dragId = inject<Ref<number | null>>('todoDragId', ref(null))
+/** 当前视图（卡片提供）：子待办拖拽仅待办视图开放，同顶级行 */
+const view = inject<Ref<'pending' | 'done'>>('todoView', ref('pending'))
 
 const PRIORITY_LABELS = ['普通', '重要', '紧急'] as const
 const PRIORITY_BG = ['var(--todo-pri-default)', 'var(--c-yellow-soft)', 'var(--c-red-soft)'] as const
@@ -63,25 +71,155 @@ const remindOn = computed(() => !props.todo.done && props.todo.remind_at != null
 const showProgress = computed(() => !props.isSub && !props.todo.done && kids.value.length > 0)
 
 function onBadgeClick(e: MouseEvent) {
+  if (!canSchedule) return
   const el = e.currentTarget
   if (el instanceof HTMLElement) openSchedule(props.todo, el)
 }
 
 function onRowPointerDown(e: PointerEvent) {
-  if (props.isSub) return
   const target = e.target as HTMLElement | null
   // 子待办行嵌在父行 DOM 内，按下会冒泡到父行监听——
   // 只响应最近 .todo-row 恰为当前行的按下，避免拖子待办误拖起父待办
   if (target && target.closest('.todo-row') !== e.currentTarget) return
+  if (props.isSub) {
+    // 子待办行：上报给宿主父行（kids 列表与容器都在父行实例上）做组内拖拽
+    emit('subdrag', e)
+    return
+  }
   dragStart(props.todo, e)
 }
 
 async function toggle() {
+  const wasDone = props.todo.done
   await store.toggleTodo(props.todo.id)
+  // 勾父带子：父待办标记完成时，未完成的子待办一并勾上（取消完成不连带走子待办，保留各自进度）
+  if (wasDone) return
+  for (const k of kids.value) {
+    if (!k.done) await store.toggleTodo(k.id)
+  }
 }
 
 async function cyclePriority() {
   await store.updateTodo(props.todo.id, props.todo.title, (props.todo.priority + 1) % 3)
+}
+
+// ---- 子待办拖拽排序（同一父条目内上下移动）----
+// 指针实现原因同卡片层顶级行拖拽：Tauri 主窗口原生拖放拦截与 HTML5 DnD 互斥。
+// 子行 pointerdown 经 subdrag 事件上报到宿主父行处理：移动超阈值才激活，
+// 落点把整列子待办 id 顺序写入 sort_order（childrenMap 按 compareByOrder 回读）。
+const subDragId = ref<number | null>(null)
+const subDragLineTop = ref<number | null>(null)
+const subsRef = ref<HTMLElement | null>(null)
+let subDragState: {
+  id: number
+  /** 被拖项在子待办列表中的下标 */
+  fromIndex: number
+  /** 插入下标（相对含被拖项的可见数组）；null = 拖出列表外 */
+  insert: number | null
+} | null = null
+
+function onSubDragStart(k: Todo, e: PointerEvent) {
+  if (e.button !== 0 || view.value !== 'pending') return
+  const target = e.target as HTMLElement | null
+  // 勾选/删除等交互控件上按下不启动拖拽
+  if (target?.closest('button, textarea, input, a, [data-no-drag]')) return
+  const el = e.currentTarget as HTMLElement
+  const startX = e.clientX
+  const startY = e.clientY
+  let active = false
+  let dead = false
+  el.addEventListener('pointermove', onMove)
+  el.addEventListener('pointerup', onUp)
+  el.addEventListener('pointercancel', onUp)
+  // window 兜底：激活前未捕获指针，快速甩动时 up 不落在行上也能清理
+  window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
+
+  function begin(): boolean {
+    // 捕获指针：拖出窗口松开也能收到 pointerup，不会悬挂在拖拽态
+    try {
+      el.setPointerCapture(e.pointerId)
+    } catch {
+      /* 指针已释放时忽略，window 监听兜底场景极少 */
+    }
+    const fromIndex = kids.value.findIndex((x) => x.id === k.id)
+    if (fromIndex < 0) return false
+    subDragState = { id: k.id, fromIndex, insert: null }
+    subDragId.value = k.id
+    document.body.classList.add('todo-row-dragging')
+    document.getSelection()?.removeAllRanges()
+    return true
+  }
+
+  function onMove(ev: PointerEvent) {
+    if (dead) return
+    if (!active) {
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return
+      if (!begin()) {
+        dead = true
+        return
+      }
+      active = true
+    }
+    updateSubDragLine(ev.clientY)
+  }
+
+  function onUp() {
+    el.removeEventListener('pointermove', onMove)
+    el.removeEventListener('pointerup', onUp)
+    el.removeEventListener('pointercancel', onUp)
+    window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
+    // 捕获成功时同一 pointerup 可能到两次（el 目标阶段 + window 冒泡）；
+    // 归零 active 保证 finishSubDrag 只执行一次
+    if (!active) return
+    active = false
+    finishSubDrag()
+  }
+}
+
+/** 指针位置 → 子待办列表内插入线 y（容器坐标）+ 插入下标 */
+function updateSubDragLine(clientY: number) {
+  const ds = subDragState
+  const container = subsRef.value
+  if (!ds || !container) return
+  const rect = container.getBoundingClientRect()
+  const rows = Array.from(container.querySelectorAll<HTMLElement>(':scope > .todo-row'))
+  let insert: number | null = null
+  let edgeY: number | null = null
+  if (clientY >= rect.top && clientY <= rect.bottom && rows.length) {
+    edgeY = rect.bottom
+    insert = rows.length
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i].getBoundingClientRect()
+      if (clientY < r.top + r.height / 2) {
+        edgeY = r.top
+        insert = i
+        break
+      }
+      edgeY = r.bottom
+      insert = i + 1
+    }
+  }
+  ds.insert = insert
+  subDragLineTop.value = edgeY == null ? null : edgeY - rect.top
+}
+
+/** 松开落点：换算目标顺序，整列写回 sort_order */
+function finishSubDrag() {
+  const ds = subDragState
+  document.body.classList.remove('todo-row-dragging')
+  subDragId.value = null
+  subDragState = null
+  subDragLineTop.value = null
+  if (!ds || ds.insert == null || ds.fromIndex < 0) return
+  const ids = kids.value.map((x) => x.id)
+  // 插入下标相对「含被拖项」的数组；先移除再插入需换算
+  const final = ds.insert > ds.fromIndex ? ds.insert - 1 : ds.insert
+  if (final === ds.fromIndex) return
+  const without = ids.filter((_, i) => i !== ds.fromIndex)
+  without.splice(final, 0, ds.id)
+  void store.reorderTodos(without)
 }
 
 // ---- 行内编辑（双击内容，600ms 自动保存体系外的显式提交） ----
@@ -191,7 +329,7 @@ function hideTip() {
 <template>
   <div
     class="todo-row"
-    :class="{ done: todo.done, sub: isSub, highlight: todo.id === highlightId, dragging: todo.id === dragId }"
+    :class="{ done: todo.done, sub: isSub, highlight: todo.id === highlightId, dragging: todo.id === dragId || dragging }"
     :data-todo-id="todo.id"
     @pointerdown="onRowPointerDown"
   >
@@ -243,9 +381,9 @@ function hideTip() {
           <button
             v-if="badge"
             class="todo-badge"
-            :class="badge.kind"
+            :class="[badge.kind, { static: !canSchedule }]"
             type="button"
-            title="点击设置截止/提醒"
+            :title="canSchedule ? '点击设置截止/提醒' : undefined"
             @click="onBadgeClick"
           >
             <AlertTriangle v-if="badge.kind === 'over'" :size="10" :stroke-width="2" />
@@ -254,7 +392,7 @@ function hideTip() {
             {{ badge.text }}
           </button>
           <button
-            v-else
+            v-else-if="canSchedule"
             class="todo-badge-add"
             type="button"
             title="设置截止日期/提醒"
@@ -317,13 +455,15 @@ function hideTip() {
       </div>
 
       <!-- 折叠时隐藏子待办列表；addingSub 打开时输入行必须可见（toggleSubAdd 已先展开，此处兜底） -->
-      <div v-if="(kids.length && !collapsed) || addingSub" class="todo-subs">
+      <div ref="subsRef" v-if="(kids.length && !collapsed) || addingSub" class="todo-subs">
         <TodoRow
           v-for="k in kids"
           :key="k.id"
           :todo="k"
           is-sub
           :highlight-id="highlightId"
+          :dragging="k.id === subDragId"
+          @subdrag="onSubDragStart(k, $event)"
         />
         <div v-if="addingSub" class="todo-sub-input-row">
           <span class="sub-dot" aria-hidden="true"></span>
@@ -348,6 +488,12 @@ function hideTip() {
             <X :size="12" :stroke-width="2.4" />
           </button>
         </div>
+        <div
+          v-if="subDragLineTop != null"
+          class="todo-sub-drag-line"
+          :style="{ top: subDragLineTop + 'px' }"
+          aria-hidden="true"
+        ></div>
       </div>
     </div>
 
@@ -394,9 +540,17 @@ function hideTip() {
   background: var(--brand-50);
   transition: background 0.5s;
 }
-/* 拖拽中的行半透明让位（落点由卡片层插入线指示） */
+/* 拖拽中的行半透明让位（落点由卡片层/宿主父行的插入线指示） */
 .todo-row.dragging {
   opacity: 0.35;
+}
+/* 拖拽期间全局禁选 + 抓手光标（body 在组件外，用 :global 逃出 scoped）。
+   与 TodoCard 重复声明是有意的：待办浮窗窗口不加载卡片样式，这里保证
+   浮窗内子待办拖拽也有抓手光标与禁选 */
+:global(body.todo-row-dragging) {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
 }
 /* 子行嵌在父行 .todo-mid（父待办首字列）内，不再额外缩进，
    让子复选框与父待办第一个字对齐 */
@@ -564,6 +718,14 @@ function hideTip() {
   transform: none;
   filter: none;
 }
+/* 无排期弹层的宿主（浮窗）：日期徽标只读展示 */
+.todo-badge.static {
+  cursor: default;
+}
+.todo-badge.static:hover {
+  transform: none;
+  filter: none;
+}
 .todo-badge-add {
   display: none;
   align-items: center;
@@ -619,6 +781,29 @@ function hideTip() {
 /* ---- 子待办区 ---- */
 .todo-subs {
   margin-top: 2px;
+  position: relative; /* 子待办拖拽插入线的定位基准 */
+}
+/* 子待办拖拽插入线（绝对定位于 .todo-subs） */
+.todo-sub-drag-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--brand-500);
+  box-shadow: 0 0 6px var(--brand-glow);
+  pointer-events: none;
+  z-index: 5;
+}
+.todo-sub-drag-line::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand-500);
 }
 .todo-sub-input-row {
   display: flex;
@@ -655,12 +840,15 @@ function hideTip() {
 .todo-sub-input::placeholder {
   color: var(--text-4);
 }
-.todo-sub-cancel {
+/* 双类提升特异性：压过后声明的 .todo-del 默认隐藏（display:none） */
+.todo-del.todo-sub-cancel {
   position: static;
-  opacity: 1;
+  display: flex; /* 输入行内常驻，不随 hover 显隐 */
 }
 
 /* ---- 行内操作按钮：父级跟在标题/徽标后，子级删除仍挂行尾 ---- */
+/* 默认不渲染（display:none 才不占布局）：隐形占位在标题换行到按钮位置时会
+   挤出整行空白，与日期徽标同规则——hover / 键盘聚焦行时才渲染 */
 .todo-collapser,
 .todo-subadd,
 .todo-del {
@@ -671,12 +859,11 @@ function hideTip() {
   border: none;
   background: transparent;
   border-radius: var(--radius-sm);
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.18s, background 0.18s, color 0.18s;
+  transition: background 0.18s, color 0.18s;
 }
 .todo-collapser {
   color: var(--text-3);
@@ -693,11 +880,20 @@ function hideTip() {
 .todo-row:focus-within .todo-collapser,
 .todo-row:focus-within .todo-subadd,
 .todo-row:focus-within .todo-del {
-  opacity: 1;
+  display: flex;
 }
 /* 折叠态常驻显示（不随 hover 隐藏）：重新展开的入口必须随时可见 */
 .todo-collapser.collapsed {
-  opacity: 1;
+  display: flex;
+}
+/* 拖拽期间锁定按钮渲染：hover 引发的行高变化会干扰落点指示线。
+   注意：选择器必须整体包进一个 :global() ——「:global(前缀) 后代」写法会被
+   Tailwind4/lightningcss 管线吃掉后代部分，编译成 body 本体 display:none（整页消失） */
+:global(body.todo-row-dragging .todo-badge-add),
+:global(body.todo-row-dragging .todo-collapser),
+:global(body.todo-row-dragging .todo-subadd),
+:global(body.todo-row-dragging .todo-del) {
+  display: none;
 }
 .todo-collapser:hover {
   background: var(--brand-50);

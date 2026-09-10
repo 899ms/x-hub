@@ -609,7 +609,8 @@ function fileName(item: ClipboardItem): string {
   overflow: hidden;
   animation: cb-pop 0.16s ease-out;
 }
-:global([data-theme="dark"]) .cb-panel {
+/* 整条选择器包进一个 :global()：「:global(前缀) 后代」写法会被 lightningcss 管线丢弃 */
+:global([data-theme="dark"] .cb-panel) {
   background: rgba(30, 31, 44, 0.92);
 }
 @keyframes cb-pop {
@@ -905,7 +906,7 @@ function fileName(item: ClipboardItem): string {
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
-:global([data-theme="dark"]) .cb-ctx {
+:global([data-theme="dark"] .cb-ctx) {
   background: rgba(30, 31, 44, 0.96);
 }
 .cb-ctx-item {
@@ -1005,7 +1006,7 @@ function fileName(item: ClipboardItem): string {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
-:global([data-theme="dark"]) .cb-toast {
+:global([data-theme="dark"] .cb-toast) {
   background: rgba(30, 31, 44, 0.95);
 }
 
