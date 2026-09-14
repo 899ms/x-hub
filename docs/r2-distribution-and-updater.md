@@ -1,5 +1,10 @@
 # x-hub 基于 Cloudflare R2 的扩展中心与自动升级方案
 
+> ⚠️ **扩展发布入口已统一到服务端（2026-09）**：正式上架走客户端「扩展中心 → 发布」，
+> 由 x-hub-server 审核台完成关卡 + 人工审核 + 服务端签名 + 推送 COS。
+> 本文里的 `scripts/publish-extension.ps1`（§方式 B：本地脚本）与 `release-extension.yml`（CI）
+> **均已停用**，保留仅作分发/签名约定与历史记录。
+
 > 状态：**P0+P1+P2 已实施**（2026-08-26）；**P3 应用升级已随 v0.3.0 实施**（`src-tauri/src/updater.rs` + `signing.rs`：update.json Ed25519 验签 + minimumUpgradable 跳级保护 + sha256 下载校验 + 重启自替换/回滚）。
 > 实施记录见文末附录。
 

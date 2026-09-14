@@ -1,5 +1,11 @@
 # x-hub 分发端点迁移方案：腾讯云 COS 替代 Cloudflare R2
 
+> ⚠️ **扩展发布入口已统一到服务端（2026-09）**：正式上架走 x-hub 客户端「扩展中心 → 发布」，
+> 由 x-hub-server 审核台完成关卡 + 人工审核 + 服务端签名 + 推送 COS。
+> 本文描述的本机脚本通道（`publish-extension.ps1` / `upload-market.ps1` 推 `dist-market`）与
+> CI（`release-extension.yml`）**均已停用**，仅作分发端点拓扑与应急参考。
+> 面向扩展作者的正式文档见 `x-hub-extensions/docs/guide/publishing.md`。
+
 > 状态：**发布脚本 / CI / 拉平脚本已全部改造完毕**；COS 侧待按 §2 开桶。
 > 备选：自建 Nginx 静态托管（`scripts/server/` + §8），当前不启用。
 > 客户端（`market.rs` / `updater.rs`）零改动：只认 `market_endpoint` / `update_endpoint` 两个 URL + 内嵌 Ed25519 公钥。
@@ -76,15 +82,14 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 用法（上传脚本四通道：`-Target cos` 默认主通道，`-Target r2` 过渡期兜底，`-Target sftp` 备选 Nginx，`-Target all` 双写=cos+r2 依次各跑一遍、任一失败立即中止）：
 
 ```powershell
-# 应用发版
+# 应用发版（仍然有效：客户端应用发布不经过扩展市场）
 ./scripts/publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version 0.5.1 `
   -SignKey E:\workspace\.x-hub-signing\market.key -Notes "…"
 ./scripts/upload-release.ps1 -Target all         # → 双写：COS + R2（过渡期推荐）
 
-# 扩展发布
-./scripts/publish-extension.ps1 -ExtDir E:\workspace\x-hub-extensions\extensions\hello-web `
-  -SignKey E:\workspace\.x-hub-signing\market.key
-./scripts/upload-market.ps1 -Target all          # → 双写：COS + R2（过渡期推荐）
+# 扩展发布 —— ⛔ 已停用（2026-09）：改走客户端「扩展中心 → 发布」，由服务端审核台签名并推送
+# ./scripts/publish-extension.ps1 -ExtDir …       # 需 XHUB_ALLOW_LOCAL_PUBLISH=1 才可绕过（应急）
+# ./scripts/upload-market.ps1 -Target all         # 需 XHUB_ALLOW_MANUAL_UPLOAD=1 才可绕过（应急）
 ```
 
 脚本均以 rclone remote（环境变量临时配置，不落地）上传，末尾自动做 HTTP 200 + sha256 抽查校验；`upload-release.ps1` 保留 win-x64 只留最近 2 版的清理策略。对象存储通道的缓存头随上传设置（`--header-upload`，即写对象元数据 Cache-Control）。

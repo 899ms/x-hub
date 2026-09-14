@@ -1,13 +1,28 @@
 #requires -Version 7
 <#
 .SYNOPSIS
+  【已停用】本地打包发布扩展。
+
+.NOTES
+  ⚠️ 扩展发布自 2026-09 起**统一走服务端审核台**：
+      客户端「发布」→ 服务端关卡 + AI 预审 + 人工审核 → 服务端签名并推送 COS。
+  本脚本已停用（默认拒绝执行），原因：
+    1. 发布入口必须唯一 —— 本机脚本与服务端同时写 COS/registry，会造成「两方各自 upsert」，
+       线上出现过「清单与签名不是同一版」导致所有客户端拒收整份清单的故障；
+    2. 私钥纪律 —— 服务端接管签发后，本机不应再持有可用于发布的私钥（见 x-hub-server
+       docs/ACCEPTANCE-signing-migration.md §一）。
+
+  确需应急绕过（服务端不可用、要手工救场）时：设置环境变量 XHUB_ALLOW_LOCAL_PUBLISH=1。
+  绕过前请先确认服务端当前没有并发发布，并在之后用 x-hub-server 的 `npm run verify:registry`
+  核对线上清单与签名是同一对。
+
+.DESCRIPTION
   打包扩展并生成本地发布产物（市场清单 v2）。
   生成到 <OutDir>（默认 <仓库>/dist-market）：
     packages/<id>/<version>/<id>-<version>.xhpack — 扩展包（zip 格式，后缀统一 .xhpack，不可变路径）
     icons/<id>.<ext>                              — 图标（manifest.icon 存在时）
     registry.json                                 — 合并后的完整清单（upsert 该扩展）
     registry.json.sig                             — Ed25519 分离签名（base64 文本）
-  上传用 scripts/upload-market.ps1（rclone sftp 到自建服务器），CI 里由 release-extension.yml 自动完成。
 
 .PARAMETER ExtDir
   扩展源码目录（含 manifest.json）。
@@ -18,6 +33,7 @@
 .PARAMETER OutDir
   产物根目录，默认 <仓库>/dist-market。
 .EXAMPLE
+  # 正常流程（推荐）：不要用本脚本，改走服务端审核台
   ./scripts/publish-extension.ps1 -ExtDir E:\workspace\x-hub-extensions\extensions\hello-web -SignKey E:\workspace\.x-hub-signing\market.key
 #>
 param(
@@ -28,6 +44,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---------- 停用闸（发布入口唯一化）----------
+if ($env:XHUB_ALLOW_LOCAL_PUBLISH -ne '1') {
+  throw @'
+本脚本已停用：扩展发布统一走服务端审核台。
+
+  客户端「扩展中心 → 发布」→ 服务端关卡 + AI 预审 + 人工审核 → 服务端签名并推送 COS
+  服务端仓：x-hub-server（发布台 /console/，自检 npm run push:check、npm run verify:registry）
+
+应急绕过（仅在服务端不可用时）：$env:XHUB_ALLOW_LOCAL_PUBLISH = '1'
+'@
+}
+Write-Warning 'XHUB_ALLOW_LOCAL_PUBLISH=1：正在用已停用的本地通道发布。请确认服务端当前没有并发发布，事后用 verify:registry 核对清单与签名。'
 
 # ---------- 校验入参 ----------
 $manifestPath = Join-Path $ExtDir 'manifest.json'
@@ -129,4 +158,6 @@ if ($iconUrl) { Write-Host "icon     : $iconUrl" }
 Write-Host "registry : $registryPath"
 Write-Host "sig      : $sigPath"
 Write-Host ''
-Write-Host '上传：运行 scripts\upload-market.ps1（读 XHUB_DEPLOY_* 环境变量，sftp 上传并校验）。' -ForegroundColor Yellow
+Write-Host '⚠️ 本地产物已生成，但发布入口已统一到服务端。' -ForegroundColor Yellow
+Write-Host '   正常流程：客户端「扩展中心 → 发布」，由服务端审核、签名并推送 COS。' -ForegroundColor Yellow
+Write-Host '   应急上传：scripts\upload-market.ps1（需额外设 XHUB_ALLOW_MANUAL_UPLOAD=1）。' -ForegroundColor Yellow

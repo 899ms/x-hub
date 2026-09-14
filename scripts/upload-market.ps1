@@ -1,6 +1,10 @@
 # upload-market.ps1 — 上传 dist-market 产物到分发端点
+# ⚠️ 扩展发布自 2026-09 起统一走服务端（x-hub-server 审核台 → 服务端签名 → 推 COS）。
+#    本脚本推送 dist-market（本地打包产物）的通道**默认停用**：它会把本机的清单覆盖上云，
+#    与服务端并存时会出现「清单与签名不是同一版」，客户端会拒收整份清单。
+#    应急绕过：设 XHUB_ALLOW_MANUAL_UPLOAD=1（仅在服务端不可用时；事后用 x-hub-server 的
+#    npm run verify:registry 核对线上清单与签名是同一对）。
 # 三通道：-Target cos（默认，腾讯云 COS）/-Target r2（过渡期兜底，Cloudflare R2）/-Target sftp（备选，自建 Nginx）/-Target all（双写）。
-# 过渡期每次发布直接 -Target all（cos + r2 依次各跑一遍，保持两边清单/包一致）；详见 docs/self-hosted-distribution.md §6。
 # 用法:
 #   .\scripts\upload-market.ps1                                  # cos → 腾讯云 COS（读 COS_* 环境变量）
 #   .\scripts\upload-market.ps1 -Target r2                       # → R2（读 R2_* 环境变量）
@@ -44,6 +48,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ---------- 停用闸（发布入口唯一化）----------
+$isDistMarket = (Split-Path -Leaf $DistDir) -eq 'dist-market'
+if ($isDistMarket -and $env:XHUB_ALLOW_MANUAL_UPLOAD -ne '1') {
+  throw @'
+本通道已停用：扩展发布统一走服务端审核台，本脚本不再推送本机打包产物（dist-market）。
+
+  正常流程：客户端「扩展中心 → 发布」→ 服务端关卡/审核 → 服务端签名并推送 COS
+  线上自检：x-hub-server 仓 `npm run verify:registry`（清单与签名是否同一对）
+
+应急绕过（仅在服务端不可用时）：$env:XHUB_ALLOW_MANUAL_UPLOAD = '1'
+'@
+}
 
 if (-not (Test-Path (Join-Path $DistDir "registry.json"))) {
   Write-Error "本地产物缺失 registry.json：请先运行 publish-extension.ps1（$DistDir 不存在或未生成）。"

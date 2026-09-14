@@ -1,90 +1,44 @@
-name: Publish Extension
+name: Publish Extension（已停用）
+
+# ⚠️ 已停用：扩展发布自 2026-09 起统一走服务端（x-hub-server 审核台 → 服务端签名 → 推 COS）。
+# 停用原因：
+#   1. 发布入口必须唯一 —— 本 workflow 与其它通道并存时会出现「清单与签名不是同一版」，
+#      客户端会拒收整份清单（线上真实故障）；
+#   2. **私钥纪律** —— 服务端接管签发后，公开仓里的 UPDATE_SIGNING_KEY secret 必须删除，
+#      否则等于把发布入口留在开源仓库里（见 x-hub-server docs/ACCEPTANCE-signing-migration.md §一.6）。
+#
+# 本文件保留为「已停用」的显式记录：任何触发都只打印说明并失败，不会发布任何东西。
+# 确认线上已无依赖后可直接删除，并同时删除仓库 Actions secrets 里的 UPDATE_SIGNING_KEY。
 
 on:
   workflow_dispatch:
     inputs:
       ext_repo:
-        description: '扩展源码仓库（HTTPS clone URL）'
-        required: true
+        description: '【已停用】扩展源码仓库（HTTPS clone URL）'
+        required: false
         default: 'https://github.com/x-hub-desktop/x-hub-extensions.git'
       ext_path:
-        description: '扩展源码目录（仓库内相对路径，含 manifest.json）'
-        required: true
+        description: '【已停用】扩展源码目录（仓库内相对路径，含 manifest.json）'
+        required: false
         default: 'extensions/hello-web'
 
 permissions:
   contents: read
 
 jobs:
-  publish:
+  disabled:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout 宿主仓库（取发布脚本）
-        uses: actions/checkout@v4
-
-      - name: Checkout 扩展仓库
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.ext_repo }}
-          path: ext-repo
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: 安装 rclone
+      - name: 说明为什么停用
         run: |
-          curl -sLO https://downloads.rclone.org/rclone-current-linux-amd64.zip
-          unzip -oq rclone-current-linux-amd64.zip
-          mkdir -p "$HOME/bin"
-          mv rclone-*-linux-amd64/rclone "$HOME/bin/"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
+          cat <<'EOF'
+          本 workflow 已停用，扩展发布统一走服务端审核台。
 
-      - name: 配置 COS remote
-        env:
-          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
-          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
-          COS_BUCKET: ${{ secrets.COS_BUCKET }}
-          COS_REGION: ${{ secrets.COS_REGION }}
-        run: |
-          rclone config create cos s3 provider TencentCOS \
-            access_key_id "$COS_SECRET_ID" \
-            secret_access_key "$COS_SECRET_KEY" \
-            endpoint "cos.$COS_REGION.myqcloud.com" \
-            --non-interactive
+            正常流程：客户端「扩展中心 → 发布」→ 服务端关卡 + AI 预审 + 人工审核
+                      → 服务端签名并推送 COS
+            线上自检：x-hub-server 仓 `npm run verify:registry`、`npm run push:check`
 
-      - name: 写入签名私钥（Secret → 临时文件）
-        shell: pwsh
-        env:
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: |
-          $keyPath = Join-Path $env:RUNNER_TEMP 'market.key'
-          [System.IO.File]::WriteAllText($keyPath, $env:UPDATE_SIGNING_KEY)
-          Write-Output "KEY_PATH=$keyPath" >> $env:GITHUB_ENV
-
-      - name: 打包 + 合并清单 + Ed25519 签名
-        shell: pwsh
-        env:
-          CDN_BASE_URL: ${{ secrets.CDN_BASE_URL }}
-        run: |
-          & ./scripts/publish-extension.ps1 `
-            -ExtDir "ext-repo/${{ inputs.ext_path }}" `
-            -SignKey "$env:KEY_PATH" `
-            -Endpoint "$env:CDN_BASE_URL/extensions"
-
-      - name: 上传 COS（清单 no-cache，包/图标 immutable 长缓存）
-        env:
-          COS_BUCKET: ${{ secrets.COS_BUCKET }}
-        run: |
-          rclone copy dist-market "cos:$COS_BUCKET/extensions" --include 'registry.json*' --header-upload 'Cache-Control: no-cache' -P
-          rclone copy dist-market "cos:$COS_BUCKET/extensions" --include 'packages/**' --include 'icons/**' --header-upload 'Cache-Control: public, max-age=31536000, immutable' -P
-
-      - name: 验证 HTTP 可访问性
-        env:
-          CDN_BASE_URL: ${{ secrets.CDN_BASE_URL }}
-        run: |
-          for p in registry.json registry.json.sig; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "$CDN_BASE_URL/extensions/$p")
-            echo "$p -> HTTP $code"
-            if [ "$code" != "200" ]; then echo "可访问性校验失败"; exit 1; fi
-          done
+          如需应急本地发布，请走 x-hub-server 的应急通道（并事后核对清单与签名），
+          不要在这里恢复发布步骤：公开仓持有发布私钥是必须消除的风险点。
+          EOF
+          exit 1
