@@ -115,6 +115,9 @@ if ($Target -eq 'cos') {
   $urlBase = "http://$SftpHost`:$HttpPort"
   Write-Host "通道: sftp → $remote/releases（缓存头由服务器端 Nginx 管理）"
 } else {
+  # ⛔ r2 通道已于 2026-09-15 随 R2 停用（对象已清空，备份在 E:\workspace\_x-hub-r2-backup）。
+  # 客户端升级清单默认读 COS，正常发版用默认的 -Target cos 即可；-Target all 会因 r2 失败而中止。
+  Write-Warning "r2 通道已停用（R2 桶已清空）：请改用 -Target cos。"
   if (-not $AccountId -or -not $AccessKeyId -or -not $SecretAccessKey) {
     Write-Error "缺少 R2 凭据。请用 -AccountId/-AccessKeyId/-SecretAccessKey 传入，或设置 R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY 环境变量。"
   }

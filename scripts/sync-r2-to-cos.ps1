@@ -1,4 +1,10 @@
 # sync-r2-to-cos.ps1 — 过渡期阶段 0（一次性）：把 R2 存量（extensions + releases）拉平到腾讯云 COS
+#
+# ⛔ R2 已于 2026-09-15 停用（对象已清空并备份到 E:\workspace\_x-hub-r2-backup，恢复步骤见该目录
+#    的 README-恢复说明.md）。本脚本如今**极易误伤**：它用 `rclone sync`（会删除目标端多余对象），
+#    而 R2 现在是空的 —— 直接跑会把 COS 上的扩展市场与升级包一起清空。因此已加硬闸：
+#    源端为空时直接拒绝执行。需要重新启用 R2 时，先按备份说明书把它恢复出来。
+#
 # 详见 docs/self-hosted-distribution.md §6 阶段 0。旧版本包必须留在 COS 上，各版本客户端都依赖旧路径。
 # 用法:
 #   .\scripts\sync-r2-to-cos.ps1
@@ -53,10 +59,22 @@ if ($LASTEXITCODE -ne 0) { Write-Error "R2 连接失败，请检查凭据。" }
 rclone lsd "cos:$CosBucket"
 if ($LASTEXITCODE -ne 0) { Write-Error "COS 连接失败，请检查桶名（含 APPID 后缀）/地域/密钥。" }
 
+# --- 硬闸：源端为空时拒绝执行 ---
+# rclone sync 会删除目标端多余对象；R2 若为空（已停用/未恢复），同步等于把 COS 清空。
+$srcCount = @(rclone lsf "r2:$Bucket" --recursive 2>$null | Where-Object { $_ -notmatch '/$' }).Count
+if ($srcCount -eq 0) {
+  Write-Error @"
+源端 R2 桶为空，已拒绝执行：这条同步会用空内容覆盖 COS（rclone sync 会删除目标端多余对象）。
+
+  R2 已于 2026-09-15 停用，对象备份在 E:\workspace\_x-hub-r2-backup
+  （恢复步骤见该目录的 README-恢复说明.md；先把备份推回 R2，再跑本脚本）
+"@
+}
+Write-Host "      源端对象数 = $srcCount"
+
 Write-Host "[2/3] 同步 extensions/ ..."
 rclone sync "r2:$Bucket/extensions" "cos:$CosBucket/extensions" -P
 if ($LASTEXITCODE -ne 0) { Write-Error "extensions 同步失败。" }
-
 Write-Host "[3/3] 同步 releases/ ..."
 rclone sync "r2:$Bucket/releases" "cos:$CosBucket/releases" -P
 if ($LASTEXITCODE -ne 0) { Write-Error "releases 同步失败。" }
