@@ -9,7 +9,7 @@
 //!   反向代理与 WebSocket 流式后续实现；
 //! - 停止：卸载时调用 `stop_service`（卸载 UI 在 §12.7 接入）。
 
-use crate::extension::{extensions_root, read_manifest, ExtensionManifest};
+use crate::extension::{read_manifest, ExtensionManifest};
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::sync::Mutex;
@@ -82,7 +82,8 @@ pub fn start_service(
         }
     }
 
-    let dir = extensions_root(app)?.join(ext_id);
+    // 已装扩展与开发扩展共用解析路径（开发扩展由开发者模式直挂源码目录）
+    let dir = crate::ext_protocol::resolve_ext_dir(app, ext_id)?;
     let manifest: ExtensionManifest = read_manifest(&dir)?;
     let backend = manifest
         .backend

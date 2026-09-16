@@ -1,4 +1,3 @@
-import { convertFileSrc } from '@tauri-apps/api/core'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { isTauri, tauriApi } from '../api/tauri'
 import {
@@ -45,24 +44,10 @@ export function parseXHubError(err: unknown): { code: string; message: string } 
 }
 
 /**
- * 把扩展入口的绝对文件路径转成 iframe 可加载的 asset 协议 URL。
- *
- * convertFileSrc 全量 encodeURIComponent，会把盘符冒号 → %3A、反斜杠 → %5C，
- * 整条路径被压成单段 URL，入口内的相对资源（Vite 的 module script / css）会被
- * 解析到 host 根路径而 403（白屏）。这里改为：反斜杠统一成 `/` 后逐段编码，
- * 保留 `/` 作路径分隔符，冒号/空格/中文/#/% 等字符仍被正确 percent 编码，
- * Rust 侧 asset 协议 percent_decode 后可还原成原始路径。
+ * 扩展入口 URL 由后端 `read_extension_entry` 直接返回（`xhub-ext` 协议，逐段 percent 编码），
+ * 前端不再自行拼 asset 协议地址：扩展 origin 因此与承载宿主数据的 `asset.localhost` 不同源，
+ * 扩展无法直接读取数据根下的数据库与配置（见 docs/adr/0008-extension-content-origin-isolation.md）。
  */
-function toAssetUrl(filePath: string): string {
-  const probe = convertFileSrc('x')
-  const base = probe.slice(0, -1) // 去掉末尾占位字符，得到协议前缀（http(s)://asset.localhost/ 或 asset://localhost/）
-  const encoded = filePath
-    .replace(/\\/g, '/')
-    .split('/')
-    .map((seg) => encodeURIComponent(seg))
-    .join('/')
-  return base + encoded
-}
 
 /**
  * 扩展前端框架的核心逻辑：iframe 加载扩展入口（宿主注入 window.xhub）+ postMessage RPC 桥。
@@ -147,6 +132,12 @@ export function useExtensionFrame(
     // 桥脚本首次回包即证明扩展入口已成功执行（白屏 = 桥脚本根本没跑起来）
     const firstAlive = !frameAlive
     frameAlive = true
+    if (firstAlive) {
+      // **到这里才撤「加载中」**：拿到入口 URL ≠ 页面画出来了。
+      // 早撤会留下「加载态已消失、扩展内容还没渲染」的空白窗口——那正是"点开扩展先空白、
+      // 等一下才进主页面"的观感来源（大扩展要跑几百 ms 的 JS 才出首帧）。
+      loading.value = false
+    }
     if (watchdogTimer !== undefined) {
       clearTimeout(watchdogTimer)
       watchdogTimer = undefined
@@ -251,14 +242,14 @@ export function useExtensionFrame(
       return
     }
     try {
-      const htmlPath = await tauriApi.readExtensionEntry(getExtId(), getSurface())
+      const entryUrl = await tauriApi.readExtensionEntry(getExtId(), getSurface())
       if (frameRef.value) {
         const variant = getVariant?.() ?? null
         // 形态经 URL query 随入口首帧到达（桥脚本运行前即可读 location.search），
         // 后续切换走 postMessage 广播（见下方 watch），两种通道互补
         const url = variant
-          ? `${toAssetUrl(htmlPath)}?xhub-variant=${encodeURIComponent(variant)}`
-          : toAssetUrl(htmlPath)
+          ? `${entryUrl}?xhub-variant=${encodeURIComponent(variant)}`
+          : entryUrl
         frameRef.value.src = url
         // 看门狗：入口 HTML 已返回但 iframe 在超时内没有任何桥消息（桥脚本未运行）
         // → 判定白屏，落日志并给出友好提示，而不是永远停在空白页
@@ -266,6 +257,7 @@ export function useExtensionFrame(
           if (frameAlive || error.value) return
           const detail = `extId=${getExtId()} surface=${getSurface() ?? ''} url=${frameRef.value?.src ?? ''}`
           error.value = '扩展加载失败（页面空白），请查看日志定位原因'
+          loading.value = false // 超时也要撤掉加载态，别让界面永远停在「加载中」
           onError?.(error.value)
           void tauriApi.logClientError({ message: '扩展 iframe 白屏', detail })
         }, EXT_LOAD_TIMEOUT_MS)
@@ -278,8 +270,37 @@ export function useExtensionFrame(
         message: '扩展入口加载失败',
         detail: `extId=${getExtId()} surface=${getSurface() ?? ''} | ${message}`,
       })
-    } finally {
-      loading.value = false
+      loading.value = false // 出错立刻撤掉，交给错误态显示
+    }
+    // 成功路径**不**在这里撤 loading：等第一条桥消息（见 onMessage 的 firstAlive）
+    // 或看门狗超时。这正是修「点开扩展先空白」的关键——具体原因见上面 firstAlive 处的注释。
+  }
+
+  // ---- 开发扩展热重载：轮询开发目录内容戳，变化即重载当前 iframe ----
+  // 仅当开发者模式开启、且当前扩展确实是「开发扩展」时才重载（已装扩展不受开发目录变动影响）。
+  // 戳由后端对源码目录树（跳过 node_modules / 隐藏目录）的「相对路径 + mtime」算 FNV，
+  // 因此改 HTML/CSS/JS 都会触发——已装扩展那套 extensions_stamp 只盯 manifest，不够用。
+  const DEV_POLL_MS = 1500
+  let devPollTimer: number | undefined
+  let devStamp: number | null = null
+
+  async function devPollTick() {
+    if (!isTauri()) return
+    try {
+      const stamp = await tauriApi.devExtensionsStamp()
+      if (!stamp) return // 0 = 开发者模式未开启或无开发目录
+      if (devStamp === null) {
+        devStamp = stamp
+        return
+      }
+      if (stamp === devStamp) return
+      devStamp = stamp
+      const status = await tauriApi.getDevModeStatus()
+      if (status.extensions.some((d) => d.id === getExtId())) {
+        void load()
+      }
+    } catch {
+      // 轮询失败不影响正常使用
     }
   }
 
@@ -289,9 +310,11 @@ export function useExtensionFrame(
     registerExtensionFrame(frameRef.value, getExtId())
     if (frameRef.value) frameRef.value.addEventListener('error', onFrameError)
     void load()
+    devPollTimer = window.setInterval(() => void devPollTick(), DEV_POLL_MS)
   })
   onBeforeUnmount(() => {
     if (watchdogTimer !== undefined) clearTimeout(watchdogTimer)
+    if (devPollTimer !== undefined) clearInterval(devPollTimer)
     if (frameRef.value) frameRef.value.removeEventListener('error', onFrameError)
     document.removeEventListener('visibilitychange', onVisibilityChange)
     unregisterExtensionFrame(frameRef.value)
