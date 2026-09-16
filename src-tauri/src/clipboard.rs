@@ -1246,12 +1246,15 @@ fn show_overlay_no_activate(win: &tauri::WebviewWindow) {
                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
                 );
             }
+            // 原生 SW_SHOWNA 显示不会重建 ex-style，但仍可能带着 WS_EX_APPWINDOW
+            // （预创建时的形态）→ 统一摘掉任务栏按钮（见 win_taskbar 模块注释）
+            crate::win_taskbar::apply(win);
             return;
         }
-        let _ = win.show();
+        crate::win_taskbar::show(win);
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = win.show();
+    crate::win_taskbar::show(win);
 }
 
 /// 激活浮层：清除 WS_EX_NOACTIVATE 并强制前台（用户点击搜索框开始键盘操作时调用）

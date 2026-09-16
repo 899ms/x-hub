@@ -31,7 +31,9 @@ pub fn create_or_focus(
     resizable: bool,
 ) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window(label) {
-        let _ = win.show();
+        // 复用分支：显示也必须走 win_taskbar（tao 的 hide/show 会把
+        // WS_EX_APPWINDOW 加回来，任务栏随即多出一颗按钮）
+        crate::win_taskbar::show(&win);
         let _ = win.set_focus();
         return Ok(win);
     }
@@ -59,6 +61,7 @@ pub fn create_or_focus(
     }
 
     let win = builder.build()?;
+    crate::win_taskbar::apply(&win);
     if resizable {
         // 可拖大小时限制最小尺寸，防止把标题栏/输入框挤没（与前端拖拽把手配合）
         let _ = win.set_min_size(Some(tauri::LogicalSize::new(280.0, 200.0)));

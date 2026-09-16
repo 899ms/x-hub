@@ -38,7 +38,9 @@ pub fn create_or_focus(
 ) -> tauri::Result<WebviewWindow> {
     let label = window_label(slot);
     if let Some(win) = app.get_webview_window(&label) {
-        let _ = win.show();
+        // 显示走 win_taskbar：tao 的 hide/show 会重建 ex-style 把 WS_EX_APPWINDOW
+        // 加回来，任务栏随即多出一颗按钮（见 win_taskbar 模块注释）
+        crate::win_taskbar::show(&win);
         let _ = win.set_focus();
         return Ok(win);
     }
@@ -73,6 +75,7 @@ pub fn create_or_focus(
     }
 
     let win = builder.build()?;
+    crate::win_taskbar::apply(&win);
 
     // 移动时持久化位置（存逻辑坐标，与恢复时的 position 一致）
     let app_handle = app.clone();
@@ -107,7 +110,7 @@ pub fn focus(app: &AppHandle, slot: i64) -> bool {
     let Some(win) = app.get_webview_window(&window_label(slot)) else {
         return false;
     };
-    let _ = win.show();
+    crate::win_taskbar::show(&win);
     let _ = win.set_focus();
     true
 }

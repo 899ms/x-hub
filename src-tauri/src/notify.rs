@@ -306,9 +306,11 @@ fn show_no_activate(win: &WebviewWindow) {
             SetWindowLongPtrW(hwnd.0, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE as isize);
             ShowWindow(hwnd.0, SW_SHOWNA);
         }
+        // 通知窗同样是 skip_taskbar 浮窗：显示时摘掉任务栏按钮（见 win_taskbar 模块注释）
+        crate::win_taskbar::apply(win);
         return;
     }
-    let _ = win.show();
+    crate::win_taskbar::show(win);
 }
 
 #[cfg(target_os = "windows")]

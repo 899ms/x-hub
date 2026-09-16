@@ -651,6 +651,10 @@ fn ensure_window(app: &AppHandle) -> tauri::Result<()> {
     builder = builder.shadow(false);
     let win = builder.build()?;
 
+    // 彻底不进任务栏：tao 的 skip_taskbar 只是一次性 DeleteTab，窗口仍带 WS_EX_APPWINDOW，
+    // 会在 hide/show 后重新长出任务栏按钮（见 win_taskbar 模块注释）
+    crate::win_taskbar::apply(&win);
+
     place_initial(app, &win);
 
     // 悬浮球不响应关闭请求（Alt+F4 等）：隐藏即可，窗口常驻复用
@@ -731,7 +735,9 @@ pub fn sync_with_main(app: &AppHandle) {
         if keep_ball {
             // 曾以菜单态被隐藏时先回到球态几何再显示（隐藏期间收拢，跳动不可见）
             apply_geometry(&win, false, None);
-            let _ = win.show();
+            // 显示后必须重新摘掉任务栏按钮（tao 每次 VISIBLE 变化都会重建 ex-style，
+            // 把 WS_EX_APPWINDOW 加回来——见 win_taskbar 模块注释）
+            crate::win_taskbar::show(&win);
             // 通知页面复位菜单态（几何已在上面收拢）
             use tauri::Emitter;
             let _ = app.emit_to(LABEL, "floating-ball-shown", ());
