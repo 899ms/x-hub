@@ -30,10 +30,11 @@ opener = "0.7"
 rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 dirs = "6"
 chrono = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = { version = "0.3", features = ["io"] }
+percent-encoding = "2"
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "client"] }
 http-body-util = "0.1"
