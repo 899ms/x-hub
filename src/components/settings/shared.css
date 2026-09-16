@@ -118,13 +118,12 @@
   transform: rotate(90deg);
   color: var(--brand-500);
 }
-/* 子项列表：左引导线表示「这些从属于上面那一组」，是大类与子项层级差的唯一来源 */
+/* 子项列表：整体缩进到与大类图标中线对齐，层级靠缩进 + 字号/字重表达 */
 .settings-view .sv-nav-kids{
   display: flex;
   flex-direction: column;
   gap: 2px;
   margin: 2px 0 6px 19px;
-  border-left: 1px solid color-mix(in srgb, var(--text-3) 24%, transparent);
 }
 /* 子项：字号轻一档、字重轻一档；缩进让「选中色块」从引导线起算 */
 .settings-view .sv-nav-sub{
