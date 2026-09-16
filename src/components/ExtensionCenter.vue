@@ -15,6 +15,7 @@ import { accentOf, iconSrc } from '../composables/useResourceIcon'
 import { loadExtensionModules } from '../composables/useDashboardLayout'
 import ExtensionSettingsDialog from './ExtensionSettingsDialog.vue'
 import MarketDetailDialog from './MarketDetailDialog.vue'
+import ExtensionPublishDialog from './ExtensionPublishDialog.vue'
 
 const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
   'showToast',
@@ -106,6 +107,7 @@ async function load() {
       ? (await tauriApi.listExtensions()).map((e) => ({
           ...e,
           // 兼容旧后端：新字段可能在旧二进制里缺失，运行时补默认值避免白屏
+          source: ((e as any).source ?? 'installed') as 'installed' | 'dev',
           disabled: (e as any).disabled ?? false,
           missing_capabilities: (e as any).missing_capabilities ?? [],
           missing_dependencies: (e as any).missing_dependencies ?? [],
@@ -285,10 +287,25 @@ async function installFromMarket(m: MarketExtension) {
   }
 }
 
-/** 该已装扩展在市场是否有更高版本可更新；无则返回 null */
+/** 清单条目是否命中撤销列表（`id@version`，大小写不敏感、容忍条目空白） */
+function isRevokedEntry(m: MarketExtension): boolean {
+  const list = marketStatus.value?.revoked ?? []
+  const key = `${m.id}@${m.version}`.toLowerCase()
+  return list.some((r) => r.trim().toLowerCase() === key)
+}
+
+/** 已装扩展的当前版本是否已被平台下架：只警示 + 停止推送该版本，绝不静默卸载或禁用 */
+function isInstalledRevoked(e: ExtensionEntry): boolean {
+  const list = marketStatus.value?.revoked ?? []
+  const key = `${e.id}@${e.version}`.toLowerCase()
+  return list.some((r) => r.trim().toLowerCase() === key)
+}
+
+/** 该已装扩展在市场是否有更高版本可更新；无则返回 null。
+ *  目标版本若已被撤销，一律不提供更新入口——绝不把用户推向被撤回的版本。 */
 function updateFor(e: ExtensionEntry): MarketExtension | null {
   const m = marketById.value.get(e.id)
-  if (m && versionLessThan(e.version, m.version)) return m
+  if (m && versionLessThan(e.version, m.version) && !isRevokedEntry(m)) return m
   return null
 }
 
@@ -391,6 +408,8 @@ async function onLocalFileInstall() {
 }
 
 const settingsExt = ref<ExtensionEntry | null>(null)
+/** 发布弹窗的目标扩展（开发中的扩展可用；已装扩展也可重发新版本） */
+const publishTarget = ref<ExtensionEntry | null>(null)
 
 function onMore(e: ExtensionEntry) {
   settingsExt.value = e
@@ -472,6 +491,8 @@ function onMore(e: ExtensionEntry) {
           <div class="ec-meta">
             <div class="ec-name-line">
               <span class="ec-name">{{ e.name }}</span>
+              <span v-if="e.source === 'dev'" class="ec-tag ec-tag-dev">开发中</span>
+              <span v-if="isInstalledRevoked(e)" class="ec-tag ec-tag-revoked">已下架</span>
               <span v-if="e.invalid" class="ec-tag ec-tag-invalid">不可用</span>
               <template v-else>
                 <span v-if="e.disabled" class="ec-tag ec-tag-disabled">已禁用</span>
@@ -483,6 +504,9 @@ function onMore(e: ExtensionEntry) {
             </div>
             <p class="ec-desc" :title="descText(e)">
               {{ descText(e) }}
+            </p>
+            <p v-if="isInstalledRevoked(e)" class="ec-revoked-note">
+              该版本已被平台下架，建议尽快卸载。平台不会自动卸载或禁用你本机已装的扩展。
             </p>
             <div v-if="e.actions.length" class="ec-actions-row">
               <button
@@ -500,7 +524,16 @@ function onMore(e: ExtensionEntry) {
 
           <div class="ec-right">
             <button
-              v-if="updateFor(e)"
+              v-if="e.source === 'dev'"
+              class="ec-update-btn"
+              type="button"
+              :title="`把「${e.name}」打包发布到扩展市场`"
+              @click.stop="publishTarget = e"
+            >
+              发布
+            </button>
+            <button
+              v-if="updateFor(e) && e.source !== 'dev'"
               class="ec-update-btn"
               type="button"
               :disabled="updatingId === e.id"
@@ -648,6 +681,9 @@ function onMore(e: ExtensionEntry) {
       @action="detailExt && onMarketAction(detailExt)"
       @close="detailExt = null"
     />
+
+    <!-- 发布扩展：本机打包 → 上传平台 → 展示服务端返回的关卡逐项结论（客户端只问不判） -->
+    <ExtensionPublishDialog :extension="publishTarget" @close="publishTarget = null" />
   </div>
 </template>
 
@@ -828,6 +864,21 @@ function onMore(e: ExtensionEntry) {
 .ec-tag-warn {
   background: var(--c-orange-soft);
   color: var(--c-orange-ink);
+}
+/* 开发扩展（源码目录直挂）：与已装扩展区分，提示它不参与市场更新与卸载 */
+.ec-tag-dev {
+  background: var(--c-green-soft);
+  color: var(--c-green-ink);
+}
+/* 已被平台下架的版本（清单 revoked 命中）：警示但不自动处置用户本机的扩展 */
+.ec-tag-revoked {
+  background: var(--c-red-soft);
+  color: var(--c-red-ink);
+}
+.ec-revoked-note {
+  margin: 4px 0 0;
+  font-size: 0.72rem;
+  color: var(--c-red-ink);
 }
 .ec-desc {
   margin: 2px 0 0;

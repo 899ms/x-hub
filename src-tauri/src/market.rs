@@ -15,6 +15,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -55,6 +56,14 @@ pub struct MarketExtension {
     /// 官方内置扩展标记
     #[serde(default)]
     pub required: bool,
+    /// 该扩展申请的权限（发布时由服务端从 manifest 写入；老清单缺此字段 = 空，
+    /// 客户端据此在安装前分级告知，见 PRD §7.2 ②）
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    /// 截图（展示物料，完整 URL；发布时由作者上传、服务端写入清单）。
+    /// 老清单没有这个字段 → 空数组 → 详情页显示「作者未提供截图」
+    #[serde(default)]
+    pub screenshots: Vec<String>,
 }
 
 /// 远端清单顶层结构。
@@ -66,6 +75,11 @@ struct MarketRegistry {
     updated_at: String,
     #[serde(default)]
     extensions: Vec<MarketExtension>,
+    /// 撤销列表（条目形如 `id@version`）：平台下架 / 撤回的版本。
+    /// 追加字段、**不抬 schemaVersion** —— 老客户端会忽略它（因此老客户端对下架
+    /// 只有"包下载不到"这一层保护），新客户端据此警示已装扩展并停止其自动更新。
+    #[serde(default)]
+    revoked: Vec<String>,
 }
 
 /// 市场状态（get_market_registry / refresh_market_registry 的返回）。
@@ -78,6 +92,8 @@ pub struct MarketStatus {
     pub source: String,
     /// 拉取 / 验签失败原因（source=cache 时非空，前端黄色警示）
     pub error: Option<String>,
+    /// 撤销列表（`id@version`）：前端用于警示已装扩展并阻止其自动更新
+    pub revoked: Vec<String>,
 }
 
 /// 下载进度事件负载（`market-download-progress`）。
@@ -92,15 +108,25 @@ pub struct DownloadProgress {
 fn status(
     extensions: Vec<MarketExtension>,
     last_updated: String,
+    revoked: Vec<String>,
     source: &str,
     error: Option<String>,
 ) -> MarketStatus {
     MarketStatus {
         extensions,
         last_updated,
+        revoked,
         source: source.to_string(),
         error,
     }
+}
+
+/// 判断某扩展的某版本是否已被撤销（大小写不敏感，容忍 `id@version` 两侧空白）
+pub fn is_revoked(revoked: &[String], id: &str, version: &str) -> bool {
+    let key = format!("{}@{}", id.trim(), version.trim());
+    revoked
+        .iter()
+        .any(|r| r.trim().eq_ignore_ascii_case(&key))
 }
 
 /// 市场清单缓存路径：`data_root()/market/registry.json`
@@ -115,10 +141,11 @@ pub fn get_market_registry() -> Result<MarketStatus, String> {
     let path = registry_path()?;
     if let Ok(content) = std::fs::read_to_string(&path) {
         match serde_json::from_str::<MarketRegistry>(&content) {
-            Ok(r) => Ok(status(r.extensions, r.updated_at, "cache", None)),
+            Ok(r) => Ok(status(r.extensions, r.updated_at, r.revoked, "cache", None)),
             Err(_) => Ok(status(
                 Vec::new(),
                 String::new(),
+                Vec::new(),
                 "cache",
                 Some("本地市场缓存损坏，请尝试刷新".to_string()),
             )),
@@ -127,6 +154,7 @@ pub fn get_market_registry() -> Result<MarketStatus, String> {
         Ok(status(
             Vec::new(),
             String::new(),
+            Vec::new(),
             "cache",
             Some("尚未拉取过市场清单（离线或首次使用），请点击刷新".to_string()),
         ))
@@ -223,6 +251,7 @@ pub async fn refresh_market_registry() -> Result<MarketStatus, String> {
     Ok(status(
         registry.extensions,
         registry.updated_at.clone(),
+        registry.revoked.clone(),
         "remote",
         None,
     ))
@@ -236,7 +265,7 @@ fn fallback_cache(reason: String) -> MarketStatus {
             s.error = Some(reason);
             s
         }
-        Err(_) => status(Vec::new(), String::new(), "cache", Some(reason)),
+        Err(_) => status(Vec::new(), String::new(), Vec::new(), "cache", Some(reason)),
     }
 }
 
@@ -423,6 +452,109 @@ pub fn install_local_archive(app: tauri::AppHandle, path: String) -> Result<Stri
 
     log::info!("扩展已从本地包安装: {id} <- {}", src.display());
     Ok(id)
+}
+
+/// 打包结果（前端展示与上传用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackedArchive {
+    /// 产物绝对路径（`.xhpack`，zip 格式）
+    pub path: String,
+    pub id: String,
+    pub version: String,
+    pub size: u64,
+    /// 产物 sha256（hex 小写）；上传后服务端会重算比对
+    pub sha256: String,
+}
+
+/// 打包核心（不依赖 app handle，便于单测）：把扩展目录打成 zip 包。
+/// 返回 `(id, version, size, sha256)`。
+pub fn pack_dir_to_archive(
+    dir: &Path,
+    out: &Path,
+) -> Result<(String, String, u64, String), String> {
+    let manifest = crate::extension::read_manifest(dir)?;
+    if manifest.version.trim().is_empty() {
+        return Err("INVALID_ARGUMENT: manifest 缺少 version".to_string());
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = std::fs::File::create(out).map_err(|e| format!("创建安装包失败: {e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    add_dir_to_zip(&mut zip, dir, dir, options)?;
+    zip.finish().map_err(|e| format!("写入安装包失败: {e}"))?;
+
+    let bytes = std::fs::read(out).map_err(|e| e.to_string())?;
+    let sha256 = to_hex(&Sha256::digest(&bytes));
+    Ok((
+        manifest.id,
+        manifest.version,
+        bytes.len() as u64,
+        sha256,
+    ))
+}
+
+/// 把扩展目录打成 `.xhpack`（zip 格式，**manifest.json 必须在包根**）。
+/// 已装扩展与开发扩展都可打包（按 id 解析目录，开发者模式直挂的源码目录同样适用）。
+/// 排除 `node_modules` 与所有 `.` 开头的文件/目录（含 `.xhpack`、`.git`、用户数据点文件）。
+#[tauri::command]
+pub fn pack_extension_archive(
+    app: tauri::AppHandle,
+    id: String,
+    out_path: Option<String>,
+) -> Result<PackedArchive, String> {
+    let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
+    let out = match out_path {
+        Some(p) if !p.trim().is_empty() => PathBuf::from(p),
+        _ => temp_extract_dir().with_extension("xhpack"),
+    };
+    let (id, version, size, sha256) = pack_dir_to_archive(&dir, &out)?;
+    log::info!(
+        "扩展已打包: {id} v{version} -> {}（{size} 字节）",
+        out.display()
+    );
+    Ok(PackedArchive {
+        path: out.to_string_lossy().into_owned(),
+        id,
+        version,
+        size,
+        sha256,
+    })
+}
+
+/// 递归把目录写进 zip：包内路径统一用 `/`，跳过 `node_modules` 与 `.` 开头的项
+fn add_dir_to_zip<W: Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    root: &Path,
+    dir: &Path,
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if path.is_dir() {
+            zip.add_directory(format!("{rel}/"), options)
+                .map_err(|e| e.to_string())?;
+            add_dir_to_zip(zip, root, &path, options)?;
+        } else {
+            zip.start_file(rel, options).map_err(|e| e.to_string())?;
+            let data = std::fs::read(&path).map_err(|e| e.to_string())?;
+            zip.write_all(&data).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// 扩展升级需保留的用户数据点文件（随扩展卸载可清除，升级时必须保留）。
@@ -637,6 +769,74 @@ mod tests {
         assert_eq!(e.icon, "");
         assert!(!e.required);
         assert_eq!(e.runtime, "");
+    }
+
+    #[test]
+    fn parses_registry_with_revoked_and_matches_keys() {
+        let json = serde_json::json!({
+            "schemaVersion": 2,
+            "updatedAt": "2026-09-12T00:00:00Z",
+            "revoked": ["com.x-hub.bad@1.0.0", " com.x-hub.other@2.0.0 "],
+            "extensions": []
+        });
+        let r: MarketRegistry = serde_json::from_value(json).unwrap();
+        assert_eq!(r.revoked.len(), 2);
+        assert!(is_revoked(&r.revoked, "com.x-hub.bad", "1.0.0"));
+        // 大小写不敏感 + 容忍条目两侧空白
+        assert!(is_revoked(&r.revoked, "COM.X-HUB.BAD", "1.0.0"));
+        assert!(is_revoked(&r.revoked, "com.x-hub.other", "2.0.0"));
+        // 版本不同不算撤销
+        assert!(!is_revoked(&r.revoked, "com.x-hub.bad", "1.0.1"));
+        assert!(!is_revoked(&r.revoked, "com.x-hub.good", "1.0.0"));
+    }
+
+    #[test]
+    fn registry_without_revoked_still_parses() {
+        // 追加字段的向后兼容：老清单（无 revoked）必须照常解析
+        let json = serde_json::json!({ "extensions": [] });
+        let r: MarketRegistry = serde_json::from_value(json).unwrap();
+        assert!(r.revoked.is_empty());
+    }
+
+    #[test]
+    fn pack_archive_keeps_manifest_at_root_and_skips_noise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("ext");
+        std::fs::create_dir_all(ext.join("view")).unwrap();
+        std::fs::create_dir_all(ext.join("node_modules").join("dep")).unwrap();
+        std::fs::create_dir_all(ext.join(".xhpack")).unwrap();
+        std::fs::write(
+            ext.join("manifest.json"),
+            r#"{"id":"com.x-hub.pack","name":"P","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(ext.join("view").join("index.html"), "<html></html>").unwrap();
+        std::fs::write(ext.join("node_modules").join("dep").join("a.js"), "x").unwrap();
+        std::fs::write(ext.join(".xhpack").join("old.html"), "x").unwrap();
+        std::fs::write(ext.join(".storage.json"), "{}").unwrap();
+
+        let out = tmp.path().join("out.xhpack");
+        let (id, version, size, sha) = pack_dir_to_archive(&ext, &out).unwrap();
+        assert_eq!(id, "com.x-hub.pack");
+        assert_eq!(version, "1.0.0");
+        assert!(size > 0);
+        assert_eq!(sha.len(), 64);
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let mut names: Vec<String> = Vec::new();
+        for i in 0..archive.len() {
+            names.push(archive.by_index(i).unwrap().name().to_string());
+        }
+        assert!(names.iter().any(|n| n == "manifest.json"), "{names:?}");
+        assert!(names.iter().any(|n| n == "view/index.html"), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("node_modules")), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains(".xhpack")), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains(".storage.json")), "{names:?}");
+
+        // 打包产物必须能被既有安装链路解出 manifest 所在目录
+        let unpack = tempfile::tempdir().unwrap();
+        extract_zip(&std::fs::read(&out).unwrap(), unpack.path()).unwrap();
+        assert!(find_manifest_dir(unpack.path()).is_ok());
     }
 
     #[test]
