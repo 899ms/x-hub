@@ -193,6 +193,11 @@ fn default_kind() -> String {
     "view".to_string()
 }
 
+/// 扩展来源：已装（位于扩展根，可被市场更新 / 卸载）
+pub const SOURCE_INSTALLED: &str = "installed";
+/// 扩展来源：开发者模式直挂的本机源码目录（不参与市场更新与卸载，见 docs/adr/0005）
+pub const SOURCE_DEV: &str = "dev";
+
 /// 已安装扩展的注册表项（返回给前端的展示结构）。
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtensionEntry {
@@ -211,6 +216,8 @@ pub struct ExtensionEntry {
     pub icon: Option<String>,
     /// 扩展目录绝对路径
     pub dir: String,
+    /// 来源："installed"（已装，位于扩展根）| "dev"（开发者模式直挂的本机源码目录）
+    pub source: String,
     /// manifest 缺失 / 解析失败时为 true
     pub invalid: bool,
     /// invalid 时的原因（供扩展中心友好展示）
@@ -258,15 +265,44 @@ fn is_hidden_dir(p: &std::path::Path) -> bool {
 /// 单个目录解析失败不影响整体扫描，只标记该目录为 invalid。
 pub fn scan_extensions(app: &tauri::AppHandle) -> Result<Vec<ExtensionEntry>, String> {
     let root = extensions_root(app)?;
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
     let mut entries = Vec::new();
-    let dirs = std::fs::read_dir(&root).map_err(|e| e.to_string())?;
-    for entry in dirs.flatten() {
-        let path = entry.path();
-        if path.is_dir() && !is_hidden_dir(&path) {
-            entries.push(load_extension(&path));
+    if root.exists() {
+        let dirs = std::fs::read_dir(&root).map_err(|e| e.to_string())?;
+        for entry in dirs.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !is_hidden_dir(&path) {
+                entries.push(load_extension(&path, SOURCE_INSTALLED));
+            }
+        }
+    }
+
+    // 开发者模式：本机源码目录直挂（不复制进扩展根，见 docs/adr/0005）。
+    // 已装扩展优先：同 id 冲突时跳过开发目录，避免「打开的到底是哪一份」这种排查噩梦。
+    let cfg = crate::config::load();
+    if cfg.dev_mode_enabled {
+        // 只把**有效**的已装扩展计入同 id 冲突检查：invalid 条目的 id 取自目录名，
+        // 一个坏目录（没有 manifest）会凭目录名把同名的开发扩展顶掉，列表里就只剩那条「不可用」。
+        let installed_ids: std::collections::HashSet<String> = entries
+            .iter()
+            .filter(|e| !e.invalid)
+            .map(|e| e.id.clone())
+            .collect();
+        for dir in &cfg.dev_extensions {
+            let path = std::path::PathBuf::from(dir);
+            if !path.is_dir() {
+                log::warn!("开发扩展目录不存在，已跳过: {dir}");
+                continue;
+            }
+            let entry = load_extension(&path, SOURCE_DEV);
+            if installed_ids.contains(&entry.id) {
+                log::warn!(
+                    "开发扩展 {} 与已装扩展同 id，已跳过开发目录 {}",
+                    entry.id,
+                    dir
+                );
+                continue;
+            }
+            entries.push(entry);
         }
     }
 
@@ -301,7 +337,8 @@ pub fn read_manifest(dir: &Path) -> Result<ExtensionManifest, String> {
 }
 
 /// 加载单个扩展目录为注册表项（永不 panic，损坏时返回 invalid 项）。
-fn load_extension(dir: &Path) -> ExtensionEntry {
+/// `source` 区分「已装扩展」（扩展根）与「开发扩展」（开发者模式直挂的源码目录）。
+fn load_extension(dir: &Path, source: &str) -> ExtensionEntry {
     let dir_str = dir.to_string_lossy().into_owned();
     let fallback_name = dir
         .file_name()
@@ -320,6 +357,7 @@ fn load_extension(dir: &Path) -> ExtensionEntry {
         description: String::new(),
         icon: None,
         dir: dir_str.clone(),
+        source: source.to_string(),
         invalid: true,
         error: Some(error),
         disabled: false,
@@ -369,6 +407,7 @@ fn load_extension(dir: &Path) -> ExtensionEntry {
         description: manifest.description,
         icon,
         dir: dir_str,
+        source: source.to_string(),
         invalid: false,
         error: None,
         disabled,
@@ -387,6 +426,284 @@ pub fn list_extensions(app: tauri::AppHandle) -> Result<Vec<ExtensionEntry>, Str
     let entries = scan_extensions(&app)?;
     log::info!("扩展注册表扫描完成：{} 个扩展", entries.len());
     Ok(entries)
+}
+
+// ---------------- 开发者模式：本机源码目录直挂（docs/adr/0005） ----------------
+
+/// 单个开发扩展目录的解析结果（设置页展示用）
+#[derive(Debug, Clone, Serialize)]
+pub struct DevExtensionInfo {
+    /// 注册的源码目录（配置中原样保存的路径）
+    pub path: String,
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    /// manifest 是否可解析
+    pub valid: bool,
+    /// valid=false 时的原因
+    pub error: Option<String>,
+    /// 与已装扩展同 id（此时不会被加载，已装优先）
+    pub conflict: bool,
+    /// 目录当前是否存在
+    pub exists: bool,
+}
+
+/// 开发者模式状态（get/set/add/remove 命令的统一返回）
+#[derive(Debug, Clone, Serialize)]
+pub struct DevModeStatus {
+    pub enabled: bool,
+    pub extensions: Vec<DevExtensionInfo>,
+}
+
+/// 把配置中的开发扩展目录加入资产作用域并填开发注册表。
+/// 启动重放与「开启开发者模式 / 新增目录」时调用；目录的作用域放行不落盘，重启必须重放。
+pub fn apply_dev_extensions(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<crate::ext_protocol::DevExtensionDirs>() {
+        state.clear();
+    }
+    let cfg = crate::config::load();
+    if !cfg.dev_mode_enabled {
+        return;
+    }
+    for dir in &cfg.dev_extensions {
+        let path = std::path::PathBuf::from(dir);
+        if !path.is_dir() {
+            log::warn!("开发扩展目录不存在，跳过放行: {dir}");
+            continue;
+        }
+        // 目录须先存在再放行：allow_directory 会额外注册 canonicalize 后的模式变体
+        if let Err(e) = app.asset_protocol_scope().allow_directory(&path, true) {
+            log::warn!("开发扩展目录放行失败 {dir}: {e}");
+        }
+        if let Some(state) = app.try_state::<crate::ext_protocol::DevExtensionDirs>() {
+            let id = read_manifest(&path).map(|m| m.id).unwrap_or_else(|_| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+            state.insert(id, path.clone());
+        }
+    }
+    log::info!("开发者模式已应用：{} 个源码目录", cfg.dev_extensions.len());
+}
+
+/// 撤销某目录的作用域放行并从开发注册表移除（移除目录 / 关闭开发者模式时调用）
+fn revoke_dev_dir(app: &tauri::AppHandle, dir: &str) {
+    let path = std::path::PathBuf::from(dir);
+    if let Err(e) = app.asset_protocol_scope().forbid_directory(&path, true) {
+        log::warn!("开发扩展目录撤销放行失败 {dir}: {e}");
+    }
+    if let Some(state) = app.try_state::<crate::ext_protocol::DevExtensionDirs>() {
+        for (id, p) in state.snapshot() {
+            if p == path {
+                state.remove(&id);
+            }
+        }
+    }
+}
+
+/// 汇总开发者模式状态（含与已装扩展的 id 冲突检测）
+fn dev_mode_status(app: &tauri::AppHandle) -> DevModeStatus {
+    let cfg = crate::config::load();
+    let installed_ids: std::collections::HashSet<String> = extensions_root(app)
+        .ok()
+        .and_then(|root| std::fs::read_dir(root).ok())
+        .map(|dirs| {
+            dirs.flatten()
+                .filter(|e| e.path().is_dir() && !is_hidden_dir(&e.path()))
+                .filter_map(|e| read_manifest(&e.path()).ok().map(|m| m.id))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut extensions = Vec::new();
+    for dir in &cfg.dev_extensions {
+        let path = std::path::PathBuf::from(dir);
+        let exists = path.is_dir();
+        let fallback = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (id, name, version, valid, error) = match read_manifest(&path) {
+            Ok(m) => (m.id, m.name, m.version, true, None),
+            Err(e) => (fallback, String::new(), String::new(), false, Some(e)),
+        };
+        let conflict = valid && installed_ids.contains(&id);
+        extensions.push(DevExtensionInfo {
+            path: dir.clone(),
+            id,
+            name,
+            version,
+            valid,
+            error,
+            conflict,
+            exists,
+        });
+    }
+    DevModeStatus {
+        enabled: cfg.dev_mode_enabled,
+        extensions,
+    }
+}
+
+/// 读取开发者模式状态
+#[tauri::command]
+pub fn get_dev_mode_status(app: tauri::AppHandle) -> Result<DevModeStatus, String> {
+    Ok(dev_mode_status(&app))
+}
+
+/// 开关开发者模式：开启时立即放行已注册目录，关闭时撤销全部放行
+#[tauri::command]
+pub fn set_dev_mode_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<DevModeStatus, String> {
+    let mut cfg = crate::config::load();
+    if cfg.dev_mode_enabled == enabled {
+        return Ok(dev_mode_status(&app));
+    }
+    if !enabled {
+        for dir in &cfg.dev_extensions {
+            revoke_dev_dir(&app, dir);
+        }
+    }
+    cfg.dev_mode_enabled = enabled;
+    crate::config::save(&cfg)?;
+    if enabled {
+        apply_dev_extensions(&app);
+    }
+    log::info!("开发者模式{}", if enabled { "已开启" } else { "已关闭" });
+    Ok(dev_mode_status(&app))
+}
+
+/// 添加一个开发扩展目录（含 manifest.json 的源码目录）；保存后立即生效，无需重启
+#[tauri::command]
+pub fn add_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeStatus, String> {
+    let p = std::path::PathBuf::from(path.trim());
+    if !p.is_dir() {
+        return Err(format!("INVALID_ARGUMENT: 目录不存在：{}", p.display()));
+    }
+    if !p.join("manifest.json").is_file() {
+        return Err(
+            "INVALID_ARGUMENT: 该目录下没有 manifest.json（不是扩展源码目录）".to_string(),
+        );
+    }
+    // 扩展根内的目录属已装扩展，不该当开发扩展直挂
+    let root = extensions_root(&app)?;
+    if let (Ok(a), Ok(b)) = (p.canonicalize(), root.canonicalize()) {
+        if a.starts_with(&b) {
+            return Err(
+                "INVALID_ARGUMENT: 该目录位于扩展根内（属已装扩展），无需直挂".to_string(),
+            );
+        }
+    }
+    let manifest = read_manifest(&p)?;
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| format!("IO_ERROR: 解析目录失败：{e}"))?;
+    let dir_str = canonical.to_string_lossy().into_owned();
+
+    let mut cfg = crate::config::load();
+    if !cfg
+        .dev_extensions
+        .iter()
+        .any(|d| std::path::PathBuf::from(d) == canonical)
+    {
+        cfg.dev_extensions.push(dir_str.clone());
+        crate::config::save(&cfg)?;
+    }
+    if cfg.dev_mode_enabled {
+        app.asset_protocol_scope()
+            .allow_directory(&canonical, true)
+            .map_err(|e| format!("IO_ERROR: 目录放行失败：{e}"))?;
+        if let Some(state) = app.try_state::<crate::ext_protocol::DevExtensionDirs>() {
+            state.insert(manifest.id.clone(), canonical.clone());
+        }
+    }
+    log::info!("开发扩展已添加: {} -> {dir_str}", manifest.id);
+    Ok(dev_mode_status(&app))
+}
+
+/// 移除一个开发扩展目录（源码目录本身不动）
+#[tauri::command]
+pub fn remove_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeStatus, String> {
+    let target = std::path::PathBuf::from(path.trim());
+    let mut cfg = crate::config::load();
+    let before = cfg.dev_extensions.len();
+    cfg.dev_extensions
+        .retain(|d| std::path::PathBuf::from(d) != target);
+    if cfg.dev_extensions.len() != before {
+        crate::config::save(&cfg)?;
+    }
+    revoke_dev_dir(&app, &target.to_string_lossy());
+    log::info!("开发扩展目录已移除: {}", target.display());
+    Ok(dev_mode_status(&app))
+}
+
+/// 开发目录内容戳：对每个开发扩展目录下的文件（相对路径 + mtime 秒）做 FNV-1a。
+/// 前端轮询它以触发热重载——HTML/CSS/JS 改动都算变更（`extensions_stamp` 只盯 manifest，
+/// 那是给"已装扩展被外部改动"用的，开发调试需要全目录口径）。
+#[tauri::command]
+pub fn dev_extensions_stamp(app: tauri::AppHandle) -> Result<u64, String> {
+    let _ = app;
+    let cfg = crate::config::load();
+    if !cfg.dev_mode_enabled || cfg.dev_extensions.is_empty() {
+        return Ok(0);
+    }
+    let mut dirs: Vec<String> = cfg.dev_extensions.clone();
+    dirs.sort();
+    let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
+    for dir in &dirs {
+        let root = std::path::PathBuf::from(dir);
+        if root.is_dir() {
+            hash_path_tree(&root, &root, &mut hash, 0);
+        }
+    }
+    Ok(hash)
+}
+
+/// 递归把目录树混入哈希：跳过隐藏目录（`.` 开头）与 `node_modules`，限深 8 层防失控
+fn hash_path_tree(root: &Path, dir: &Path, hash: &mut u64, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut items: Vec<_> = entries.flatten().collect();
+    items.sort_by_key(|e| e.path());
+    for entry in items {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        if path.is_dir() {
+            mix_hash(hash, &rel);
+            hash_path_tree(root, &path, hash, depth + 1);
+        } else if let Ok(meta) = std::fs::metadata(&path) {
+            let secs = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            mix_hash(hash, &rel);
+            mix_hash(hash, &secs.to_string());
+        }
+    }
+}
+
+fn mix_hash(hash: &mut u64, s: &str) {
+    for b in s.bytes() {
+        *hash ^= b as u64;
+        *hash = hash.wrapping_mul(1099511628211);
+    }
 }
 
 /// 扩展目录内容戳：对所有 manifest.json 的「路径 + 修改时间」做 FNV-1a 哈希。
@@ -425,7 +742,7 @@ pub fn extensions_stamp(app: tauri::AppHandle) -> Result<u64, String> {
 /// 注入到扩展入口 HTML 的桥脚本：在扩展 iframe 内挂载 `window.xhub`，
 /// 所有方法经 `window.parent.postMessage` 发 RPC 请求给主窗口，主窗口再 invoke `xhub_call`。
 /// 用普通 `<script>`（非 module）且在 `<head>` 靠前位置注入，保证早于扩展自身脚本执行。
-const XHUB_BRIDGE_SCRIPT: &str = r#"
+pub(crate) const XHUB_BRIDGE_SCRIPT: &str = r#"
 (function(){
   var pending={};var seq=0;
   var listeners={};
@@ -451,6 +768,7 @@ const XHUB_BRIDGE_SCRIPT: &str = r#"
       '--xhub-brand':t.brand,
       '--xhub-brand-soft':t.brandSoft,
       '--xhub-bg-page':t.bgPage,
+      '--xhub-page-bg':t.pageBg,
       '--xhub-bg-card':t.bgCard,
       '--xhub-surface':t.surface,
       '--xhub-text-1':t.text1,
@@ -637,7 +955,7 @@ fn find_tag_end(html: &str, tag_open: &str) -> Option<usize> {
 
 /// 把桥脚本注入 HTML：优先插到 `<head...>` 开始标签之后（head 内第一个元素，
 /// 早于扩展自身脚本执行）；无 head 则插到 `</head>` 前；再退到 body 前；都没有则插到最前。
-fn inject_bridge(html: &str, bridge: &str) -> String {
+pub(crate) fn inject_bridge(html: &str, bridge: &str) -> String {
     let script = format!("<script>{bridge}</script>");
     if let Some(pos) = find_tag_end(html, "<head") {
         return format!("{}{}{}", &html[..pos], script, &html[pos..]);
@@ -651,21 +969,19 @@ fn inject_bridge(html: &str, bridge: &str) -> String {
     format!("{script}{html}")
 }
 
-/// 读取某扩展某形态的入口 HTML，注入桥脚本后写到 `<扩展目录>/.xhpack/<surface>.html`，
-/// 返回该临时文件的绝对路径（前端 `convertFileSrc` 后作为 iframe src）。
+/// 读取某扩展某形态的入口 URL（`xhub-ext` 协议，前端直接作为 iframe src）。
 ///
-/// 写临时文件到扩展目录内是为了让入口引用的相对资源（Vite 产物的 module script / css）
-/// 与入口保持同 origin 加载，规避 srcdoc + asset protocol 的跨域 CORS 限制。
+/// 入口 HTML 由扩展协议在返回时**动态注入桥脚本**，不再写 `<扩展目录>/.xhpack/<surface>.html`：
+/// 入口与扩展目录内的相对资源（Vite 产物的 module script / css）仍同源可加载，
+/// 而开发扩展的源码目录不会被宿主写脏（见 docs/adr/0008-extension-content-origin-isolation.md）。
 #[tauri::command]
 pub fn read_extension_entry(
     app: tauri::AppHandle,
     id: String,
     surface: Option<String>,
 ) -> Result<String, String> {
-    let dir = extensions_root(&app)?.join(&id);
-    if !dir.is_dir() {
-        return Err(format!("NOT_FOUND: 扩展 {id} 不存在"));
-    }
+    // 已装扩展与开发扩展共用同一条解析路径（开发扩展由开发者模式注册源码目录）
+    let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
     let manifest = read_manifest(&dir)?;
 
     // service 扩展：打开时懒启动后端（探活成功则后续 runtime.info 返回 serviceReady=true）
@@ -683,21 +999,16 @@ pub fn read_extension_entry(
         .or_else(|| manifest.entry.get("view"))
         .ok_or_else(|| format!("NOT_FOUND: 扩展 {id} 没有 {surface} 入口"))?;
     let html_path = dir.join(rel);
-    log::info!("扩展入口读取: {id} [{surface}] dir={} html={}", dir.display(), html_path.display());
-    let html = std::fs::read_to_string(&html_path).map_err(|e| {
-        log::error!("扩展入口读取失败: {id} [{surface}] {} -> {e}", html_path.display());
-        format!("IO_ERROR: 读取入口失败：{e}")
-    })?;
-    let injected = inject_bridge(&html, XHUB_BRIDGE_SCRIPT);
-
-    let out_dir = dir.join(".xhpack");
-    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
-    let out_path = out_dir.join(format!("{surface}.html"));
-    std::fs::write(&out_path, injected).map_err(|e| e.to_string())?;
-    // 兜底日志：记录最终交给前端 convertFileSrc 的绝对路径，白屏排查时据此核对
-    // asset 协议作用域（$APPDATA/** + 启动时 allow_directory(data_root)）是否覆盖该路径
-    log::info!("扩展入口就绪: {id} [{surface}] -> {}", out_path.display());
-    Ok(out_path.to_string_lossy().into_owned())
+    if !html_path.is_file() {
+        log::error!("扩展入口缺失: {id} [{surface}] {}", html_path.display());
+        return Err(format!("NOT_FOUND: 扩展入口不存在（{rel}）"));
+    }
+    let url = crate::ext_protocol::entry_url(&id, rel);
+    log::info!(
+        "扩展入口就绪: {id} [{surface}] dir={} -> {url}",
+        dir.display()
+    );
+    Ok(url)
 }
 
 /// Tauri 窗口 label 只允许字母数字与 `-`/`/`/`:`/`_`；扩展 id 形如反向域名
@@ -743,10 +1054,8 @@ pub async fn open_extension_window(app: tauri::AppHandle, id: String) -> Result<
         return Ok(());
     }
 
-    let dir = extensions_root(&app)?.join(&id);
-    if !dir.is_dir() {
-        return Err(format!("NOT_FOUND: 扩展 {id} 不存在"));
-    }
+    // 开发扩展在源码目录、已装扩展在扩展根：一律经 resolve_ext_dir 解析，否则 dev 扩展打不开窗口
+    let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
     let manifest = read_manifest(&dir)?;
     let (w, h) = manifest
         .min_size
@@ -772,9 +1081,20 @@ pub async fn open_extension_window(app: tauri::AppHandle, id: String) -> Result<
 pub fn uninstall_extension(app: tauri::AppHandle, id: String) -> Result<(), String> {
     crate::service::stop_service(&app, &id);
     let dir = extensions_root(&app)?.join(&id);
-    if dir.is_dir() {
-        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    if !dir.is_dir() {
+        // 开发扩展不在扩展根（源码目录直挂）：明确指路，避免「卸载成功但扩展还在」的困惑
+        let is_dev = app
+            .try_state::<crate::ext_protocol::DevExtensionDirs>()
+            .and_then(|s| s.get(&id))
+            .is_some();
+        if is_dev {
+            return Err(format!(
+                "INVALID_ARGUMENT: {id} 是开发扩展（源码目录直挂），请在「设置 → 扩展 → 开发者模式」中移除"
+            ));
+        }
+        return Err(format!("NOT_FOUND: 扩展 {id} 未安装"));
     }
+    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     log::info!("扩展已卸载: {id}");
     Ok(())
 }
@@ -798,8 +1118,11 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 // ---------- 权限授权（运行时逐项开关） ----------
 
 /// 权限覆盖文件路径：`<扩展目录>/.permissions.json`（只存用户显式关闭的权限，默认授权）
+///
+/// 目录经 `resolve_ext_dir` 解析：开发扩展写源码目录，已装扩展写扩展根。
+/// 用 `extensions_root().join(id)` 会在扩展根下凭空建目录（同 `xhub_api::storage_path` 的坑）。
 fn permissions_path(app: &tauri::AppHandle, ext_id: &str) -> Result<std::path::PathBuf, String> {
-    Ok(extensions_root(app)?.join(ext_id).join(".permissions.json"))
+    Ok(crate::ext_protocol::resolve_ext_dir(app, ext_id)?.join(".permissions.json"))
 }
 
 fn read_permission_overrides(app: &tauri::AppHandle, ext_id: &str) -> Map<String, Value> {
@@ -846,7 +1169,8 @@ pub fn get_extension_permissions(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<HashMap<String, bool>, String> {
-    let dir = extensions_root(&app)?.join(&id);
+    // 开发扩展在源码目录（extensions_root 下没有它）——必须走 resolve_ext_dir
+    let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
     let manifest = read_manifest(&dir)?;
     let overrides = read_permission_overrides(&app, &id);
     let mut result = HashMap::new();
@@ -910,6 +1234,38 @@ mod tests {
     }
 
     #[test]
+    fn bridge_script_maps_all_theme_tokens() {
+        // 主题令牌三处必须同步：themeTokens.ts 采集 → 桥脚本写成 --xhub-* 变量 → 扩展 CSS 引用。
+        // 漏一个 = 扩展拿到空变量、样式悄然不对（不报错，只有肉眼能发现）——新增令牌时同步这三处。
+        // --xhub-page-bg 是扩展「页面底」专用令牌：无壁纸 = 宿主整页背景，有壁纸 = transparent
+        // （拿 --xhub-bg-page 铺底会把壁纸整块盖住，透底态还会变成白底白字）。
+        for name in [
+            "--xhub-accent",
+            "--xhub-brand",
+            "--xhub-brand-soft",
+            "--xhub-bg-page",
+            "--xhub-page-bg",
+            "--xhub-bg-card",
+            "--xhub-surface",
+            "--xhub-text-1",
+            "--xhub-text-2",
+            "--xhub-text-3",
+            "--xhub-border",
+            "--xhub-red",
+            "--xhub-green",
+            "--xhub-yellow",
+            "--xhub-blue",
+            "--xhub-orange",
+            "--xhub-radius-lg",
+        ] {
+            assert!(
+                XHUB_BRIDGE_SCRIPT.contains(name),
+                "桥脚本缺少主题令牌映射: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_web_manifest() {
         let dir = tempdir().unwrap();
         write_manifest(
@@ -929,7 +1285,7 @@ mod tests {
             }),
         );
 
-        let entry = load_extension(&dir.path().join("com.x-hub.apidebug"));
+        let entry = load_extension(&dir.path().join("com.x-hub.apidebug"), SOURCE_INSTALLED);
         assert!(!entry.invalid);
         assert_eq!(entry.id, "com.x-hub.apidebug");
         assert_eq!(entry.name, "API 调试助手");
@@ -966,7 +1322,7 @@ mod tests {
             }),
         );
 
-        let entry = load_extension(&dir.path().join("com.x-hub.dsh"));
+        let entry = load_extension(&dir.path().join("com.x-hub.dsh"), SOURCE_INSTALLED);
         assert!(!entry.invalid);
         assert_eq!(entry.runtime, "service");
 
@@ -1026,7 +1382,7 @@ mod tests {
             }),
         );
 
-        let entry = load_extension(&dir.path().join("com.x-hub.calendar"));
+        let entry = load_extension(&dir.path().join("com.x-hub.calendar"), SOURCE_INSTALLED);
         assert!(!entry.invalid);
         assert_eq!(entry.module_variants.len(), 2);
         assert_eq!(entry.module_variants[0].id, "compact");
@@ -1043,7 +1399,7 @@ mod tests {
         std::fs::create_dir_all(&ext).unwrap();
         std::fs::write(ext.join("manifest.json"), "not valid json {{{").unwrap();
 
-        let entry = load_extension(&ext);
+        let entry = load_extension(&ext, SOURCE_INSTALLED);
         assert!(entry.invalid);
         assert!(entry.error.is_some());
         assert_eq!(entry.id, "com.x-hub.broken");
@@ -1055,7 +1411,7 @@ mod tests {
         let ext = dir.path().join("com.x-hub.nomanifest");
         std::fs::create_dir_all(&ext).unwrap();
 
-        let entry = load_extension(&ext);
+        let entry = load_extension(&ext, SOURCE_INSTALLED);
         assert!(entry.invalid);
         assert!(entry.error.unwrap().contains("manifest.json"));
     }
@@ -1102,7 +1458,7 @@ mod tests {
             }),
         );
 
-        let entry = load_extension(&dir.path().join("com.x-hub.caps"));
+        let entry = load_extension(&dir.path().join("com.x-hub.caps"), SOURCE_INSTALLED);
         assert!(!entry.invalid);
         // data.notes.list 已实现 → 不缺失
         assert!(!entry.missing_capabilities.contains(&"data.notes.list".to_string()));

@@ -360,8 +360,11 @@ pub fn capabilities() -> &'static [Capability] {
 }
 
 /// 加载扩展 manifest（不存在或解析失败返回 None）
+///
+/// 目录一律走 `resolve_ext_dir`（开发扩展 → 源码目录，已装扩展 → 扩展根）：
+/// 直接 `extensions_root().join(ext_id)` 会让**开发扩展**的桥 API 全部 NOT_FOUND。
 fn load_manifest(app: &tauri::AppHandle, ext_id: &str) -> Option<ExtensionManifest> {
-    let dir = extensions_root(app).ok()?.join(ext_id);
+    let dir = crate::ext_protocol::resolve_ext_dir(app, ext_id).ok()?;
     let content = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
     serde_json::from_str::<ExtensionManifest>(&content).ok()
 }
@@ -389,9 +392,15 @@ fn require_permission(
     Ok(())
 }
 
-/// storage 文件路径：`extensions/<id>/.storage.json`（隔离，随扩展卸载可清除）
+/// storage 文件路径：`<扩展目录>/.storage.json`（隔离，随扩展卸载可清除）。
+///
+/// ⚠️ 必须经 `resolve_ext_dir` 解析：开发扩展的数据落在**源码目录**，已装扩展落在扩展根。
+/// 曾用 `extensions_root().join(id)`，于是开发扩展一调 `storage.set`，`write_storage` 的
+/// `create_dir_all` 就在扩展根下凭空建出 `<id>/` 目录——下次扫描把它当成一个没有 manifest
+/// 的扩展（invalid，显示「读取 manifest.json 失败」），又因 id 相同把**真正的开发扩展挤掉**
+/// （scan_extensions 的同 id 冲突检查），列表里就只剩一条点不开的「不可用」。
 fn storage_path(app: &tauri::AppHandle, ext_id: &str) -> Result<PathBuf, String> {
-    Ok(extensions_root(app)?.join(ext_id).join(".storage.json"))
+    Ok(crate::ext_protocol::resolve_ext_dir(app, ext_id)?.join(".storage.json"))
 }
 
 fn read_storage(app: &tauri::AppHandle, ext_id: &str) -> Result<Map<String, Value>, String> {
@@ -416,9 +425,9 @@ fn write_storage(app: &tauri::AppHandle, ext_id: &str, map: &Map<String, Value>)
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
-/// 扩展用户配置覆盖文件路径：`extensions/<id>/.config.json`（配置分层的「用户覆盖」层）
+/// 扩展用户配置覆盖文件路径：`<扩展目录>/.config.json`（配置分层的「用户覆盖」层；目录解析见 storage_path 注释）
 fn config_path(app: &tauri::AppHandle, ext_id: &str) -> Result<PathBuf, String> {
-    Ok(extensions_root(app)?.join(ext_id).join(".config.json"))
+    Ok(crate::ext_protocol::resolve_ext_dir(app, ext_id)?.join(".config.json"))
 }
 
 fn read_user_config(app: &tauri::AppHandle, ext_id: &str) -> Map<String, Value> {
@@ -450,9 +459,9 @@ fn write_user_config(
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
-/// 扩展部署覆盖文件路径：`extensions/<id>/.deploy-config.json`（部署方放置，优先级最高）
+/// 扩展部署覆盖文件路径：`<扩展目录>/.deploy-config.json`（部署方放置，优先级最高；目录解析见 storage_path 注释）
 fn deploy_config_path(app: &tauri::AppHandle, ext_id: &str) -> Result<PathBuf, String> {
-    Ok(extensions_root(app)?.join(ext_id).join(".deploy-config.json"))
+    Ok(crate::ext_protocol::resolve_ext_dir(app, ext_id)?.join(".deploy-config.json"))
 }
 
 fn read_deploy_config(app: &tauri::AppHandle, ext_id: &str) -> Map<String, Value> {
