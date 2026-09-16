@@ -29,6 +29,65 @@ const providers = ref<ProviderEdit[]>([])
 const loading = ref(false)
 const saving = ref(false)
 
+// ---- 平台免费额度（登录后可直接用，不需要自备 API Key） ----
+// 与自备 Key 的供应商**并存**：这里只是把平台模型写成本地配置，Key 用占位符表示
+// 「用账号会话换取额度」，Rust 侧调用时再替换成真实 token（见 chat.rs::PLATFORM_KEY_SENTINEL）。
+const PLATFORM_SENTINEL = '__xhub_platform__'
+const platformBusy = ref(false)
+
+async function addPlatformModels() {
+  if (!isTauri()) return
+  platformBusy.value = true
+  try {
+    const account = await tauriApi.accountStatus()
+    if (!account.loggedIn) {
+      showToast('请先在「设置 → 账号」登录')
+      return
+    }
+    // 服务端地址是内置常量（设置里没有地址入口），后端正常都会回非空值；
+    // 这里只留防御性兜底，不再提示用户「去填地址」——那个入口已经不存在了
+    const server = (account.serverUrl || '').replace(/\/+$/, '')
+    if (!server) {
+      showToast('账号服务地址暂不可用，请稍后重试')
+      return
+    }
+    const models = await tauriApi.platformModels()
+    if (!models.length) {
+      showToast('平台暂未开放任何模型')
+      return
+    }
+    const existing = collectAll()
+    const existingIds = new Set(existing.map((m) => m.id))
+    const added: ChatModelConfig[] = []
+    for (const name of models) {
+      const id = `platform:${name}`
+      if (existingIds.has(id)) continue
+      added.push({
+        id,
+        name: `${name}（平台额度）`,
+        base_url: `${server}/v1`,
+        model: name,
+        api_key: PLATFORM_SENTINEL,
+        is_default: false,
+        has_api_key: true,
+        provider_name: 'x-hub 平台',
+      })
+    }
+    if (!added.length) {
+      showToast('平台模型都已经添加过了')
+      return
+    }
+    const saved = await tauriApi.saveChatModels([...existing, ...added])
+    store.setChatModels(saved)
+    await loadProviders()
+    showToast(`已添加 ${added.length} 个平台模型（用账号免费额度）`)
+  } catch (e) {
+    showToast(`添加失败：${e}`)
+  } finally {
+    platformBusy.value = false
+  }
+}
+
 function groupKey(m: ChatModelConfig): string {
   const name = (m.provider_name ?? '').trim()
   const base = (m.base_url ?? '').trim()
@@ -336,6 +395,17 @@ defineExpose({ reload: () => void loadProviders() })
   <div class="ai-providers">
     <p class="ai-intro">配置 OpenAI 兼容的模型供应商（如 DeepSeek、OpenAI、Ollama）。填好 Base URL 与 API Key 后，可测试连通、拉取可用模型并勾选添加。API Key 仅保存在系统钥匙串。</p>
 
+    <!-- 平台免费额度：登录后可直接用，不需要自备 API Key；与下面的自备供应商并存 -->
+    <div class="ap-platform">
+      <div class="ap-platform-text">
+        <b>使用 x-hub 平台免费额度</b>
+        <span>登录账号后可直接添加平台提供的模型（用平台额度，不需要填 API Key）。自带 Key 的供应商不受影响。</span>
+      </div>
+      <button class="ghost-btn" type="button" :disabled="platformBusy" @click="addPlatformModels">
+        {{ platformBusy ? '添加中…' : '添加平台模型' }}
+      </button>
+    </div>
+
     <div v-if="loading" class="ai-loading">加载中…</div>
 
     <template v-else>
@@ -465,6 +535,35 @@ defineExpose({ reload: () => void loadProviders() })
 </template>
 
 <style scoped>
+/* 平台免费额度卡片：与自备供应商区分，但不抢视觉重心 */
+.ap-platform {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-card-soft);
+}
+.ap-platform-text {
+  flex: 1;
+  min-width: 0;
+}
+.ap-platform-text b {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.ap-platform-text span {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
 .ai-intro {
   margin: 0 0 var(--space-4);
   font-size: 0.78125rem;

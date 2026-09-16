@@ -28,6 +28,29 @@ pub struct ChatUsage {
 /// API Key 存系统钥匙串（keyring），失败时回退到本地受限权限文件，保证可用性
 const KEYRING_SERVICE: &str = "x-hub-chat";
 
+/// 平台中转的占位 Key：真实凭据是账号会话 token（登录态），不写进配置也不写钥匙串。
+/// 这样退出登录/换号时不需要清理任何模型配置，token 失效会自然表现为 401。
+pub const PLATFORM_KEY_SENTINEL: &str = "__xhub_platform__";
+
+/// 解析某模型实际要用的 Key，并回答「它是不是平台模型」：
+/// 平台占位符 → 账号 token（未登录则视为未配置）
+fn resolve_api_key(model_id: &str) -> (Option<String>, bool) {
+    match get_api_key(model_id) {
+        Some(k) if k == PLATFORM_KEY_SENTINEL => (crate::account::session_token(), true),
+        other => (other, false),
+    }
+}
+
+/// 平台模型的 base_url：**由内置服务端地址现算，不信任配置里存的值**。
+///
+/// 平台模型是「登录后用账号额度」的那批条目（`platform:<模型名>`）。用户在服务端地址
+/// 还可配置的旧版本里添加过它们，条目里存的是当时的地址；地址常量换域名后那些条目会
+/// 一直打旧地址，而设置里已经没有地址入口可供改回（见 AGENTS.md 约定 52）。
+/// 自备 Key 的供应商不受影响——它们的 base_url 是用户自己的，永远以配置为准。
+pub fn platform_base_url() -> String {
+    format!("{}/v1", crate::account::server_url())
+}
+
 pub fn save_api_key(model_id: &str, key: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, model_id).map_err(|e| e.to_string());
     match entry {
@@ -78,6 +101,21 @@ fn load_key_file(model_id: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// 拉取平台可用模型（「使用平台免费额度」用；需登录账号）
+#[tauri::command]
+pub async fn platform_models() -> Result<Vec<String>, String> {
+    let token = crate::account::session_token().ok_or("UNAUTHORIZED: 请先在「设置 → 账号」登录")?;
+    let v = crate::account::get_json(crate::api_spec::platform_models_path(), &token).await?;
+    Ok(v.get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// 发送一次 OpenAI 兼容流式对话请求，逐段回调 on_chunk，并把完整回复累积到 out
 ///
 /// - 协议：`POST {base_url}/chat/completions`，`stream: true`，SSE 逐行解析
@@ -94,8 +132,9 @@ pub async fn stream_chat<F>(
 where
     F: FnMut(String) -> Result<(), String>,
 {
-    let api_key = get_api_key(&model.id).ok_or_else(|| {
-        format!("模型「{}」未配置 API Key，请在对话设置中填写", model.name)
+    let (api_key, is_platform) = resolve_api_key(&model.id);
+    let api_key = api_key.ok_or_else(|| {
+        format!("模型「{}」未配置 API Key（平台模型需先登录账号）", model.name)
     })?;
 
     let client = reqwest::Client::builder()
@@ -114,7 +153,13 @@ where
         })
         .collect();
 
-    let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
+    // 平台模型的地址一律指向内置服务端（理由见 platform_base_url 注释）
+    let base_url = if is_platform {
+        platform_base_url()
+    } else {
+        model.base_url.trim().to_string()
+    };
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let payload = serde_json::json!({
         "model": model.model,
         "messages": payload_messages,

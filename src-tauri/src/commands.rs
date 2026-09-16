@@ -2178,8 +2178,15 @@ pub fn list_chat_messages(
 #[tauri::command]
 pub fn get_chat_models() -> Result<Vec<ChatModelConfig>, String> {
     let mut models = config::load().chat_models;
+    // 平台模型的 base_url 以内置服务端地址为准（见 chat::platform_base_url 注释）：
+    // 旧条目里可能存着开发期的临时地址，这里顺手纠正显示值，用户下次保存即落盘迁移
+    let platform_base = crate::chat::platform_base_url();
     for m in &mut models {
-        m.has_api_key = crate::chat::get_api_key(&m.id).is_some();
+        let key = crate::chat::get_api_key(&m.id);
+        if key.as_deref() == Some(crate::chat::PLATFORM_KEY_SENTINEL) {
+            m.base_url = platform_base.clone();
+        }
+        m.has_api_key = key.is_some();
         m.api_key.clear();
     }
     Ok(models)
