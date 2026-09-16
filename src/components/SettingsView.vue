@@ -5,7 +5,7 @@
 // 于是先出现一段空白再显示内容。现在外壳 + 当前大类按需加载，切大类才取对应面板。
 // 样式统一在 ./settings/shared.css（规则带 .settings-view 前缀，避免外移后污染其它视图）。
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
-import { Database, LayoutGrid, Palette, Puzzle, Search, Settings, Sparkles, User, X } from 'lucide-vue-next';
+import { ChevronRight, Database, LayoutGrid, Palette, Puzzle, Search, Settings, Sparkles, User, X } from 'lucide-vue-next';
 import { SETTINGS_INDEX } from './settingsIndex.generated';
 import PanelLoading from './settings/PanelLoading.vue';
 
@@ -286,8 +286,9 @@ onMounted(() => {
             >
               <component :is="g.icon" :size="14" :stroke-width="2" />
               <span>{{ g.label }}</span>
+              <ChevronRight class="sv-nav-caret" :size="13" :stroke-width="2.5" aria-hidden="true" />
             </button>
-            <template v-if="activeGroup === g.id">
+            <div v-if="activeGroup === g.id" class="sv-nav-kids">
               <button
                 v-for="sid in sectionsOf(g.id)"
                 :key="sid"
@@ -299,7 +300,7 @@ onMounted(() => {
               >
                 {{ SECTION_LABEL[sid] }}
               </button>
-            </template>
+            </div>
           </template>
         </template>
       </nav>

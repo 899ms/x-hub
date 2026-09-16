@@ -67,15 +67,25 @@
   cursor: pointer;
   transition: background 150ms ease-out, color 150ms ease-out;
 }
+/* 悬停用中性浅底，不与「选中」共用品牌色 —— 共用时移开鼠标前分不清哪一行才是当前位置 */
 .settings-view .sv-nav-item:hover{
-  background: var(--brand-50);
-  color: var(--brand-500);
+  background: var(--bg-card-soft);
+  color: var(--text-1);
 }
+/* 选中：全页唯一的实心品牌色块，只给「当前位置」那一行（子项）。
+   大类不再吃这条规则（见下方 .sv-nav-group.active）——两层同色块上下叠，
+   用户会读成「大小类都选中」，既难区分也显得脏。 */
 .settings-view .sv-nav-item.active{
   background: var(--brand-50);
   color: var(--brand-500);
 }
-/* 大类：图标 + 名称，字重比子项重 */
+.settings-view .sv-nav-item:focus-visible{
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+/* 大类 = 章节头：图标 + 名称，字重最重。
+   「激活」只表示这一组正展开，表达方式是「图标着色 + 三角翻转 + 文字加重」，
+   不用背景色 —— 层级与状态各占一种视觉手段，互不抢占。 */
 .settings-view .sv-nav-group{
   display: flex;
   align-items: center;
@@ -85,9 +95,40 @@
 .settings-view .sv-nav-group svg{
   flex-shrink: 0;
 }
-/* 子项：缩进一级、字号轻一档（层级靠缩进与字重区分，不再叠一层背景） */
+.settings-view .sv-nav-group:hover{
+  background: var(--bg-card-soft);
+  color: var(--text-1);
+}
+.settings-view .sv-nav-group.active{
+  background: transparent;
+  color: var(--text-1);
+  font-weight: 700;
+}
+/* 展开中的大类：图标与三角用品牌色，位置信息不靠背景传递 */
+.settings-view .sv-nav-group.active > svg:first-child{
+  color: var(--brand-500);
+}
+/* 展开指示三角：收拢朝右，展开转 90° */
+.settings-view .sv-nav-caret{
+  margin-left: auto;
+  color: var(--text-3);
+  transition: transform 150ms ease-out, color 150ms ease-out;
+}
+.settings-view .sv-nav-group.active .sv-nav-caret{
+  transform: rotate(90deg);
+  color: var(--brand-500);
+}
+/* 子项列表：左引导线表示「这些从属于上面那一组」，是大类与子项层级差的唯一来源 */
+.settings-view .sv-nav-kids{
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 6px 19px;
+  border-left: 1px solid color-mix(in srgb, var(--text-3) 24%, transparent);
+}
+/* 子项：字号轻一档、字重轻一档；缩进让「选中色块」从引导线起算 */
 .settings-view .sv-nav-sub{
-  padding: 6px 12px 6px 30px;
+  padding: 6px 12px 6px 11px;
   font-size: 0.75rem;
   font-weight: 500;
   color: var(--text-3);
@@ -144,6 +185,11 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+}
+/* 结果列表没有「选中态」要区分，保留品牌浅底悬停（导航行才需要中性 hover） */
+.settings-view .sv-nav-hit:hover{
+  background: var(--brand-50);
+  color: var(--brand-500);
 }
 .settings-view .sv-hit-title{
   font-size: 0.75rem;
