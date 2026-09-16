@@ -279,6 +279,8 @@ export interface ExtensionEntry {
   icon: string | null
   /** 扩展目录绝对路径 */
   dir: string
+  /** 来源：installed（已装，位于扩展根）| dev（开发者模式直挂的本机源码目录） */
+  source: 'installed' | 'dev'
   /** manifest 缺失 / 解析失败时为 true */
   invalid: boolean
   error: string | null
@@ -298,9 +300,140 @@ export interface ExtensionEntry {
   module_variants: ExtensionModuleVariant[]
 }
 
-/** manifest.moduleVariants 里的单个形态声明（与 Rust ModuleVariant 对齐） */
-export interface ExtensionModuleVariant {
+/** 开发者模式状态（后端 extension.rs::DevModeStatus） */
+export interface DevModeStatus {
+  enabled: boolean
+  extensions: DevExtensionInfo[]
+}
+
+/** 单个开发扩展目录的解析结果 */
+export interface DevExtensionInfo {
+  /** 注册的源码目录绝对路径 */
+  path: string
   id: string
+  name: string
+  version: string
+  /** manifest 是否可解析 */
+  valid: boolean
+  /** valid=false 时的原因 */
+  error: string | null
+  /** 与已装扩展同 id（此时不会被加载，已装优先） */
+  conflict: boolean
+  /** 目录当前是否存在 */
+  exists: boolean
+}
+
+/** 发布前本地预检结果（level: ok/warn/error；clean = 无 error） */
+export interface PrecheckResult {
+  clean: boolean
+  items: { level: 'ok' | 'warn' | 'error'; label: string; detail?: string }[]
+}
+
+/** 一台在线设备（多设备登录；每台一条 token，可单独撤销） */
+export interface AccountDevice {
+  id: number
+  label: string
+  created_at: number
+  last_seen_at: number
+  /** 是不是本机（当前正在用的这枚 token）：本机不能「撤销」，否则等于把自己踢下线 */
+  current?: boolean
+}
+
+/** 发布提交结果（关卡逐项结论；客户端只展示服务端结论，不内置任何审核规则） */
+export interface SubmitResult {
+  id: number
+  /** pending_review / gate_failed */
+  status: string
+  gatePassed: boolean
+  gateItems: { id: string; label: string; ok: boolean; detail?: string | null }[]
+  extId: string
+  version: string
+  /** 剩余配额（服务端只回剩余次数，不回上限） */
+  quota: { drafts_remaining?: number; published_remaining?: number; daily_submits_remaining?: number } | null
+}
+
+/** 我的一条提交记录 */
+export interface DevSubmissionRow {
+  id: number
+  ext_id: string
+  version: string
+  runtime: string
+  status: string
+  review_note: string
+  size: number
+  created_at: number
+  reviewed_at: number | null
+  has_ai_report: number
+}
+
+/** 提交详情（含关卡逐项结论；**不含** AI 预审报告——那是给审核者看的） */
+export interface DevSubmissionDetail extends DevSubmissionRow {
+  market: { changelog?: string; minAppVersion?: string; homepage?: string }
+  permissions: string[]
+  gate_report: { id: string; label: string; ok: boolean; detail?: string | null }[]
+}
+
+export interface DevSubmissionList {
+  submissions: DevSubmissionRow[]
+  total: number
+  quota: { drafts_remaining?: number; published_remaining?: number; daily_submits_remaining?: number }
+}
+
+/** 平台账号状态（后端 account.rs::AccountStatus） */
+export interface AccountStatus {
+  /** 是否已登录（本地存在 token） */
+  loggedIn: boolean
+  /** 服务端地址（空 = 未配置） */
+  serverUrl: string
+  username: string
+  role: string
+  quotaTotal: number
+  quotaRemaining: number
+  /** 已兑换邀请码（= 有权益：额度 + 可申请开发者） */
+  inviteRedeemed: boolean
+  /** none / pending / approved / rejected */
+  developerStatus: 'none' | 'pending' | 'approved' | 'rejected'
+  canApplyDeveloper: boolean
+  /** 已登录但拉取失败时的原因（网络不可用等） */
+  error: string | null
+}
+
+/** GitHub 设备码登录：发起结果 */
+export interface GithubDeviceStart {
+  pollId: string
+  userCode: string
+  verificationUri: string
+  interval: number
+  expiresIn: number
+}
+
+/** GitHub 设备码登录：轮询结果 */
+export interface GithubPollResult {
+  /**
+   * pending = 还没授权；slow_down = GitHub 要求降低轮询频率（必须把间隔 +5s 再继续，
+   * 否则它会一直回 slow_down —— 表现为「浏览器已授权、客户端永远等待」）；ok = 登录成功
+   */
+  status: 'pending' | 'slow_down' | 'ok' | 'error'
+  message: string | null
+}
+
+/** 邮箱验证码发送结果（服务端未配置发信时 ok=false + 说明） */
+export interface EmailSendResult {
+  ok: boolean
+  message: string | null
+}
+
+/** 开发者申请状态 */
+export interface DevApplyStatus {
+  /** none / pending / approved / rejected */
+  status: string
+  reviewNote: string
+  isDeveloper: boolean
+  inviteRedeemed: boolean
+}
+
+/** manifest.moduleVariants 里的单个形态声明（与 Rust ModuleVariant 对齐） */
+export interface ExtensionModuleVariant {  id: string
   name: string
   minW: number
   minH: number
@@ -332,6 +465,10 @@ export interface MarketExtension {
   homepage: string
   /** 官方内置扩展标记 */
   required: boolean
+  /** 截图（展示物料，完整 URL；老清单没有此字段 = 空数组 → 详情页显示「作者未提供截图」） */
+  screenshots: string[]
+  /** 该扩展申请的权限（发布时由服务端从 manifest 写入；老清单缺此字段 = 未提供） */
+  permissions?: string[]
 }
 
 /** 市场状态（get_market_registry / refresh_market_registry 返回） */
@@ -343,6 +480,19 @@ export interface MarketStatus {
   source: 'remote' | 'cache'
   /** 拉取/验签失败原因（source=cache 时非空） */
   error: string | null
+  /** 撤销列表（`id@version`）：已装扩展命中则警示并停止自动更新（不静默卸载/禁用） */
+  revoked: string[]
+}
+
+/** 扩展打包结果（pack_extension_archive 返回） */
+export interface PackedArchive {
+  /** 产物绝对路径（.xhpack，zip 格式） */
+  path: string
+  id: string
+  version: string
+  size: number
+  /** 产物 sha256（hex 小写） */
+  sha256: string
 }
 
 /** 市场下载进度事件负载（market-download-progress） */
@@ -704,6 +854,8 @@ export const tauriApi = {
     return invoke<void>('send_chat_message', { sessionId, content, onEvent: channel })
   },
   getChatModels: () => invoke<ChatModelConfig[]>('get_chat_models'),
+  /** 平台可用模型（「使用平台免费额度」；需登录账号） */
+  platformModels: () => invoke<string[]>('platform_models'),
   saveChatModels: (models: ChatModelConfig[]) => invoke<ChatModelConfig[]>('save_chat_models', { models }),
   fetchChatProviderModels: (baseUrl: string, apiKey: string, keyId?: string) =>
     invoke<string[]>('fetch_chat_provider_models', { baseUrl, apiKey, keyId }),
@@ -793,9 +945,57 @@ export const tauriApi = {
   // ---- 扩展系统 ----
   listExtensions: () => invoke<ExtensionEntry[]>('list_extensions'),
   extensionsStamp: () => invoke<number>('extensions_stamp'),
-  /** 读取扩展某形态入口（注入桥脚本后返回临时 HTML 绝对路径） */
+  /** 读取扩展某形态入口 URL（xhub-ext 协议，直接作为 iframe src；入口 HTML 由后端注入桥脚本） */
   readExtensionEntry: (id: string, surface?: string | null) =>
     invoke<string>('read_extension_entry', { id, surface: surface ?? null }),
+  // ---- 开发者模式（本机源码目录直挂，见 docs/adr/0005） ----
+  getDevModeStatus: () => invoke<DevModeStatus>('get_dev_mode_status'),
+  setDevModeEnabled: (enabled: boolean) =>
+    invoke<DevModeStatus>('set_dev_mode_enabled', { enabled }),
+  addDevExtension: (path: string) => invoke<DevModeStatus>('add_dev_extension', { path }),
+  removeDevExtension: (path: string) => invoke<DevModeStatus>('remove_dev_extension', { path }),
+  /** 开发目录内容戳（全目录 FNV+mtime；变化即热重载对应 iframe） */
+  devExtensionsStamp: () => invoke<number>('dev_extensions_stamp'),
+  // ---- 平台账号（登录 / 额度 / 开发者申请；服务端地址是内置常量，不可配置） ----
+  accountStatus: () => invoke<AccountStatus>('account_status'),
+  accountLoginGithubStart: () => invoke<GithubDeviceStart>('account_login_github_start'),
+  accountLoginGithubPoll: (pollId: string) =>
+    invoke<GithubPollResult>('account_login_github_poll', { pollId }),
+  accountLoginEmailSend: (email: string) =>
+    invoke<EmailSendResult>('account_login_email_send', { email }),
+  accountLoginEmailVerify: (email: string, code: string) =>
+    invoke<AccountStatus>('account_login_email_verify', { email, code }),
+  accountLogout: () => invoke<AccountStatus>('account_logout'),
+  /** 兑换邀请码：账号与权益解耦，兑换后才发额度、才可申请开发者 */
+  accountRedeem: (code: string) => invoke<AccountStatus>('account_redeem', { code }),
+  devApply: (reason: string) => invoke<DevApplyStatus>('dev_apply', { reason }),
+  devApplyStatus: () => invoke<DevApplyStatus>('dev_apply_status'),
+  /** 我的在线设备（不含 token 明文） */
+  accountListDevices: () =>
+    invoke<{ devices: AccountDevice[]; max: number }>('account_list_devices'),
+  /** 撤销某台设备（换机/设备丢失时用） */
+  accountRevokeDevice: (id: number) => invoke<unknown>('account_revoke_device', { id }),
+  // ---- 扩展发布（打包上传 / 我的提交 / 撤回） ----
+  devSubmit: (id: string, changelog?: string, minAppVersion?: string, homepage?: string, screenshots?: string[]) =>
+    invoke<SubmitResult>('dev_submit', {
+      id,
+      changelog: changelog ?? null,
+      minAppVersion: minAppVersion ?? null,
+      homepage: homepage ?? null,
+      screenshots: screenshots && screenshots.length ? screenshots : null,
+    }),
+  /** 读本地图片为 data URL（发布弹窗的截图缩略图预览用；作者选的图不在资产白名单目录里） */
+  readImageDataUrl: (path: string) => invoke<string>('read_image_data_url', { path }),
+  devListSubmissions: (page?: number, pageSize?: number) =>
+    invoke<DevSubmissionList>('dev_list_submissions', {
+      page: page ?? null,
+      pageSize: pageSize ?? null,
+    }),
+  devGetSubmission: (id: number) =>
+    invoke<{ submission: DevSubmissionDetail }>('dev_get_submission', { id }),
+  devWithdrawSubmission: (id: number) => invoke<unknown>('dev_withdraw_submission', { id }),
+  /** 发布前本地预检（作者侧 lint：manifest / 权限申报 / 桥 API 可用性） */
+  precheckExtension: (id: string) => invoke<PrecheckResult>('precheck_extension', { id }),
   /** 打开扩展的独立窗口（window 形态） */
   openExtensionWindow: (id: string) => invoke<void>('open_extension_window', { id }),
   /** 卸载扩展（停止 service 后端进程并删除目录） */
@@ -812,6 +1012,9 @@ export const tauriApi = {
   getMarketRegistry: () => invoke<MarketStatus>('get_market_registry'),
   /** 拉取远端市场清单（fetch 原始字节 + Ed25519 验签 + 原子落缓存），失败回退本地缓存 */
   refreshMarketRegistry: () => invoke<MarketStatus>('refresh_market_registry'),
+  /** 把扩展目录打成 .xhpack（manifest 在包根，排除 node_modules 与隐藏项） */
+  packExtensionArchive: (id: string, outPath?: string | null) =>
+    invoke<PackedArchive>('pack_extension_archive', { id, outPath: outPath ?? null }),
   /** 从市场下载并安装扩展（流式下载 + sha256 校验 + 解包），返回扩展 id */
   installFromMarket: (extension: MarketExtension) =>
     invoke<string>('install_from_market', { extension }),

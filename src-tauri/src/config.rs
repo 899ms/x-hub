@@ -166,6 +166,20 @@ pub struct AppConfig {
     /// 市场清单远端地址（空 = 用默认值）
     #[serde(default = "default_market_endpoint")]
     pub market_endpoint: String,
+    /// 开发者模式总开关（默认关闭）：开启后本机扩展源码目录可作为「开发扩展」直挂加载
+    /// （不复制进扩展根；见 docs/adr/0005-developer-mode-local-source-mount.md）
+    #[serde(default)]
+    pub dev_mode_enabled: bool,
+    /// ⚠️ **已废弃、不再被读取**：x-hub 平台服务端地址的唯一真相源是内置常量
+    /// `DEFAULT_SERVER_URL`（v0.5.6 起平台域名正式启用，设置页不再提供地址入口，见约定 52）。
+    /// 字段保留只为兼容旧 `app.json`（其中可能残留开发期的临时地址），读到即忽略——
+    /// 若哪天又需要可配置，请连同设置入口一起加回来，不要只恢复读取。
+    #[serde(default)]
+    pub server_url: String,
+    /// 开发者模式：本机扩展源码目录列表（绝对路径，目录须含 manifest.json）。
+    /// ⚠️ 这些目录会被动态加入资产协议作用域，只暴露给扩展内容协议；不要添加敏感目录。
+    #[serde(default)]
+    pub dev_extensions: Vec<String>,
     /// 开机自启动（登录 Windows 时自动驻留托盘）
     #[serde(default)]
     pub run_at_startup: bool,
@@ -247,6 +261,13 @@ fn default_quote_source() -> String {
 fn default_runtime_strategy() -> String {
     "auto".to_string()
 }
+
+/// x-hub 平台服务端地址（账号登录 / 平台额度 / 申请开发者 / 发布扩展都基于它）。
+///
+/// **唯一真相源，且刻意不可配置**：正式域名启用后，设置页的「服务器地址」入口已移除
+/// （见约定 52）。此前可配置是为了开发期临时指向本机联调地址，代价是老用户机器上
+/// 残留的临时地址会在正式域名上线后继续生效、而界面上又没有入口可以改回来。
+pub const DEFAULT_SERVER_URL: &str = "http://x-hub.xfactor.top";
 
 /// 默认市场清单远端地址（腾讯云 COS 公有读桶）
 pub const DEFAULT_MARKET_ENDPOINT: &str = "https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/extensions/registry.json";
@@ -332,6 +353,10 @@ impl Default for AppConfig {
             sidebar_extensions: Vec::new(),
             extension_open_modes: std::collections::HashMap::new(),
             market_endpoint: default_market_endpoint(),
+            dev_mode_enabled: false,
+            dev_extensions: Vec::new(),
+            // 废弃字段（不再被读取）：地址真相源是 DEFAULT_SERVER_URL，见字段注释
+            server_url: String::new(),
             run_at_startup: false,
             update_endpoint: default_update_endpoint(),
             auto_update_enabled: true,

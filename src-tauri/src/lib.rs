@@ -1,4 +1,6 @@
 mod about;
+mod account;
+mod api_spec;
 mod autostart;
 mod browsers;
 mod chat;
@@ -10,6 +12,7 @@ mod countdown_ticker;
 mod countdown_window;
 mod db;
 mod extension;
+mod ext_protocol;
 mod floating_ball;
 mod float_window;
 pub mod market;
@@ -17,8 +20,10 @@ mod models;
 mod notify;
 mod online;
 mod paths;
+mod precheck;
 mod process;
 mod proxy;
+mod publisher;
 mod repo;
 mod runtime;
 mod service;
@@ -29,6 +34,7 @@ mod sysmon;
 mod todo_reminder;
 mod tray;
 pub mod updater;
+mod win_taskbar;
 mod xhub_api;
 
 /// WebView2 附加浏览器参数（主窗/倒计时浮窗/便签浮窗必须完全一致，
@@ -268,14 +274,35 @@ pub fn run() {
                     .unwrap(),
             }
         })
+        // 扩展内容协议：扩展入口与其相对资源的唯一来源。
+        // origin = `xhub-ext.localhost`，与承载用户数据的 `asset.localhost` 跨源，
+        // 扩展因此无法直接读取数据根下的数据库 / 配置（见 docs/adr/0008）
+        .register_uri_scheme_protocol("xhub-ext", |ctx, request| {
+            crate::ext_protocol::handle(ctx.app_handle(), request)
+        })
         .setup(|app| {
             log::info!("========== x-hub 启动 ==========");
 
-            // 把数据根动态加入 asset 协议作用域：图标 / 剪贴板图片经 convertFileSrc 渲染，
-            // 当数据目录被改到 %APPDATA% 之外（自定义目录 / U 盘便携）时仍能正常访问
-            let _ = app
-                .asset_protocol_scope()
-                .allow_directory(crate::paths::data_root(), true);
+            // 资产协议作用域：**只**放行必要的子目录（图标 / 壁纸 / 剪贴板图片 / 扩展），
+            // 绝不放行整个数据根，也绝不写回 tauri.conf 的 `$APPDATA/**`。
+            //
+            // 理由（见 docs/adr/0008-extension-content-origin-isolation.md）：资产协议作用域
+            // 是**全局单例**，而扩展 iframe 与资产资源同源 ⇒ 放行数据根等于任何扩展都能直接
+            // fetch 到用户数据库（xhub.db）、app.json 与日志，从而绕开桥 API 的权限系统。
+            // 数据目录可被改到 %APPDATA% 之外（自定义目录 / U 盘便携），故必须动态放行。
+            const ASSET_SCOPE_SUBDIRS: [&str; 4] =
+                ["extensions", "icons", "wallpapers", "clipboard/images"];
+            for rel in ASSET_SCOPE_SUBDIRS {
+                let dir = crate::paths::data_root().join(rel);
+                // 目录必须先存在：allow_directory 会额外注册 canonicalize 后的模式变体，
+                // 目录不存在时拿不到该变体，请求侧 canonicalize 后就匹配不上（403）。
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    log::warn!("资产作用域目录创建失败 {}: {e}", dir.display());
+                }
+                if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, true) {
+                    log::warn!("资产作用域放行失败 {}: {e}", dir.display());
+                }
+            }
 
             // 旧版本（com.workbench.desktop 标识）数据迁移到 x-hub 目录
             migrate_legacy_data();
@@ -289,6 +316,16 @@ pub fn run() {
             app.manage(DbState(std::sync::Mutex::new(conn)));
             app.manage(clipboard::ClipboardState::default());
             app.manage(service::ServiceState::default());
+            // 开发扩展目录映射（开发者模式注册；扩展协议与扫描按它解析源码目录）
+            app.manage(ext_protocol::DevExtensionDirs::default());
+            // 开发者模式重放：资产作用域放行不落盘，重启必须按配置重新放行
+            extension::apply_dev_extensions(app.handle());
+
+            // 账号会话启动校验（异步，不阻塞窗口创建）：token 失效则静默清理
+            let account_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                account::verify_session_on_startup(&account_handle).await;
+            });
 
             // 启动扩展反向代理（/svc/<extId>/* → 127.0.0.1:<service 端口>，统一加 CORS 头）
             let proxy_port = tauri::async_runtime::block_on(proxy::start(app.handle().clone()))
@@ -586,10 +623,40 @@ pub fn run() {
             extension::uninstall_extension,
             extension::get_extension_permissions,
             extension::set_extension_permission,
+            extension::get_dev_mode_status,
+            extension::set_dev_mode_enabled,
+            extension::add_dev_extension,
+            extension::remove_dev_extension,
+            extension::dev_extensions_stamp,
+            // 平台账号（登录 / 额度 / 开发者申请）
+            // 注意：服务端地址内置为常量（见 config::DEFAULT_SERVER_URL），无 account_set_server 命令
+            account::account_status,
+            account::account_login_github_start,
+            account::account_login_github_poll,
+            account::account_login_email_send,
+            account::account_login_email_verify,
+            account::account_logout,
+            account::account_redeem,
+            account::dev_apply,
+            account::dev_apply_status,
+            account::account_list_devices,
+            account::account_revoke_device,
+            // 扩展发布（打包上传 / 我的提交 / 撤回）
+            publisher::dev_submit,
+            // 发布弹窗的截图缩略图预览（读本地图为 data URL）
+            publisher::read_image_data_url,
+            publisher::dev_list_submissions,
+            publisher::dev_get_submission,
+            publisher::dev_withdraw_submission,
+            // 发布前本地预检（作者侧 lint：只做已开源口径的检查，不作为放行依据）
+            precheck::precheck_extension,
+            // 平台 AI 额度（登录后可直接使用的模型列表）
+            chat::platform_models,
             market::get_market_registry,
             market::refresh_market_registry,
             market::install_from_market,
             market::install_local_archive,
+            market::pack_extension_archive,
             market::update_extension,
             updater::check_for_update,
             updater::download_update,
