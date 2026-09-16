@@ -987,6 +987,16 @@ pub fn save_config(config: AppConfig) -> Result<AppConfig, String> {
     merged.floating_ball_buttons = disk.floating_ball_buttons;
     merged.floating_ball_x = disk.floating_ball_x;
     merged.floating_ball_y = disk.floating_ball_y;
+    // 「我的扩展」本机源码目录（dev_extensions）只经 add/remove_dev_extension 变更，
+    // 同样以磁盘为准：前端 state.config 是**启动快照**，新增源码目录后不会回写，
+    // 一旦被它覆盖，刚添加的扩展就会从「我的扩展」列表里凭空消失
+    // （典型触发：加完目录顺手把它的卡片拖进工作台 → setDashboardLayout 用旧快照整份保存）。
+    // 扩展本身仍在本次会话里运行、工作台卡片也还在，症状因此格外迷惑。
+    merged.dev_extensions = disk.dev_extensions;
+    merged.dev_mode_enabled = disk.dev_mode_enabled;
+    // 「跳过此版本」由 skip_update_version 命令写入（后端管理），前端快照里恒为旧值，
+    // 同样以磁盘为准 —— 否则用户点过「跳过」的版本会被下一次任意设置保存重新提示
+    merged.skipped_update_version = disk.skipped_update_version;
     crate::config::save(&merged)?;
     log::info!(
         "配置已保存: theme_mode={} theme_preset={} accent_color={:?} window={}x{} always_on_top={}",
