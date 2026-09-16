@@ -1,108 +1,22 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { open } from '@tauri-apps/plugin-dialog'
-import { convertFileSrc } from '@tauri-apps/api/core'
-import { ChevronDown, Download, FolderCog, Keyboard, LocateFixed, Lock, MapPin, Trash2, Upload } from 'lucide-vue-next'
-import { isTauri, tauriApi } from '../api/tauri'
-import type { AutostartStatus, DataPathInfo } from '../api/tauri'
-import AppSelect from './AppSelect.vue'
-import AiProviders from './AiProviders.vue'
-import AboutSection from './AboutSection.vue'
-import { useStore } from '../stores/workbench'
-import { reportClientError } from '../utils/error-report'
-import { normalizeShortcutDisplay, useShortcutRecorder } from '../composables/useShortcutRecorder'
-import { FLOATING_BALL_BUTTONS, FLOATING_BALL_MAX_BUTTONS } from '../composables/floatingBallButtons'
+// 设置页外壳：只负责「两级导航 + 设置项搜索 + 面板路由」，具体设置项都在 ./settings/*.vue 面板里。
+//
+// 为什么拆：以前是单文件（模板 + 脚本 + 样式共 3000 余行），点开设置要下载/解析整份代码，
+// 于是先出现一段空白再显示内容。现在外壳 + 当前大类按需加载，切大类才取对应面板。
+// 样式统一在 ./settings/shared.css（规则带 .settings-view 前缀，避免外移后污染其它视图）。
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { Database, LayoutGrid, Palette, Puzzle, Search, Settings, Sparkles, User, X } from 'lucide-vue-next';
+import { SETTINGS_INDEX } from './settingsIndex.generated';
+import PanelLoading from './settings/PanelLoading.vue';
 
 const props = defineProps<{ initialSection?: string }>()
 
 const emit = defineEmits<{ (e: 'open-layout-editor'): void }>()
 
-const showToast = inject<(msg: string) => void>('showToast', () => {})
-const store = useStore()
-
-// ---- 应用壁纸与卡片玻璃透明度（见 docs/adr/0002：模糊作用于壁纸层整体） ----
-// 壁纸单一套，所有主题模式共用同一张壁纸与蒙版
-const wallpaperSrc = computed(() => {
-  const p = store.state.config.wallpaper_path
-  return p && isTauri() ? convertFileSrc(p) : ''
-})
-
-async function pickWallpaper() {
-  try {
-    const file = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
-    })
-    if (typeof file !== 'string') return
-    const stored = await tauriApi.importWallpaper(file)
-    await store.setWallpaper(stored)
-    showToast('壁纸已更新')
-  } catch (e) {
-    showToast(`壁纸导入失败：${String(e)}`)
-  }
-}
-
-async function clearWallpaper() {
-  await store.setWallpaper('')
-  try {
-    // 先更新配置再清理目录：回收不再被引用的壁纸文件
-    await tauriApi.cleanupWallpapers()
-  } catch {
-    // 目录已不存在等场景不阻塞：配置置空即达成清除
-  }
-  showToast('已清除壁纸')
-}
-
-function onToggleWallpaperBlur() {
-  void store.setWallpaperBlur(!store.state.config.wallpaper_blur)
-}
-
-function onToggleWallpaperImmersive() {
-  void store.setWallpaperImmersive(!store.state.config.wallpaper_immersive)
-}
-
-function onWallpaperVeilInput(e: Event) {
-  void store.setWallpaperVeil(Number((e.target as HTMLInputElement).value))
-}
-
-function onGlassOpacityInput(e: Event) {
-  void store.setGlassOpacity(Number((e.target as HTMLInputElement).value))
-}
-
-// ---- 桌面悬浮球（ADR 0004）：启用 / 贴边自动隐藏 / 与主窗同显 / 环形按钮增删排序 ----
-const ballButtons = computed(() => store.state.config.floating_ball_buttons ?? [])
-
-function onToggleFloatingBall() {
-  void store.setFloatingBallEnabled(!store.state.config.floating_ball_enabled)
-}
-
-function onToggleFloatingBallAutoHide() {
-  void store.setFloatingBallAutoHide(!store.state.config.floating_ball_auto_hide)
-}
-
-function onToggleFloatingBallWithMain() {
-  void store.setFloatingBallWithMain(!store.state.config.floating_ball_with_main)
-}
-
-async function addBallButton(id: string) {
-  if (ballButtons.value.includes(id) || ballButtons.value.length >= FLOATING_BALL_MAX_BUTTONS) return
-  await store.setFloatingBallButtons([...ballButtons.value, id])
-}
-
-async function removeBallButton(id: string) {
-  await store.setFloatingBallButtons(ballButtons.value.filter((b) => b !== id))
-}
-
-async function moveBallButton(index: number, delta: number) {
-  const target = index + delta
-  if (target < 0 || target >= ballButtons.value.length) return
-  const arr = [...ballButtons.value]
-  ;[arr[index], arr[target]] = [arr[target], arr[index]]
-  await store.setFloatingBallButtons(arr)
-}
-
-// ---- 分类导航（左侧分类 = 右侧区块锚点，点击平滑滚动定位，不做内容切换） ----
+// ---- 两级分类导航 ----
+// 左栏只列 5 个大类，当前大类的子项在它下方缩进展开；右侧**只挂载当前大类**的分区。
+// 为什么不再「全量渲染 + 滚动锚点」：12 个分区一次性挂载（模板近 2000 行）会让点开设置时
+// 先空白一段再出现内容。分区归属集中在 SECTION_GROUP 一张表里，模板中每个 section 只写自己的 id。
 const SECTIONS = [
   { id: 'general', label: '常规' },
   { id: 'ball', label: '悬浮球' },
@@ -112,487 +26,207 @@ const SECTIONS = [
   { id: 'shortcut', label: '快捷键' },
   { id: 'clipboard', label: '剪贴板' },
   { id: 'online', label: '联网' },
+  { id: 'account', label: '账号' },
   { id: 'extensions', label: '扩展' },
+  { id: 'myext', label: '我的扩展' },
   { id: 'data', label: '数据' },
   { id: 'about', label: '关于' },
 ] as const
 
 type SectionId = (typeof SECTIONS)[number]['id']
+
+const GROUPS = [
+  { id: 'general', label: '常规', icon: Settings },
+  { id: 'appearance', label: '外观', icon: Palette },
+  { id: 'workbench', label: '工作台', icon: LayoutGrid },
+  { id: 'features', label: '功能', icon: Sparkles },
+  { id: 'extensions', label: '扩展', icon: Puzzle },
+  { id: 'account', label: '账号', icon: User },
+  { id: 'data', label: '数据与关于', icon: Database },
+] as const
+
+type GroupId = (typeof GROUPS)[number]['id']
+
+/** 分区 → 大类（Record 的键类型是 SectionId，漏一个分区编译期就报错） */
+const SECTION_GROUP: Record<SectionId, GroupId> = {
+  general: 'general',
+  ball: 'general',
+  shortcut: 'general',
+  appearance: 'appearance',
+  workbench: 'workbench',
+  ai: 'features',
+  clipboard: 'features',
+  online: 'features',
+  extensions: 'extensions',
+  myext: 'extensions',
+  account: 'account',
+  data: 'data',
+  about: 'data',
+}
+
+const SECTION_LABEL: Record<string, string> = Object.fromEntries(SECTIONS.map((s) => [s.id, s.label]))
+
+const activeGroup = ref<GroupId>('general')
 const activeSection = ref<SectionId>('general')
 const contentRef = ref<HTMLElement | null>(null)
 
-function goToSection(id: SectionId) {
+/**
+ * 某个大类下的分区列表：**按 SECTIONS 的顺序推导**，不另写一份。
+ * 这样左栏子项顺序天然等于右侧渲染顺序（写成两份迟早会有一份出错，
+ * 表现为点子项时页面向反方向跳）。
+ */
+function sectionsOf(id: GroupId): readonly SectionId[] {
+  return SECTIONS.filter((s) => SECTION_GROUP[s.id] === id).map((s) => s.id)
+}
+
+// ---- 设置项搜索 ----
+// 索引是**构建期从模板生成**的（scripts/gen-settings-index.mjs）：设置页只挂载当前大类，
+// 其它大类的设置项不在 DOM 里，所以搜索不能靠遍历页面。索引绑在 prebuild 上，不会漂移。
+const query = ref('')
+
+function groupLabel(id: GroupId): string {
+  return GROUPS.find((g) => g.id === id)?.label ?? ''
+}
+
+const searchResults = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  if (!q) return [] as { section: SectionId; title: string; where: string; rank: number }[]
+  const hits: { section: SectionId; title: string; where: string; rank: number }[] = []
+  for (const it of SETTINGS_INDEX) {
+    const section = it.section as SectionId
+    if (!(section in SECTION_GROUP)) continue
+    const where = `${groupLabel(SECTION_GROUP[section])} / ${SECTION_LABEL[section]}`
+    const idx = it.title.toLowerCase().indexOf(q)
+    const whereHit = where.toLowerCase().includes(q)
+    if (idx < 0 && !whereHit) continue
+    // 排序：标题开头命中 > 标题中间命中 > 只命中「所属位置」
+    hits.push({ section, title: it.title, where, rank: idx === 0 ? 0 : idx > 0 ? 1 : 2 })
+  }
+  return hits.sort((a, b) => a.rank - b.rank || a.title.length - b.title.length).slice(0, 30)
+})
+
+/** 跳到某个设置项：切大类 → 滚到那一行 → 短暂高亮（找不到行就退化为滚到该分区） */
+function jumpToSetting(section: SectionId, title: string, attempt = 0) {
+  activeGroup.value = SECTION_GROUP[section]
+  activeSection.value = section
+  void nextTick(() => {
+    const container = contentRef.value
+    if (!container) return
+    const hit = Array.from(
+      container.querySelectorAll<HTMLElement>('.setting-name, .theme-label, .sv-subtitle')
+    ).find((el) => el.textContent?.trim() === title)
+    // 面板可能还在加载：这一轮找不到就等下一轮（保留搜索词，用户能看到进度）
+    if (!hit && attempt < 20) {
+      window.setTimeout(() => jumpToSetting(section, title, attempt + 1), 50)
+      return
+    }
+    // 命中设置项 → 高亮它所在那一行；命中小组标题（sv-subtitle）→ 就用标题本身
+    const row = hit?.closest<HTMLElement>('.setting-row, .theme-row') ?? hit
+    const target = row ?? container.querySelector<HTMLElement>(`#sv-sec-${section}`)
+    if (target) container.scrollTo({ top: Math.max(0, target.offsetTop - 12), behavior: 'smooth' })
+    if (row) {
+      row.classList.add('setting-flash')
+      window.setTimeout(() => row.classList.remove('setting-flash'), 1600)
+    }
+    query.value = '' // 回到导航（否则看不到定位后的上下文）
+  })
+}
+
+/** 切大类：内容整体换掉 → 直接归零滚动；再点当前大类则回到该类顶部 */
+function selectGroup(id: GroupId) {
+  const first = sectionsOf(id)[0]
+  if (activeGroup.value === id) {
+    if (first) activeSection.value = first
+    contentRef.value?.scrollTo({ top: 0, behavior: 'smooth' })
+    return
+  }
+  activeGroup.value = id
+  if (first) activeSection.value = first
+  void nextTick(() => contentRef.value?.scrollTo({ top: 0 }))
+}
+
+/**
+ * 滚到某个分区。
+ * 面板按需加载：目标 DOM 可能还没挂上，所以取不到就重试几次（最多约 400ms）。
+ */
+function goToSection(id: SectionId, attempt = 0) {
   activeSection.value = id
   const container = contentRef.value
-  const el = container?.querySelector<HTMLElement>(`#sv-sec-${id}`)
-  if (!container || !el) return
+  if (!container) return
+  const el = container.querySelector<HTMLElement>(`#sv-sec-${id}`)
+  if (!el) {
+    if (attempt < 20) window.setTimeout(() => goToSection(id, attempt + 1), 50)
+    return
+  }
   // 相对滚动容器计算目标位置（容器为 position: relative，offsetTop 相对它）
   container.scrollTo({ top: Math.max(0, el.offsetTop - 12), behavior: 'smooth' })
 }
 
-// 滚动时同步左侧激活态（停留在某区块即高亮对应分类）
+// 类内滚动时同步子项激活态（只遍历当前大类已挂载的分区，未挂载的自然取不到）
 function onContentScroll() {
   const container = contentRef.value
   if (!container) return
-  let current: SectionId = SECTIONS[0].id
-  for (const sec of SECTIONS) {
-    const el = container.querySelector<HTMLElement>(`#sv-sec-${sec.id}`)
+  let current: SectionId | null = null
+  for (const id of sectionsOf(activeGroup.value)) {
+    const el = container.querySelector<HTMLElement>(`#sv-sec-${id}`)
     if (!el) continue
-    if (el.offsetTop - 60 <= container.scrollTop) current = sec.id
+    if (el.offsetTop - 60 <= container.scrollTop) current = id
   }
-  if (current !== activeSection.value) activeSection.value = current
+  if (current && current !== activeSection.value) activeSection.value = current
 }
 
 onMounted(() => contentRef.value?.addEventListener('scroll', onContentScroll))
 onBeforeUnmount(() => contentRef.value?.removeEventListener('scroll', onContentScroll))
 
-// ---- 快捷键录入：全局 / 剪贴板共用一套录制逻辑（见 composables/useShortcutRecorder.ts） ----
-const {
-  value: shortcut,
-  error: shortcutError,
-  listening: shortcutListening,
-  inputRef: shortcutInputRef,
-  commit: commitShortcut,
-  startListening: startListeningShortcut,
-  onBlur: onShortcutBlur,
-  onKeydown: onShortcutKeydown,
-} = useShortcutRecorder({
-  initial: normalizeShortcutDisplay(store.state.config.global_shortcut),
-  label: '全局快捷键',
-  save: (v) => store.setGlobalShortcut(v),
-  showToast,
-})
+// ---- 大类面板：按需加载 ----
+// 首次打开设置只加载「外壳 + 当前大类」的代码，切到大类时才去取对应面板。
+// 面板在 ./settings/ 下，样式统一在 ./settings/shared.css（规则带 .settings-view 前缀）。
+const PANEL_LOADERS = {
+  general: () => import('./settings/GeneralPanel.vue'),
+  appearance: () => import('./settings/AppearancePanel.vue'),
+  workbench: () => import('./settings/WorkbenchPanel.vue'),
+  features: () => import('./settings/FeaturesPanel.vue'),
+  extensions: () => import('./settings/ExtensionsPanel.vue'),
+  account: () => import('./settings/AccountPanel.vue'),
+  data: () => import('./settings/DataPanel.vue'),
+} as const
 
-const {
-  value: clipShortcut,
-  saved: clipSavedShortcut,
-  error: clipError,
-  listening: clipListening,
-  inputRef: clipInputRef,
-  commit: commitClipShortcut,
-  startListening: startListenClipShortcut,
-  onBlur: onClipShortcutBlur,
-  onKeydown: onClipShortcutKeydown,
-} = useShortcutRecorder({
-  initial: normalizeShortcutDisplay(store.state.config.clipboard_shortcut ?? 'Ctrl+`'),
-  label: '剪贴板快捷键',
-  save: (v) => store.setClipboardShortcut(v),
-  showToast,
-})
-
-// inputRef 仅在模板 ref 绑定中使用（把 DOM 输入框连到 recorder 内部，点击「录入」自动聚焦），
-// vue-tsc 不把模板 ref 视为「读取」，这里显式求值一次以通过 noUnusedLocals
-void shortcutInputRef
-void clipInputRef
-
-onMounted(async () => {
-  if (!isTauri()) return
-  shortcut.value = normalizeShortcutDisplay(await tauriApi.getGlobalShortcut())
-  clipShortcut.value = normalizeShortcutDisplay(store.state.config.clipboard_shortcut ?? 'Ctrl+`')
-  clipSavedShortcut.value = clipShortcut.value
-  clipMaxItems.value = store.state.config.clipboard_max_items ?? 500
-  clipTtlDays.value = store.state.config.clipboard_ttl_days ?? 7
-  pasteMethod.value = store.state.config.clipboard_paste_method ?? 'auto'
-  void loadDataPath()
-  void refreshAutostartStatus()
-  // 支持外部定位到指定分类（如 AI 对话面板「去配置」跳转）
-  if (props.initialSection) {
-    const target = props.initialSection as SectionId
-    if (SECTIONS.some((s) => s.id === target)) {
-      activeSection.value = target
-      void nextTick(() => goToSection(target))
-    }
-  }
-})
-
-function onToggleCountdownSound() {
-  void store.setCountdownSound(!store.state.config.countdown_sound)
-}
-
-function onToggleSidebar() {
-  void store.setSidebarToggle(!store.state.config.sidebar_toggle)
-}
-
-// ---- 开机自启动 ----
-const autostartBusy = ref(false)
-// 系统真实状态探测：区分「用户开了开关」与「登录时是否真的会拉起」
-const autostartStatus = ref<AutostartStatus | null>(null)
-// 意图为开、但实际不会生效 → 判定失效，提示修复
-const autostartFailed = computed(
-  () => !!autostartStatus.value && autostartStatus.value.configured && !autostartStatus.value.enabled,
-)
-const autostartFailReason = computed(() => {
-  const s = autostartStatus.value
-  if (!s) return ''
-  if (s.os_disabled) return '已被系统或安全软件在「启动项」中禁用'
-  if (!s.registered) return '注册信息丢失或程序路径已变更'
-  return '当前不会开机自启'
-})
-
-async function refreshAutostartStatus() {
-  if (!isTauri()) return
-  try {
-    autostartStatus.value = await tauriApi.getRunAtStartup()
-  } catch {
-    // 探测失败不影响开关本身，保持上次值
-  }
-}
-
-// 一键修复：重新按当前 exe 写入 Run 键并清掉系统的「禁用启动项」标记
-async function repairAutostart() {
-  if (autostartBusy.value) return
-  autostartBusy.value = true
-  try {
-    await store.setRunAtStartup(true)
-    await refreshAutostartStatus()
-    showToast(autostartFailed.value ? '修复未完全生效，请检查安全软件启动项设置' : '开机自启动已修复')
-  } catch (e) {
-    showToast(`修复失败：${String(e)}`)
-  } finally {
-    autostartBusy.value = false
-  }
-}
-
-async function onToggleAutostart() {
-  if (autostartBusy.value) return
-  autostartBusy.value = true
-  const next = !store.state.config.run_at_startup
-  try {
-    await store.setRunAtStartup(next)
-    await refreshAutostartStatus()
-    showToast(next ? '已开启开机自启动' : '已关闭开机自启动')
-  } catch (e) {
-    showToast(`设置失败：${String(e)}`)
-  } finally {
-    autostartBusy.value = false
-  }
-}
-
-function onChatPanelOpacityInput(e: Event) {
-  const v = Number((e.target as HTMLInputElement).value)
-  void store.setChatPanelOpacity(v)
-}
-
-const CHAT_PANEL_SIDE_OPTIONS = [
-  { value: 'right', label: '右侧' },
-  { value: 'left', label: '左侧' },
-  { value: 'top', label: '顶部' },
-  { value: 'bottom', label: '底部' },
-] as const
-
-async function onChatPanelSideChange(value: string) {
-  const side = value as 'left' | 'right' | 'top' | 'bottom'
-  await store.setChatPanelSide(side)
-  showToast(`AI 对话面板已改为从${['右侧', '左侧', '顶部', '底部'][['right', 'left', 'top', 'bottom'].indexOf(side)]}滑出`)
-}
-
-// AI 对话形态：独立小窗 / 主窗内嵌抽屉（互斥）。开关经后端专用命令落地建窗/隐窗
-const chatWindowMode = computed(() => !!store.state.config.chat_window_mode)
-
-async function onToggleChatWindowMode() {
-  const next = !chatWindowMode.value
-  try {
-    await store.setChatWindowMode(next)
-    showToast(next ? 'AI 对话已改为独立窗口打开' : 'AI 对话已改回主窗内嵌面板')
-  } catch {
-    showToast('切换失败，请重试')
-  }
-}
-
-// ---- 字体大小（全局 + 单模块） ----
-const FONT_MODULES = [
-  { key: 'sticky', label: '便签', configKey: 'font_sticky' },
-  { key: 'notes', label: '速记', configKey: 'font_notes' },
-  { key: 'prompt', label: '提示词', configKey: 'font_prompt' },
-  { key: 'todo', label: '待办', configKey: 'font_todo' },
-] as const
-
-type FontModuleKey = (typeof FONT_MODULES)[number]['key']
-
-// 字体大小折叠块：默认收起，减少设置页纵向占用
-const fontExpanded = ref(false)
-
-function onFontScaleInput(e: Event) {
-  void store.setFontScale(Number((e.target as HTMLInputElement).value))
-}
-
-function onModuleFontInput(key: FontModuleKey, e: Event) {
-  void store.setModuleFontScale(key, Number((e.target as HTMLInputElement).value))
-}
-
-// ---- 时钟卡片语录（回车/失焦自动保存，清空则回退默认） ----
-const clockQuote = ref(store.state.config.clock_quote ?? '')
-const savedClockQuote = ref(clockQuote.value)
-
-function commitClockQuote() {
-  const value = clockQuote.value.trim()
-  clockQuote.value = value
-  if (value === savedClockQuote.value) return
-  savedClockQuote.value = value
-  void store.setClockQuote(value)
-  showToast(value ? '时钟卡片语录已更新' : '时钟卡片语录已改为随机名言金句')
-}
-
-// ---- 联网 / 在线服务 ----
-const weatherCityInput = ref(store.state.config.weather_city ?? '')
-const weatherSaving = ref(false)
-
-async function onToggleOnline() {
-  if (!isTauri()) return
-  const next = !store.state.config.online_enabled
-  await store.setOnlineEnabled(next)
-  showToast(next ? '已开启联网功能' : '已关闭联网功能')
-}
-
-async function applyWeatherCity() {
-  const city = weatherCityInput.value.trim()
-  if (!city) {
-    showToast('请输入城市名')
-    return
-  }
-  weatherSaving.value = true
-  try {
-    const loc = await store.setWeatherCity(city)
-    weatherCityInput.value = loc.name
-    showToast(`天气已设为 ${loc.name}`)
-  } catch (e) {
-    showToast(`设置城市失败：${String(e)}`)
-  } finally {
-    weatherSaving.value = false
-  }
-}
-
-async function onLocateByIp() {
-  weatherSaving.value = true
-  try {
-    const loc = await store.locateWeatherByIp()
-    weatherCityInput.value = loc.name
-    showToast(`已定位到 ${loc.name}`)
-  } catch (e) {
-    showToast(`自动定位失败：${String(e)}`)
-  } finally {
-    weatherSaving.value = false
-  }
-}
-
-const QUOTE_SOURCE_OPTIONS = [
-  { value: 'online', label: '在线名言（联网时随机，离线回退本地）' },
-  { value: 'local', label: '本地语料（仅内置金句）' },
-] as const
-
-const quoteSource = ref(store.state.config.quote_source ?? 'online')
-
-function onQuoteSourceChange(value: string) {
-  quoteSource.value = value
-  if (!isTauri()) return
-  void store.setQuoteSource(value as 'online' | 'local').then(() => {
-    showToast(value === 'online' ? '名言来源已设为在线' : '名言来源已设为本地语料')
+/** 面板加载占位：delay 0 —— 宁可闪一下占位，也不要出现空白（见 index.vue 的同类说明） */
+const withPanelPlaceholder = (loader: () => Promise<unknown>) =>
+  defineAsyncComponent({
+    loader: loader as () => Promise<never>,
+    loadingComponent: PanelLoading,
+    delay: 0,
   })
+
+const PANELS: Record<GroupId, ReturnType<typeof defineAsyncComponent>> = {
+  general: withPanelPlaceholder(PANEL_LOADERS.general),
+  appearance: withPanelPlaceholder(PANEL_LOADERS.appearance),
+  workbench: withPanelPlaceholder(PANEL_LOADERS.workbench),
+  features: withPanelPlaceholder(PANEL_LOADERS.features),
+  extensions: withPanelPlaceholder(PANEL_LOADERS.extensions),
+  account: withPanelPlaceholder(PANEL_LOADERS.account),
+  data: withPanelPlaceholder(PANEL_LOADERS.data),
 }
 
-const RUNTIME_STRATEGY_OPTIONS = [
-  { value: 'auto', label: '自动检测（系统优先，缺失自动下载内置）' },
-  { value: 'builtin', label: '始终内置（统一用下载的内置运行时）' },
-  { value: 'system', label: '始终系统（只用系统 Node，不下载）' },
-] as const
-
-function onRuntimeStrategyChange(value: string) {
-  void store.setRuntimeStrategy(value as 'auto' | 'builtin' | 'system').then(() => {
-    showToast('运行时策略已更新，下次启动 service 扩展生效')
-  })
+/** 鼠标移到大类就先把它那份代码取下来：点下去时通常已在内存里，切大类不再等 */
+function preloadPanel(id: GroupId) {
+  void PANEL_LOADERS[id]()
 }
 
-// ---- 数据存储路径 ----
-const dataPathInfo = ref<DataPathInfo | null>(null)
-const changeDataTarget = ref<string | null>(null)
-const changeDataBusy = ref(false)
+const currentPanel = computed(() => PANELS[activeGroup.value])
 
-const dataPathLabel = computed(() => {
-  const info = dataPathInfo.value
-  if (!info) return '加载中…'
-  if (info.mode === 'portable') return `便携版 · ${info.path}`
-  return info.path
+
+// 深链（如 AI 对话面板的「去配置」）：先切到目标分区所属大类，再滚动定位。
+// 面板是异步加载的，DOM 不一定已挂上 —— goToSection 自带重试。
+onMounted(() => {
+  if (!props.initialSection) return
+  const target = props.initialSection as SectionId
+  if (!SECTIONS.some((s) => s.id === target)) return
+  activeGroup.value = SECTION_GROUP[target]
+  activeSection.value = target
+  void nextTick(() => goToSection(target))
 })
-
-async function loadDataPath() {
-  if (!isTauri()) return
-  try {
-    dataPathInfo.value = await tauriApi.getDataPath()
-  } catch (e) {
-    showToast(`读取数据路径失败：${String(e)}`)
-  }
-}
-
-async function onChangeDataDir() {
-  if (!isTauri() || dataPathInfo.value?.mode === 'portable') return
-  const dir = await open({ multiple: false, directory: true })
-  if (typeof dir !== 'string') return
-  if (dir === dataPathInfo.value?.path) {
-    showToast('所选目录与当前目录相同')
-    return
-  }
-  changeDataTarget.value = dir
-}
-
-function cancelChangeDataDir() {
-  changeDataTarget.value = null
-}
-
-async function confirmChangeDataDir() {
-  if (!changeDataTarget.value || changeDataBusy.value) return
-  changeDataBusy.value = true
-  try {
-    await tauriApi.changeDataDir(changeDataTarget.value)
-    changeDataTarget.value = null
-    showToast('数据已迁移，即将重启')
-    setTimeout(() => void tauriApi.restartApp(), 700)
-  } catch (e) {
-    showToast(`迁移失败：${String(e)}`)
-  } finally {
-    changeDataBusy.value = false
-  }
-}
-
-// ---- 数据备份 / 恢复 ----
-const confirmRestore = ref(false)
-let confirmTimer: ReturnType<typeof setTimeout> | null = null
-
-async function backupData() {
-  if (!isTauri()) return
-  const dir = await open({ multiple: false, directory: true })
-  if (typeof dir !== 'string') return
-  try {
-    const name = await tauriApi.backupData(dir)
-    showToast(`备份完成：${name}`)
-  } catch (e) {
-    showToast(`备份失败：${String(e)}`)
-  }
-}
-
-async function restoreData() {
-  if (!isTauri()) return
-  // 两段式确认：第二次点击才执行
-  if (!confirmRestore.value) {
-    confirmRestore.value = true
-    if (confirmTimer) clearTimeout(confirmTimer)
-    confirmTimer = setTimeout(() => {
-      confirmRestore.value = false
-    }, 3000)
-    return
-  }
-  confirmRestore.value = false
-  const file = await open({
-    multiple: false,
-    directory: false,
-    filters: [{ name: '备份压缩包', extensions: ['zip'] }],
-  })
-  if (typeof file !== 'string') return
-  try {
-    await tauriApi.restoreData(file)
-    showToast('恢复已暂存，重启应用后生效')
-  } catch (e) {
-    showToast(`恢复失败：${String(e)}`)
-  }
-}
-
-// ---- 剪贴板保留策略 ----
-const clipMaxItems = ref(500)
-const clipTtlDays = ref(7)
-const clipRetentionSaving = ref(false)
-
-function commitClipRetention() {
-  const maxItems = Math.round(clipMaxItems.value)
-  const ttlDays = Math.round(clipTtlDays.value)
-  if (!isTauri() || clipRetentionSaving.value) return
-  if (maxItems === store.state.config.clipboard_max_items && ttlDays === store.state.config.clipboard_ttl_days) return
-  clipRetentionSaving.value = true
-  void store
-    .setClipboardRetention(maxItems, ttlDays)
-    .then(() => showToast(`保留策略已更新：最多 ${maxItems} 条 / ${ttlDays} 天`))
-    .catch((e) => {
-      void reportClientError('更新剪贴板保留策略失败', e)
-    })
-    .finally(() => {
-      clipRetentionSaving.value = false
-    })
-}
-
-async function onToggleClipboardPause() {
-  if (!isTauri()) return
-  const next = !store.state.config.clipboard_paused
-  await store.setClipboardPaused(next)
-  showToast(next ? '剪贴板已暂停记录' : '剪贴板已恢复记录')
-}
-
-// ---- 粘贴快捷键方式 ----
-const PASTE_METHOD_OPTIONS = [
-  { value: 'auto', label: '自动（终端用 Ctrl+Shift+V，其他用 Ctrl+V）' },
-  { value: 'ctrl_v', label: 'Ctrl+V' },
-  { value: 'ctrl_shift_v', label: 'Ctrl+Shift+V' },
-  { value: 'shift_insert', label: 'Shift+Insert' },
-] as const
-
-const pasteMethod = ref(store.state.config.clipboard_paste_method ?? 'auto')
-
-function onPasteMethodChange(value: string) {
-  pasteMethod.value = value
-  if (!isTauri()) return
-  void tauriApi
-    .setClipboardPasteMethod(value)
-    .then(() => showToast(`粘贴方式已更新为 ${PASTE_METHOD_OPTIONS.find((o) => o.value === value)?.label ?? value}`))
-    .catch((e) => {
-      void reportClientError('更新粘贴方式失败', e)
-    })
-}
-
-async function onClearClipboard() {
-  if (!isTauri()) return
-  try {
-    await tauriApi.clipboardClear()
-    showToast('剪贴板历史已清空')
-  } catch (e) {
-    showToast(`清空失败：${String(e)}`)
-  }
-}
-
-// ---- 主题设置 ----
-const COLOR_PRESETS = [
-  { id: 'indigo', name: '靛紫', color: '#5b5bf5' },
-  { id: 'green', name: '护眼绿', color: '#059669' },
-  { id: 'morandi', name: '莫兰迪', color: '#7c7c8a' },
-  { id: 'midnight', name: '午夜蓝', color: '#2f54eb' },
-  { id: 'rose', name: '玫瑰红', color: '#e11d48' },
-  { id: 'amber', name: '琥珀金', color: '#d97706' },
-  { id: 'teal', name: '青碧', color: '#0d9488' },
-  { id: 'violet', name: '紫罗兰', color: '#7c3aed' },
-  { id: 'sky', name: '天蓝', color: '#0284c7' },
-  { id: 'slate', name: '墨石', color: '#475569' },
-] as const
-// 渐变背景预设：色卡显示渐变预览，点击仅覆盖 body 背景（--app-bg），UI 强调色取主色
-const GRADIENT_PRESETS = [
-  { id: 'grad-star', name: '星夜', color: '#6d5dfc', gradient: 'linear-gradient(150deg, #4f46e5, #a855f7)' },
-  { id: 'grad-sunset', name: '落日', color: '#f4572e', gradient: 'linear-gradient(150deg, #f97316, #e11d48)' },
-  { id: 'grad-aurora', name: '极光', color: '#0891b2', gradient: 'linear-gradient(150deg, #06b6d4, #8b5cf6)' },
-  { id: 'grad-rose', name: '玫瑰', color: '#e11d48', gradient: 'linear-gradient(150deg, #f43f5e, #a855f7)' },
-  { id: 'grad-forest', name: '森林', color: '#059669', gradient: 'linear-gradient(150deg, #10b981, #3b82f6)' },
-  { id: 'grad-gold', name: '鎏金', color: '#d97706', gradient: 'linear-gradient(150deg, #f59e0b, #ef4444)' },
-  { id: 'grad-ocean', name: '深海', color: '#2563eb', gradient: 'linear-gradient(150deg, #3b82f6, #14b8a6)' },
-  { id: 'grad-grape', name: '葡萄', color: '#8b5cf6', gradient: 'linear-gradient(150deg, #a855f7, #ec4899)' },
-  { id: 'grad-flame', name: '焰火', color: '#ef4444', gradient: 'linear-gradient(150deg, #ef4444, #f59e0b)' },
-  { id: 'grad-graphite', name: '石墨', color: '#64748b', gradient: 'linear-gradient(150deg, #64748b, #2563eb)' },
-] as const
-const PRESET_ACCENT: Record<string, string> = {
-  indigo: '#5b5bf5', green: '#059669', morandi: '#7c7c8a', midnight: '#2f54eb', rose: '#e11d48', amber: '#d97706', teal: '#0d9488', violet: '#7c3aed', sky: '#0284c7', slate: '#475569',
-  'grad-star': '#6d5dfc', 'grad-sunset': '#f4572e', 'grad-aurora': '#0891b2', 'grad-rose': '#e11d48', 'grad-forest': '#059669', 'grad-gold': '#d97706', 'grad-ocean': '#2563eb', 'grad-grape': '#8b5cf6', 'grad-flame': '#ef4444', 'grad-graphite': '#64748b',
-}
-const ACCENT_PRESETS = ['#5b5bf5', '#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#0ea5e9']
-const themeMode = computed(() => store.state.config.theme_mode)
-const themePreset = computed(() => store.state.config.theme_preset)
-const themeAccent = computed(() => store.state.config.accent_color)
-function onAccentInput(e: Event) {
-  store.setAccentColor((e.target as HTMLInputElement).value)
-}
-
 
 </script>
 
@@ -603,1578 +237,78 @@ function onAccentInput(e: Event) {
     </header>
 
     <div class="sv-body">
-      <!-- 左侧分类导航 -->
+      <!-- 左侧分类：顶部搜索框 + 大类/子项两级导航（搜索时用结果列表替换导航） -->
       <nav class="sv-nav" aria-label="设置分类">
-        <button
-          v-for="sec in SECTIONS"
-          :key="sec.id"
-          type="button"
-          class="sv-nav-item"
-          :class="{ active: activeSection === sec.id }"
-          :aria-current="activeSection === sec.id ? 'true' : undefined"
-          @click="goToSection(sec.id)"
-        >
-          {{ sec.label }}
-        </button>
+        <div class="sv-search">
+          <Search :size="13" :stroke-width="2" />
+          <input
+            v-model="query"
+            class="sv-search-input"
+            type="text"
+            placeholder="搜索设置项"
+            aria-label="搜索设置项"
+            @keydown.esc="query = ''"
+          />
+          <button
+            v-if="query"
+            class="sv-search-clear"
+            type="button"
+            aria-label="清空搜索"
+            @click="query = ''"
+          >
+            <X :size="12" :stroke-width="2" />
+          </button>
+        </div>
+
+        <template v-if="query.trim()">
+          <button
+            v-for="r in searchResults"
+            :key="`${r.section}:${r.title}`"
+            type="button"
+            class="sv-nav-item sv-nav-hit"
+            @click="jumpToSetting(r.section, r.title)"
+          >
+            <span class="sv-hit-title">{{ r.title }}</span>
+            <span class="sv-hit-where">{{ r.where }}</span>
+          </button>
+          <p v-if="!searchResults.length" class="sv-hit-empty">没有匹配的设置项</p>
+        </template>
+
+        <template v-else>
+          <template v-for="g in GROUPS" :key="g.id">
+            <button
+              type="button"
+              class="sv-nav-item sv-nav-group"
+              :class="{ active: activeGroup === g.id }"
+              :aria-expanded="activeGroup === g.id"
+              @click="selectGroup(g.id)"
+              @mouseenter="preloadPanel(g.id)"
+            >
+              <component :is="g.icon" :size="14" :stroke-width="2" />
+              <span>{{ g.label }}</span>
+            </button>
+            <template v-if="activeGroup === g.id">
+              <button
+                v-for="sid in sectionsOf(g.id)"
+                :key="sid"
+                type="button"
+                class="sv-nav-item sv-nav-sub"
+                :class="{ active: activeSection === sid }"
+                :aria-current="activeSection === sid ? 'true' : undefined"
+                @click="goToSection(sid)"
+              >
+                {{ SECTION_LABEL[sid] }}
+              </button>
+            </template>
+          </template>
+        </template>
       </nav>
 
-      <!-- 右侧内容：全量渲染，分类仅作滚动锚点 -->
+      <!-- 右侧内容：只挂载当前大类的分区（其余不渲染 —— 这是点设置不再先空白的关键） -->
       <div ref="contentRef" class="sv-content">
-        <!-- 常规 -->
-        <section id="sv-sec-general" class="sv-sec" aria-label="常规">
-          <h3 class="sv-sec-title">常规</h3>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">开机自动启动</span>
-              <span class="setting-desc">登录 Windows 后自动在后台运行并驻留托盘（不弹出主窗口，点托盘图标可随时唤出）</span>
-              <span v-if="autostartFailed" class="autostart-warn">
-                ⚠ 开机自启动已失效：{{ autostartFailReason }}
-                <button type="button" class="autostart-repair" :disabled="autostartBusy" @click="repairAutostart">
-                  重新启用
-                </button>
-              </span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.run_at_startup"
-              :class="{ on: store.state.config.run_at_startup }"
-              :disabled="autostartBusy"
-              @click="onToggleAutostart"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-        </section>
-
-        <!-- 悬浮球（桌面快捷入口，ADR 0004）：启用/贴边自动隐藏/同显/环形按钮集中在此分类 -->
-        <section id="sv-sec-ball" class="sv-sec" aria-label="悬浮球">
-          <h3 class="sv-sec-title">悬浮球</h3>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">桌面悬浮球</span>
-              <span class="setting-desc">主窗口隐藏/最小化时在桌面显示悬浮球（可开启下方「与主窗口同时显示」常驻）：单击展开环形快捷菜单，双击显示主窗口，右键快捷菜单，可拖拽，贴边自动隐藏一半</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.floating_ball_enabled"
-              :class="{ on: store.state.config.floating_ball_enabled }"
-              @click="onToggleFloatingBall"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">悬浮球贴边自动隐藏</span>
-              <span class="setting-desc">拖到屏幕边缘附近松手时自动半隐：球体贴边只露出一半，鼠标悬停时完整滑出，移开再隐回</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.floating_ball_auto_hide"
-              :class="{ on: store.state.config.floating_ball_auto_hide }"
-              :disabled="!store.state.config.floating_ball_enabled"
-              @click="onToggleFloatingBallAutoHide"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">与主窗口同时显示</span>
-              <span class="setting-desc">开启后悬浮球常驻桌面：主窗口显示时也不隐藏，单击球仍可展开菜单</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.floating_ball_with_main"
-              :class="{ on: store.state.config.floating_ball_with_main }"
-              :disabled="!store.state.config.floating_ball_enabled"
-              @click="onToggleFloatingBallWithMain"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <div class="setting-row fb-btn-row">
-            <div class="setting-info">
-              <span class="setting-name">环形菜单按钮</span>
-              <span class="setting-desc">单击悬浮球展开的按钮集合（最多 {{ FLOATING_BALL_MAX_BUTTONS }} 个）：下方按钮点击添加，已选中的可上移/下移/移除。「AI 对话」按「AI 助手 → 以独立窗口打开」的设置决定唤起独立小窗还是主窗抽屉</span>
-            </div>
-            <div class="fb-btn-cfg">
-              <div class="fb-btn-list">
-                <span v-for="(id, i) in ballButtons" :key="id" class="fb-chip">
-                  {{ FLOATING_BALL_BUTTONS[id]?.label ?? id }}
-                  <button type="button" class="fb-chip-btn" :disabled="i === 0" aria-label="上移" @click="moveBallButton(i, -1)">↑</button>
-                  <button type="button" class="fb-chip-btn" :disabled="i === ballButtons.length - 1" aria-label="下移" @click="moveBallButton(i, 1)">↓</button>
-                  <button type="button" class="fb-chip-btn fb-chip-remove" aria-label="移除" @click="removeBallButton(id)">×</button>
-                </span>
-                <span v-if="ballButtons.length === 0" class="fb-chip-empty">未配置（悬浮球仅支持拖拽/双击）</span>
-              </div>
-              <div class="fb-btn-add">
-                <button
-                  v-for="(meta, id) in FLOATING_BALL_BUTTONS"
-                  :key="id"
-                  type="button"
-                  class="fb-chip-add"
-                  :disabled="ballButtons.includes(id) || ballButtons.length >= FLOATING_BALL_MAX_BUTTONS"
-                  @click="addBallButton(id)"
-                >
-                  + {{ meta.label }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- AI 助手 -->
-        <section id="sv-sec-ai" class="sv-sec" aria-label="AI 助手">
-          <h3 class="sv-sec-title">AI 助手</h3>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">以独立窗口打开 AI 对话</span>
-              <span class="setting-desc">开启后对话变为可缩放、可置顶的独立小窗：标题栏按钮、Ctrl+Shift+K 与悬浮球「AI 对话」入口都唤起它，主窗内嵌抽屉随之停用（两种形态互斥）</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="chatWindowMode"
-              :class="{ on: chatWindowMode }"
-              @click="onToggleChatWindowMode"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">AI 对话面板透明度</span>
-              <span class="setting-desc">{{ chatWindowMode ? '仅内嵌面板生效（当前为独立窗口形态）' : '对话抽屉的整体不透明度（50% – 100%）' }}</span>
-            </div>
-            <div class="opacity-edit">
-              <input
-                class="opacity-slider"
-                type="range"
-                min="0.5"
-                max="1"
-                step="0.05"
-                :value="store.state.config.chat_panel_opacity ?? 1"
-                :aria-label="'AI 对话面板透明度'"
-                :disabled="chatWindowMode"
-                @input="onChatPanelOpacityInput"
-              />
-              <span class="opacity-value">{{ Math.round((store.state.config.chat_panel_opacity ?? 1) * 100) }}%</span>
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">AI 对话面板位置</span>
-              <span class="setting-desc">{{ chatWindowMode ? '仅内嵌面板生效（独立窗口可自由拖动摆放）' : '对话抽屉从上下左右哪个方位滑出（左右方位可拖拽调宽，上下方位可拖拽调高）' }}</span>
-            </div>
-            <AppSelect
-              :model-value="store.state.config.chat_panel_side ?? 'right'"
-              :options="CHAT_PANEL_SIDE_OPTIONS"
-              aria-label="AI 对话面板位置"
-              class="chat-panel-side"
-              :disabled="chatWindowMode"
-              @update:model-value="onChatPanelSideChange"
-            />
-          </div>
-
-          <AiProviders />
-        </section>
-
-        <!-- 外观 -->
-        <section id="sv-sec-appearance" class="sv-sec" aria-label="外观">
-          <h3 class="sv-sec-title">外观</h3>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">侧边栏展开功能</span>
-              <span class="setting-desc">开启后侧栏底部显示展开/收起按钮（默认关闭，侧栏默认收起）</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.sidebar_toggle"
-              :class="{ on: store.state.config.sidebar_toggle }"
-              @click="onToggleSidebar"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <!-- 主题设置：标签 + 控件布局 -->
-          <div class="setting-group theme-group">
-            <!-- ① 主题模式 + 明暗模式 -->
-            <div class="theme-row">
-              <span class="theme-label">主题模式</span>
-              <div class="theme-mode-seg" role="radiogroup" aria-label="明暗模式">
-                <button
-                  role="radio"
-                  :aria-checked="themeMode === 'light'"
-                  :class="{ on: themeMode === 'light' }"
-                  @click="void store.setThemeMode('light')"
-                >
-                  亮色
-                </button>
-                <button
-                  role="radio"
-                  :aria-checked="themeMode === 'dark'"
-                  :class="{ on: themeMode === 'dark' }"
-                  @click="void store.setThemeMode('dark')"
-                >
-                  暗色
-                </button>
-                <button
-                  role="radio"
-                  :aria-checked="themeMode === 'system'"
-                  :class="{ on: themeMode === 'system' }"
-                  @click="void store.setThemeMode('system')"
-                >
-                  跟随系统
-                </button>
-              </div>
-            </div>
-
-            <!-- ② 主题配色：单色 + 渐变两组，色卡整块放标签正下方 -->
-            <div class="theme-row theme-row-stack">
-              <span class="theme-label">主题配色</span>
-              <div class="theme-presets" role="radiogroup" aria-label="主题配色">
-                <span class="theme-sublabel">单色</span>
-                <button
-                  v-for="p in COLOR_PRESETS"
-                  :key="p.id"
-                  role="radio"
-                  :aria-checked="themePreset === p.id"
-                  :class="{ on: themePreset === p.id }"
-                  @click="void store.setThemePreset(p.id)"
-                >
-                  <span class="preset-swatch" :style="{ background: p.color }"></span>
-                  <span class="preset-name">{{ p.name }}</span>
-                </button>
-                <span class="theme-sublabel">渐变</span>
-                <button
-                  v-for="p in GRADIENT_PRESETS"
-                  :key="p.id"
-                  role="radio"
-                  :aria-checked="themePreset === p.id"
-                  :class="{ on: themePreset === p.id }"
-                  @click="void store.setThemePreset(p.id)"
-                >
-                  <span class="preset-swatch" :style="{ background: p.gradient }"></span>
-                  <span class="preset-name">{{ p.name }}</span>
-                </button>
-              </div>
-            </div>
-
-            <!-- ③ 强调色：预设档 + 取色器 + 重置 -->
-            <div class="theme-row">
-              <span class="theme-label">强调色</span>
-              <div class="theme-accent">
-                <div class="accent-dots" role="radiogroup" aria-label="强调色预设">
-                  <button
-                    v-for="c in ACCENT_PRESETS"
-                    :key="c"
-                    role="radio"
-                    :aria-checked="themeAccent === c"
-                    :class="{ on: themeAccent === c }"
-                    :style="{ background: c }"
-                    :title="c"
-                    @click="void store.setAccentColor(c)"
-                  ></button>
-                </div>
-                <div class="accent-custom">
-                  <input
-                    type="color"
-                    :value="themeAccent ?? PRESET_ACCENT[themePreset]"
-                    @input="onAccentInput"
-                    aria-label="自定义强调色"
-                  />
-                  <button
-                    v-if="themeAccent"
-                    class="ghost-btn accent-reset"
-                    @click="void store.setAccentColor(null)"
-                  >
-                    重置
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- ④ 应用壁纸：主窗口所有视图共用，浮窗不跟随；模糊为整屏静态层（ADR 0002）。
-                 壁纸单一套，所有主题模式共用同一张图片与蒙版 -->
-            <div class="theme-row theme-row-stack">
-              <span class="theme-label">应用壁纸</span>
-              <div class="wallpaper-box">
-                <div class="wallpaper-preview" :class="{ empty: !wallpaperSrc }">
-                  <img v-if="wallpaperSrc" :src="wallpaperSrc" alt="壁纸预览" />
-                  <span v-else class="wallpaper-empty">未设置壁纸（当前使用主题渐变背景）</span>
-                </div>
-                <div class="wallpaper-actions">
-                  <button class="ghost-btn" @click="pickWallpaper">
-                    {{ wallpaperSrc ? '更换图片' : '选择图片' }}
-                  </button>
-                  <button v-if="wallpaperSrc" class="ghost-btn" @click="clearWallpaper">
-                    清除壁纸
-                  </button>
-                </div>
-                <div v-if="wallpaperSrc" class="setting-row wallpaper-blur-row">
-                  <div class="setting-info">
-                    <span class="setting-name">壁纸蒙版</span>
-                    <span class="setting-desc">叠一层主题底色，改善文字与图标对比度；0% 壁纸最鲜亮，越高越接近原背景</span>
-                  </div>
-                  <div class="font-edit">
-                    <input
-                      class="opacity-slider"
-                      type="range"
-                      min="0"
-                      max="0.85"
-                      step="0.01"
-                      :value="store.state.config.wallpaper_veil"
-                      aria-label="壁纸蒙版"
-                      @input="onWallpaperVeilInput"
-                    />
-                    <span class="opacity-value">{{ Math.round(store.state.config.wallpaper_veil * 100) }}%</span>
-                  </div>
-                </div>
-                <div v-if="wallpaperSrc" class="setting-row wallpaper-blur-row">
-                  <div class="setting-info">
-                    <span class="setting-name">沉浸模式</span>
-                    <span class="setting-desc">卡片改用真毛玻璃：壁纸在卡片间隙完整清晰展示，卡内文字自动可读（低端核显滚动可能掉帧）</span>
-                  </div>
-                  <button
-                    class="toggle"
-                    role="switch"
-                    type="button"
-                    :aria-checked="store.state.config.wallpaper_immersive"
-                    :class="{ on: store.state.config.wallpaper_immersive }"
-                    @click="onToggleWallpaperImmersive"
-                  >
-                    <span class="toggle-knob"></span>
-                  </button>
-                </div>
-                <div v-if="wallpaperSrc && !store.state.config.wallpaper_immersive" class="setting-row wallpaper-blur-row">
-                  <div class="setting-info">
-                    <span class="setting-name">背景模糊</span>
-                    <span class="setting-desc">柔化整张壁纸（含卡片间空隙透出的部分），文字更易读；沉浸模式下不生效</span>
-                  </div>
-                  <button
-                    class="toggle"
-                    role="switch"
-                    type="button"
-                    :aria-checked="store.state.config.wallpaper_blur"
-                    :class="{ on: store.state.config.wallpaper_blur }"
-                    @click="onToggleWallpaperBlur"
-                  >
-                    <span class="toggle-knob"></span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- ⑤ 卡片玻璃透明度：全局卡片透底程度，无壁纸时对渐变背景同样生效 -->
-            <div class="theme-row">
-              <span class="theme-label">卡片玻璃透明度</span>
-              <div class="font-edit">
-                <input
-                  class="opacity-slider"
-                  type="range"
-                  min="0.4"
-                  max="1"
-                  step="0.01"
-                  :value="store.state.config.glass_opacity"
-                  aria-label="卡片玻璃透明度"
-                  @input="onGlassOpacityInput"
-                />
-                <span class="opacity-value">{{ Math.round(store.state.config.glass_opacity * 100) }}%</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- ④ 字体大小：全局 + 单模块（模块系数为相对全局的额外缩放，默认 100%）；折叠块默认收起 -->
-          <div class="setting-group font-group">
-            <button
-              class="font-group-head"
-              type="button"
-              :aria-expanded="fontExpanded"
-              @click="fontExpanded = !fontExpanded"
-            >
-              <h4 class="font-group-title">字体大小</h4>
-              <ChevronDown
-                :size="14"
-                :stroke-width="2"
-                class="font-group-chevron"
-                :class="{ open: fontExpanded }"
-              />
-            </button>
-            <div v-show="fontExpanded" class="font-group-body">
-              <div class="font-row">
-                <span class="font-label">全局字体大小</span>
-                <div class="font-edit">
-                  <input
-                    class="opacity-slider"
-                    type="range"
-                    min="0.85"
-                    max="1.3"
-                    step="0.01"
-                    :value="store.state.config.font_scale"
-                    aria-label="全局字体大小"
-                    @input="onFontScaleInput"
-                  />
-                  <span class="opacity-value">{{ Math.round(store.state.config.font_scale * 100) }}%</span>
-                </div>
-              </div>
-              <div v-for="m in FONT_MODULES" :key="m.key" class="font-row">
-                <span class="font-label">{{ m.label }}</span>
-                <div class="font-edit">
-                  <input
-                    class="opacity-slider"
-                    type="range"
-                    min="0.85"
-                    max="1.3"
-                    step="0.01"
-                    :value="store.state.config[m.configKey]"
-                    :aria-label="m.label + '字体大小'"
-                    @input="onModuleFontInput(m.key, $event)"
-                  />
-                  <span class="opacity-value">{{ Math.round(store.state.config[m.configKey] * 100) }}%</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- 工作台 -->
-        <section id="sv-sec-workbench" class="sv-sec" aria-label="工作台">
-          <h3 class="sv-sec-title">工作台</h3>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">自定义布局</span>
-              <span class="setting-desc">拖拽排列主界面的模块位置与显隐（时钟、待办、提示词等），推荐布局为 12×15 棋盘，完成后回到主页面</span>
-            </div>
-            <button class="ghost-btn data-btn" @click="emit('open-layout-editor')">打开编辑器</button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">倒计时到点提示音</span>
-              <span class="setting-desc">到点时额外播放提示音（默认关闭）</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.countdown_sound"
-              :class="{ on: store.state.config.countdown_sound }"
-              @click="onToggleCountdownSound"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">时钟卡片语录</span>
-              <span class="setting-desc">工作台时间卡片下方显示的一句话（留空则显示随机名言金句，点击可换一条）</span>
-            </div>
-            <div class="quote-edit">
-              <input
-                v-model="clockQuote"
-                class="field-input"
-                type="text"
-                maxlength="50"
-                placeholder="留空显示随机名言金句"
-                spellcheck="false"
-                @blur="commitClockQuote"
-                @keydown.enter="commitClockQuote"
-              />
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">名言来源</span>
-              <span class="setting-desc">时钟卡片语录：在线随机名言，或仅用本地内置金句（点击语录可随机换一条）</span>
-            </div>
-            <AppSelect
-              :model-value="quoteSource"
-              :options="QUOTE_SOURCE_OPTIONS"
-              aria-label="名言来源"
-              class="quote-source"
-              @update:model-value="onQuoteSourceChange"
-            />
-          </div>
-        </section>
-
-        <!-- 快捷键 -->
-        <section id="sv-sec-shortcut" class="sv-sec" aria-label="快捷键">
-          <h3 class="sv-sec-title">快捷键</h3>
-          <div class="setting-row shortcut-row">
-            <div class="setting-info">
-              <span class="setting-name">全局快捷键</span>
-              <span class="setting-desc">支持手动输入或按键录入，无冲突自动保存</span>
-            </div>
-            <div class="shortcut-edit">
-              <div class="shortcut-input-wrap">
-                <Keyboard :size="14" :stroke-width="2" class="shortcut-icon" />
-                <input
-                  ref="shortcutInputRef"
-                  v-model="shortcut"
-                  class="shortcut-input"
-                  type="text"
-                  spellcheck="false"
-                  :readonly="shortcutListening"
-                  placeholder="Ctrl+Shift+Space"
-                  @keydown="onShortcutKeydown"
-                  @keydown.enter="commitShortcut"
-                  @blur="onShortcutBlur"
-                />
-                <button class="shortcut-record-btn" type="button" @click="startListeningShortcut">
-                  {{ shortcutListening ? '按下组合键…' : '录入' }}
-                </button>
-              </div>
-            </div>
-          </div>
-          <p v-if="shortcutError" class="shortcut-error">{{ shortcutError }}</p>
-
-          <div class="setting-row shortcut-row">
-            <div class="setting-info">
-              <span class="setting-name">剪贴板呼出快捷键</span>
-              <span class="setting-desc">任何应用中一键唤起剪贴板历史浮层</span>
-            </div>
-            <div class="shortcut-edit">
-              <div class="shortcut-input-wrap">
-                <Keyboard :size="14" :stroke-width="2" class="shortcut-icon" />
-                <input
-                  ref="clipInputRef"
-                  v-model="clipShortcut"
-                  class="shortcut-input"
-                  type="text"
-                  spellcheck="false"
-                  :readonly="clipListening"
-                  placeholder="Ctrl+`"
-                  @keydown="onClipShortcutKeydown"
-                  @keydown.enter="commitClipShortcut"
-                  @blur="onClipShortcutBlur"
-                />
-                <button class="shortcut-record-btn" type="button" @click="startListenClipShortcut">
-                  {{ clipListening ? '按下组合键…' : '录入' }}
-                </button>
-              </div>
-            </div>
-          </div>
-          <p v-if="clipError" class="shortcut-error">{{ clipError }}</p>
-        </section>
-
-        <!-- 剪贴板 -->
-        <section id="sv-sec-clipboard" class="sv-sec" aria-label="剪贴板">
-          <h3 class="sv-sec-title">剪贴板</h3>
-
-          <h4 class="sv-subtitle">保留策略</h4>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">保留条数上限</span>
-              <span class="setting-desc">总记录数上限（含置顶项，默认 500）</span>
-            </div>
-            <div class="num-edit">
-              <input
-                v-model.number="clipMaxItems"
-                class="num-input"
-                type="number"
-                min="20"
-                max="5000"
-                step="50"
-                @change="commitClipRetention"
-              />
-            </div>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">保留天数</span>
-              <span class="setting-desc">非置顶记录超过 N 天自动清理（默认 7 天）</span>
-            </div>
-            <div class="num-edit">
-              <input
-                v-model.number="clipTtlDays"
-                class="num-input"
-                type="number"
-                min="1"
-                max="365"
-                step="1"
-                @change="commitClipRetention"
-              />
-            </div>
-          </div>
-
-          <h4 class="sv-subtitle">记录行为</h4>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">粘贴方式</span>
-              <span class="setting-desc">自动模式下：终端/命令行（不支持 Ctrl+V）用 Ctrl+Shift+V，其他应用用 Ctrl+V</span>
-            </div>
-            <AppSelect
-              :model-value="pasteMethod"
-              :options="PASTE_METHOD_OPTIONS"
-              aria-label="粘贴方式"
-              @update:model-value="onPasteMethodChange"
-            />
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">暂停记录</span>
-              <span class="setting-desc">暂停期间复制的内容不会写入历史（已保存的记录保留）</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.clipboard_paused"
-              :class="{ on: store.state.config.clipboard_paused }"
-              @click="onToggleClipboardPause"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <h4 class="sv-subtitle">操作</h4>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">清空历史</span>
-              <span class="setting-desc">立即删除所有剪贴板记录（含置顶项），不可恢复</span>
-            </div>
-            <button class="ghost-btn data-btn danger" @click="onClearClipboard">
-              <Trash2 :size="14" :stroke-width="2" />
-              清空
-            </button>
-          </div>
-        </section>
-
-        <!-- 联网 -->
-        <section id="sv-sec-online" class="sv-sec" aria-label="联网">
-          <h3 class="sv-sec-title">联网</h3>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">联网功能</span>
-              <span class="setting-desc">开启后：有网时显示天气与在线名言；无网时自动隐藏在线内容（不影响本地功能）</span>
-            </div>
-            <button
-              class="toggle"
-              role="switch"
-              type="button"
-              :aria-checked="store.state.config.online_enabled"
-              :class="{ on: store.state.config.online_enabled }"
-              @click="onToggleOnline"
-            >
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">天气城市</span>
-              <span class="setting-desc">手动输入城市名（已内置全国主要城市，精确匹配）；IP 自动定位仅供参考、可能不准</span>
-            </div>
-            <div class="weather-edit">
-              <input
-                v-model="weatherCityInput"
-                class="field-input"
-                type="text"
-                maxlength="30"
-                placeholder="输入城市名，如：北京"
-                spellcheck="false"
-                @keydown.enter="applyWeatherCity"
-              />
-              <button
-                class="ghost-btn data-btn"
-                type="button"
-                :disabled="weatherSaving"
-                @click="applyWeatherCity"
-              >
-                <MapPin :size="14" :stroke-width="2" />
-                设置
-              </button>
-              <button
-                class="ghost-btn data-btn"
-                type="button"
-                :disabled="weatherSaving"
-                @click="onLocateByIp"
-              >
-                <LocateFixed :size="14" :stroke-width="2" />
-                自动定位
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <!-- 扩展 -->
-        <section id="sv-sec-extensions" class="sv-sec" aria-label="扩展">
-          <h3 class="sv-sec-title">扩展</h3>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">service 运行时策略</span>
-              <span class="setting-desc">service 扩展后端的 Node 运行时来源：自动检测 / 始终内置 / 始终系统</span>
-            </div>
-            <AppSelect
-              :model-value="store.state.config.runtime_strategy || 'auto'"
-              :options="RUNTIME_STRATEGY_OPTIONS"
-              aria-label="service 运行时策略"
-              @update:model-value="onRuntimeStrategyChange"
-            />
-          </div>
-        </section>
-
-        <!-- 数据 -->
-        <section id="sv-sec-data" class="sv-sec" aria-label="数据">
-          <h3 class="sv-sec-title">数据</h3>
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">数据存储路径</span>
-              <span class="setting-desc data-path">{{ dataPathLabel }}</span>
-            </div>
-            <button
-              class="ghost-btn data-btn"
-              :disabled="dataPathInfo?.mode === 'portable'"
-              :title="dataPathInfo?.mode === 'portable' ? '便携版数据跟随程序目录，不可更改' : '更改数据存储目录'"
-              @click="onChangeDataDir"
-            >
-              <FolderCog :size="14" :stroke-width="2" />
-              更改
-            </button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">数据备份</span>
-              <span class="setting-desc">数据库与图标，打包成压缩包</span>
-            </div>
-            <button class="ghost-btn data-btn" @click="backupData">
-              <Download :size="14" :stroke-width="2" />
-              备份
-            </button>
-          </div>
-
-          <div class="setting-row">
-            <div class="setting-info">
-              <span class="setting-name">数据恢复</span>
-              <span class="setting-desc">从备份压缩包恢复，重启后生效</span>
-            </div>
-            <button
-              class="ghost-btn data-btn"
-              :class="{ confirm: confirmRestore }"
-              @click="restoreData"
-            >
-              <Upload :size="14" :stroke-width="2" />
-              {{ confirmRestore ? '确认恢复？' : '恢复' }}
-            </button>
-          </div>
-
-          <p class="settings-foot">
-            <Lock :size="12" :stroke-width="2" class="settings-lock" aria-hidden="true" />
-            所有数据默认存储在本地，不会上传云端
-          </p>
-        </section>
-
-        <!-- 更改数据存储路径确认弹窗 -->
-        <Teleport to="body">
-          <Transition name="mask">
-            <div
-              v-if="changeDataTarget"
-              class="modal-mask"
-              role="presentation"
-              @click.self="cancelChangeDataDir"
-            >
-              <div
-                class="modal-card data-move-card"
-                role="dialog"
-                aria-modal="true"
-                aria-label="更改数据存储路径"
-              >
-                <h3 class="dm-title">迁移数据目录</h3>
-                <p class="dm-desc">是否确认将 x-hub 的所有数据挪到以下目录？确认后将重启软件。</p>
-                <div class="dm-paths">
-                  <div class="dm-path">
-                    <span class="dm-label">新目录</span>
-                    <span class="dm-val">{{ changeDataTarget }}</span>
-                  </div>
-                </div>
-                <footer class="dm-footer">
-                  <button class="ghost-btn" type="button" @click="cancelChangeDataDir">取消</button>
-                  <button
-                    class="pill-btn"
-                    type="button"
-                    :disabled="changeDataBusy"
-                    @click="confirmChangeDataDir"
-                  >
-                    {{ changeDataBusy ? '迁移中…' : '确认迁移' }}
-                  </button>
-                </footer>
-              </div>
-            </div>
-          </Transition>
-        </Teleport>
-
-        <!-- 关于 -->
-        <section id="sv-sec-about" class="sv-sec" aria-label="关于">
-          <h3 class="sv-sec-title">关于</h3>
-          <AboutSection />
-        </section>
+        <!-- 当前大类面板（按需加载）：具体设置项都在 ./settings/*.vue 里 -->
+        <component :is="currentPanel" @open-layout-editor="emit('open-layout-editor')" />
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.settings-view {
-  height: 100%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  overflow: hidden;
-}
-.sv-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-.sv-title {
-  flex: 1;
-  margin: 0;
-  font-size: 1.125rem;
-  font-weight: 700;
-  color: var(--text-1);
-}
-
-/* 双栏主体 */
-.sv-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  gap: var(--space-4);
-  overflow: hidden;
-}
-/* 左侧分类导航：纯文字列表 */
-.sv-nav {
-  flex-shrink: 0;
-  width: 132px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
-}
-.sv-nav-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 8px 12px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-2);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out;
-}
-.sv-nav-item:hover {
-  background: var(--brand-50);
-  color: var(--brand-500);
-}
-.sv-nav-item.active {
-  background: var(--brand-50);
-  color: var(--brand-500);
-}
-
-/* 右侧内容面板：全量渲染单列，内容放开全宽 */
-.sv-content {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-4) var(--space-6);
-  background: var(--frost-surface);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-}
-.sv-sec {
-  padding-bottom: var(--space-5);
-}
-.sv-sec + .sv-sec {
-  border-top: 1px solid var(--border-soft);
-  padding-top: var(--space-5);
-  margin-top: var(--space-5);
-}
-/* 分类标题：品牌色短竖条 + 加粗大字，与下方设置项明确分层 */
-.sv-sec-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 var(--space-4);
-  font-size: 0.9375rem;
-  font-weight: 700;
-  color: var(--text-1);
-}
-.sv-sec-title::before {
-  content: '';
-  width: 3px;
-  height: 14px;
-  border-radius: 2px;
-  background: var(--brand-500);
-  flex-shrink: 0;
-}
-/* 分类内的小组标题（如剪贴板「保留策略 / 记录行为 / 操作」） */
-.sv-subtitle {
-  margin: 16px 0 2px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.sv-subtitle:first-of-type {
-  margin-top: 0;
-}
-
-.setting-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 0;
-}
-.setting-row + .setting-row {
-  border-top: 1px solid var(--border-soft);
-}
-.setting-info {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.setting-desc {
-  flex-basis: 100%;
-}
-.setting-name {
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--text-1);
-}
-.setting-desc {
-  font-size: 0.75rem;
-  color: var(--text-3);
-}
-.autostart-warn {
-  flex-basis: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.75rem;
-  color: var(--c-red-ink, #d03050);
-}
-.autostart-repair {
-  padding: 2px 10px;
-  font-size: 0.72rem;
-  color: var(--text-1);
-  background: var(--bg-hover, rgba(127, 127, 127, 0.12));
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
-  cursor: pointer;
-}
-.autostart-repair:hover:not(:disabled) {
-  background: var(--bg-active, rgba(127, 127, 127, 0.2));
-}
-.autostart-repair:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* 悬浮球环形按钮配置：已选 chips + 可添加 chips */
-.fb-btn-row {
-  align-items: flex-start;
-}
-.fb-btn-cfg {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 380px;
-}
-.fb-btn-list,
-.fb-btn-add {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.fb-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px 6px 3px 10px;
-  border-radius: var(--radius-pill);
-  background: var(--accent-soft, rgba(91, 91, 245, 0.12));
-  color: var(--text-1);
-  font-size: 0.75rem;
-  white-space: nowrap;
-}
-.fb-chip-btn {
-  border: none;
-  background: transparent;
-  color: var(--text-3);
-  font-size: 0.7rem;
-  line-height: 1;
-  padding: 3px 4px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.fb-chip-btn:hover:not(:disabled) {
-  background: rgba(120, 120, 160, 0.15);
-  color: var(--text-1);
-}
-.fb-chip-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-.fb-chip-remove {
-  color: var(--danger, #d64550);
-}
-.fb-chip-empty {
-  font-size: 0.75rem;
-  color: var(--text-3);
-}
-.fb-chip-add {
-  border: 1px dashed var(--border-strong);
-  background: transparent;
-  color: var(--text-2);
-  font-size: 0.75rem;
-  padding: 3px 10px;
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.fb-chip-add:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.fb-chip-add:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-/* 开关 */
-.toggle {
-  flex-shrink: 0;
-  width: 40px;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-pill);
-  background: var(--border-strong);
-  position: relative;
-  cursor: pointer;
-  padding: 0;
-  transition: background 0.18s;
-}
-.toggle.on {
-  background: var(--brand-500);
-}
-.toggle-knob {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: var(--shadow-dock);
-  transition: transform 0.18s;
-}
-.toggle.on .toggle-knob {
-  transform: translateX(18px);
-}
-
-.data-btn {
-  padding: 7px 14px;
-}.data-btn.confirm {
-  background: var(--c-red);
-  color: var(--text-on-accent);
-}
-.data-btn.confirm:hover {
-  background: color-mix(in srgb, var(--c-red) 85%, #000);
-  color: var(--text-on-accent);
-}
-
-.shortcut-row {
-  align-items: flex-start;
-}
-.opacity-edit {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 240px;
-  flex-shrink: 0;
-}
-.opacity-slider {
-  flex: 1;
-  min-width: 120px;
-  accent-color: var(--brand-500);
-  cursor: pointer;
-}
-.opacity-value {
-  min-width: 40px;
-  text-align: right;
-  font-size: 0.78125rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-2);
-}
-.font-group {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.font-group-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: inherit;
-}
-.font-group-title {
-  margin: 0;
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--text-1);
-}
-.font-group-chevron {
-  color: var(--text-3);
-  transition: transform 0.18s ease-out;
-}
-.font-group-chevron.open {
-  transform: rotate(180deg);
-}
-.font-group-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.font-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-.font-label {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: var(--text-1);
-  flex-shrink: 0;
-}
-.font-edit {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 280px;
-  flex-shrink: 0;
-}
-.chat-panel-side {
-  min-width: 200px;
-}
-/* 独立窗口形态下内嵌面板专属项禁用（下拉触发器经 $attrs 同时收到 disabled 与该 class） */
-.chat-panel-side:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.opacity-slider:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.quote-edit {
-  min-width: 240px;
-  flex-shrink: 0;
-}
-/* 名言来源下拉：与上方语录输入框等宽（AppSelect 触发器通过 $attrs 接收 class，需 :deep 穿透） */
-:deep(.quote-source) {
-  min-width: 240px;
-}
-.weather-edit {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 340px;
-  flex-shrink: 0;
-}
-.weather-edit .field-input {
-  flex: 1;
-  min-width: 0;
-}
-.num-edit {
-  min-width: 120px;
-  flex-shrink: 0;
-}
-.num-input {
-  width: 100%;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--input-bg);
-  color: var(--text-1);
-  font-size: 0.8125rem;
-  font-family: inherit;
-  padding: 8px 10px;
-  outline: none;
-}
-.num-input:focus {
-  border-color: var(--brand-500);
-  box-shadow: var(--shadow-focus);
-}
-.data-btn.danger {
-  color: var(--c-red-ink);
-  border-color: color-mix(in srgb, var(--c-red) 35%, transparent);
-}
-.data-btn.danger:hover {
-  background: var(--c-red-soft);
-  border-color: transparent;
-}
-.shortcut-edit {
-  min-width: 240px;
-}
-.shortcut-input-wrap {
-  width: 100%;
-  position: relative;
-}
-.shortcut-icon {
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--text-4);
-}
-.shortcut-input {
-  width: 100%;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--input-bg);
-  color: var(--text-1);
-  font-size: 0.8125rem;
-  font-family: inherit;
-  padding: 9px 84px 9px 32px;
-  outline: none;
-}
-.shortcut-input:focus {
-  border-color: var(--brand-500);
-  box-shadow: var(--shadow-focus);
-}
-.shortcut-record-btn {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: var(--brand-50);
-  color: var(--brand-500);
-  font-size: 0.75rem;
-  padding: 5px 10px;
-  cursor: pointer;
-}
-.shortcut-record-btn:disabled {
-  opacity: 0.9;
-}
-.shortcut-record-btn:hover {
-  background: color-mix(in srgb, var(--brand-500) 14%, transparent);
-}
-.shortcut-error {
-  margin-top: -8px;
-  font-size: 0.75rem;
-  color: var(--c-red);
-}
-
-.settings-foot {
-  margin-top: 16px;
-  font-size: 0.75rem;
-  color: var(--text-3);
-  text-align: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-.settings-lock {
-  flex-shrink: 0;
-}
-
-/* ---- 主题设置 ---- */
-.theme-group {
-  padding: 4px 0 8px;
-}
-/* 每行：左侧标签 + 右侧控件两端对齐 */
-.theme-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 0;
-}
-.theme-row + .theme-row {
-  border-top: 1px solid var(--border-soft);
-}
-.theme-label {
-  flex-shrink: 0;
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--text-1);
-}
-/* 整块内容（如色卡）：标签在上方，内容左对齐铺开 */
-.theme-row-stack {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
-}
-/* 色卡分组小标签（单色/渐变）：占满整行，换行显示 */
-.theme-sublabel {
-  flex-basis: 100%;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-3);
-}
-.theme-sublabel + button {
-  margin-top: -2px;
-}
-
-/* 明暗模式分段选择 */
-.theme-mode-seg {
-  display: inline-flex;
-  gap: 6px;
-  background: var(--bg-card-soft);
-  padding: 3px;
-  border-radius: var(--radius-pill);
-}
-.theme-mode-seg button {
-  padding: 5px 14px;
-  border-radius: inherit;
-  border: none;
-  background: transparent;
-  color: var(--text-3);
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.theme-mode-seg button.on {
-  background: var(--brand-500);
-  color: var(--text-on-accent);
-}
-
-/* 主题配色色卡：固定尺寸保证长宽一致，支持换行 */
-.theme-presets {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.theme-presets button {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  width: 64px;
-  height: 64px;
-  justify-content: center;
-  padding: 0 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-solid);
-  cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-.theme-presets button.on {
-  border-color: var(--brand-500);
-  box-shadow: var(--shadow-focus);
-}
-.preset-swatch {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-}
-.preset-name {
-  font-size: 0.6875rem;
-  color: var(--text-3);
-}
-.theme-presets button.on .preset-name {
-  color: var(--text-1);
-}
-
-/* 强调色 */
-.theme-accent {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.accent-dots {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.accent-dots button {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: none;
-  cursor: pointer;
-  transition: transform 0.12s;
-}
-.accent-dots button:hover {
-  transform: scale(1.1);
-}
-.accent-dots button.on {
-  box-shadow: 0 0 0 2px var(--bg-card-solid), 0 0 0 4px var(--brand-500);
-}
-.accent-custom {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.accent-custom input[type='color'] {
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  padding: 2px;
-  cursor: pointer;
-}
-.accent-reset {
-  padding: 4px 10px;
-  font-size: 0.75rem;
-}
-
-/* ---- 应用壁纸 ---- */
-.wallpaper-box {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-.wallpaper-preview {
-  height: 96px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  background: var(--input-bg);
-}
-.wallpaper-preview.empty {
-  border-style: dashed;
-}
-.wallpaper-preview img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.wallpaper-empty {
-  font-size: 0.75rem;
-  color: var(--text-3);
-}
-.wallpaper-actions {
-  display: flex;
-  gap: var(--space-2);
-}
-/* 内嵌模糊开关行：去掉 setting-row 的默认外间距，贴进壁纸分组 */
-.wallpaper-blur-row {
-  margin: 0;
-  padding: 0;
-}
-
-/* ---- 数据存储路径 ---- */
-.data-path {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  line-height: 1.5;
-}
-
-/* 更改数据存储路径弹窗 */
-.data-move-card {
-  width: 480px;
-  max-width: calc(100vw - 48px);
-}
-.dm-title {
-  margin: 0 0 10px;
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--text-1);
-}
-.dm-desc {
-  margin: 0 0 14px;
-  font-size: 0.8125rem;
-  line-height: 1.6;
-  color: var(--text-2);
-}
-.dm-paths {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-.dm-path {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-soft);
-}
-.dm-label {
-  font-size: 0.6875rem;
-  font-weight: 700;
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.dm-val {
-  font-size: 0.75rem;
-  color: var(--text-2);
-  overflow-wrap: anywhere;
-}
-.dm-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-soft);
-}
-
-/* 弹窗遮罩过渡 */
-.mask-enter-active,
-.mask-leave-active {
-  transition: opacity 0.18s ease-out;
-}
-.mask-enter-from,
-.mask-leave-to {
-  opacity: 0;
-}
-
-</style>

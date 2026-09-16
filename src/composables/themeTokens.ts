@@ -46,24 +46,28 @@ export function collectThemeTokens(): XHubThemeTokens {
   for (const [key, varName] of Object.entries(TOKEN_MAP)) {
     tokens[key] = cs.getPropertyValue(varName).trim()
   }
-  // 页面背景是渐变（预设 --app-bg 覆盖，否则 --bg-page-surface），不是纯色 --bg-page：
-  // view/window/drawer 形态用 --xhub-bg-page 铺底，才能与宿主其他 View 的页面背景严格一致
+  // 页面背景是渐变（预设 --app-bg 覆盖，否则 --bg-page-surface），不是纯色 --bg-page
   const appBg = cs.getPropertyValue('--app-bg').trim()
   tokens.bgPage = appBg || cs.getPropertyValue('--bg-page-surface').trim()
+
+  const wallpaper = {
+    on: root.dataset.wallpaper === '1',
+    clear: root.dataset.wallpaperClear === '1',
+    immersive: root.dataset.immersive === '1',
+  }
+
+  // 扩展该铺的「页面底」（--xhub-page-bg）：
+  //  - 无壁纸 → 宿主整页背景，与其它 View 的观感严格一致；
+  //  - **有壁纸 → 必须 transparent**：--app-bg 是 alpha=1 的不透明渐变，扩展拿它铺底会把壁纸
+  //    整块盖住——而 view/window 形态的容器链（.view-extension → .extension-view → iframe）本来就是
+  //    全透明的，等扩展自己画背景；透底态宿主又把 --text-* 翻白，不透明浅底直接变成「白底白字」。
+  //    扩展一律 `background: var(--xhub-page-bg, transparent)` 即可两种形态都对。
+  tokens.pageBg = wallpaper.on ? 'transparent' : tokens.bgPage
+
   const mode = root.dataset.theme === 'dark' ? 'dark' : 'light'
   const preset = root.dataset.preset ?? null
   const accent = cs.getPropertyValue('--accent').trim()
-  return {
-    mode,
-    preset,
-    accent,
-    wallpaper: {
-      on: root.dataset.wallpaper === '1',
-      clear: root.dataset.wallpaperClear === '1',
-      immersive: root.dataset.immersive === '1',
-    },
-    tokens,
-  }
+  return { mode, preset, accent, wallpaper, tokens }
 }
 
 /** 活动扩展 iframe 注册表：frame → 扩展 id（主题广播 + 扩展间事件路由共用） */

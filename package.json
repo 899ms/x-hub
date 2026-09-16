@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/gen-settings-index.mjs && node scripts/check-settings-css.mjs",
+    "check:settings-css": "node scripts/check-settings-css.mjs",
     "build": "vue-tsc -b && vite build",
+    "gen:settings-index": "node scripts/gen-settings-index.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

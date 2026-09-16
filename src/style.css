@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./components/settings/shared.css"; /* 设置页样式（外移自 SettingsView.vue，规则带 .settings-view 前缀） */
 
 :root {
   /* 用户强调色：JS 注入 inline --accent 时按级联优先级覆盖（用户强调色 > 预设 > 默认） */

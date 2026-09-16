@@ -26,11 +26,19 @@ import { useTheme } from '../composables/useTheme'
 import { broadcastThemeToFrames } from '../composables/themeTokens'
 import { iconSrc } from '../composables/useResourceIcon'
 import { dashVariantDef, useDashboardLayout, type DashPlacement } from '../composables/useDashboardLayout'
+import SettingsSkeleton from '../components/SettingsSkeleton.vue'
 
 // 大体量/低频视图异步分包按需加载，缩小首屏主 chunk
 const NoteEditor = defineAsyncComponent(() => import('../components/NoteEditor.vue'))
 const GlobalSearch = defineAsyncComponent(() => import('../components/GlobalSearch.vue'))
-const SettingsView = defineAsyncComponent(() => import('../components/SettingsView.vue'))
+// 设置页：加载期间用同骨架占位（**delay 0**：以前设 80ms 是为了避免骨架一闪而过，
+// 结果那 80ms 是纯空白 —— 用户感知到的「点设置先空白」有一半来自这里）
+// 另外启动后空闲时预热这个 chunk，点「设置」时直接命中模块缓存，几乎零等待。
+const SettingsView = defineAsyncComponent({
+  loader: () => import('../components/SettingsView.vue'),
+  loadingComponent: SettingsSkeleton,
+  delay: 0,
+})
 const PromptManageDialog = defineAsyncComponent(() => import('../components/PromptManageDialog.vue'))
 const ChatPanel = defineAsyncComponent(() => import('../components/ChatPanel.vue'))
 const ExtensionCenter = defineAsyncComponent(() => import('../components/ExtensionCenter.vue'))
@@ -336,6 +344,19 @@ const BOOT_MIN_MS = 2200
 const BOOT_MAX_MS = 4000
 
 onMounted(async () => {
+  // 设置页 chunk 空闲预热：点「设置」时直接命中模块缓存，不再出现加载空白。
+  // （设置页内部也按大类分包 + 占位 + 悬停预取，见 SettingsView.vue 头部说明）
+  const warmSettings = () => {
+    void import('../components/SettingsView.vue')
+  }
+  const idle = (
+    window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void
+    }
+  ).requestIdleCallback
+  if (idle) idle(warmSettings, { timeout: 3000 })
+  else window.setTimeout(warmSettings, 1500)
+
   store.loadInitialData().finally(() => {
     store.startOnlineMonitor()
     const wait = Math.max(0, BOOT_MIN_MS - (performance.now() - bootStartAt))
@@ -1327,6 +1348,23 @@ html[data-wallpaper='1'] .title-bar [data-tip]::after {
   border-left: 1px solid var(--border-strong);
   box-shadow: var(--shadow-dock);
   pointer-events: auto;
+}
+/* 壁纸态：抽屉是瞬态表面，改用真实取景模糊 + 玻璃底 ——
+   否则那块 0.88 的不透明白会把壁纸切成一块死白（它不在 main 子树里，
+   拿不到透底态对 --bg-card-solid 的覆盖，取的是 root 的 0.88 白）。 */
+html[data-wallpaper='1'] .ext-drawer {
+  background: var(--frost-surface);
+  backdrop-filter: blur(18px) saturate(1.15);
+  border-left-color: var(--border-soft);
+}
+/* 真实透底（玻璃透明度 < 0.9 或沉浸模式）：去掉白描边只留中性落影，文字加一档光晕（口径同 .card） */
+html[data-wallpaper-clear='1'] .ext-drawer {
+  border-left-color: transparent;
+  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.2);
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.5), 0 0 4px rgba(255, 255, 255, 0.3);
+}
+html[data-theme='dark'][data-wallpaper-clear='1'] .ext-drawer {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 4px rgba(0, 0, 0, 0.3);
 }
 .ext-drawer-header {
   flex-shrink: 0;
