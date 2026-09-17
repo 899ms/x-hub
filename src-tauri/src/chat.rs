@@ -32,6 +32,17 @@ const KEYRING_SERVICE: &str = "x-hub-chat";
 /// 这样退出登录/换号时不需要清理任何模型配置，token 失效会自然表现为 401。
 pub const PLATFORM_KEY_SENTINEL: &str = "__xhub_platform__";
 
+/// 平台额度在界面上的**单一入口名**：设置里它只是一个「开启/关闭」开关，AI 对话的模型下拉里
+/// 也只有这一项（不再逐个列出 `platform:<模型名>`）。会话的 `model_name` 存这个入口名，
+/// 具体用哪个平台模型由后端在全部平台条目之间负载切换（`commands::pick_chat_model`）。
+pub const PLATFORM_ENTRY_NAME: &str = "x-hub 平台";
+
+/// 是否平台额度条目（`platform:<模型名>`）：这是后端识别「用账号登录态换额度」那批条目的唯一依据，
+/// 界面折叠（一个开关 / 一个下拉项）都建立在这个前缀上。
+pub fn is_platform_model(m: &ChatModelConfig) -> bool {
+    m.id.starts_with("platform:")
+}
+
 /// 解析某模型实际要用的 Key，并回答「它是不是平台模型」：
 /// 平台占位符 → 账号 token（未登录则视为未配置）
 fn resolve_api_key(model_id: &str) -> (Option<String>, bool) {

@@ -2111,14 +2111,7 @@ pub fn create_chat_session(
 ) -> Result<ChatSession, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let title = title.unwrap_or_else(|| "新对话".to_string());
-    let model_name = model_name.unwrap_or_else(|| {
-        config::load()
-            .chat_models
-            .iter()
-            .find(|m| m.is_default)
-            .map(|m| m.name.clone())
-            .unwrap_or_default()
-    });
+    let model_name = model_name.unwrap_or_else(|| default_session_model_name(&config::load().chat_models));
     let s = chat::create_session(&conn, &title, &model_name).map_err(err_str)?;
     log::info!("新建对话会话: id={} title={}", s.id, s.title);
     Ok(s)
@@ -2163,6 +2156,58 @@ pub fn list_chat_messages(
 ) -> Result<Vec<ChatMessage>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     chat::list_messages(&conn, session_id).map_err(err_str)
+}
+
+/// 平台额度的轮询游标（负载切换）：进程内计数，每次平台请求取下一个模型。
+/// 不持久化——重启后从 0 开始，对「在多个平台模型之间负载切换」这个语义没有影响。
+static PLATFORM_RR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 本次请求实际使用哪个模型配置。
+///
+/// 平台额度在用户侧是**一个入口**（`chat::PLATFORM_ENTRY_NAME`）：只有一个平台模型时永远用它，
+/// 多个时在它们之间轮询（负载切换）——用户不需要、界面上也不再能选具体是哪一个
+/// （2026-09-17 用户要求）。所以判定分两支：
+/// - 会话选中的是平台入口名，**或**命中了某个 `platform:*` 条目（老会话存的是具体平台模型名）
+///   → 走平台轮询；一个平台条目都没有时明确提示开关未开，而不是含糊地回退到别的模型
+/// - 其余 → 精确命中会话选中的自备供应商模型，再回退全局默认（照旧）
+fn pick_chat_model(
+    models: &[ChatModelConfig],
+    session_model_name: &str,
+) -> Result<ChatModelConfig, String> {
+    let platform: Vec<&ChatModelConfig> = models
+        .iter()
+        .filter(|m| crate::chat::is_platform_model(m))
+        .collect();
+    let wants_platform = session_model_name == crate::chat::PLATFORM_ENTRY_NAME
+        || platform.iter().any(|m| m.name == session_model_name);
+    if wants_platform {
+        if platform.is_empty() {
+            return Err("平台额度未开启，请在「设置 → 功能 → AI 助手」开启后再发送".into());
+        }
+        let i = PLATFORM_RR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % platform.len();
+        return Ok(platform[i].clone());
+    }
+    models
+        .iter()
+        .find(|m| m.name == session_model_name)
+        .or_else(|| models.iter().find(|m| m.is_default))
+        .cloned()
+        .ok_or_else(|| "未配置任何对话模型，请先在对话设置中添加".to_string())
+}
+
+/// 新会话默认用的模型名：默认模型是平台条目（或只有平台条目）时统一存**入口名**，
+/// 而不是某一个具体的平台模型——这样会话不会把「当时那一个模型」固化下来。
+fn default_session_model_name(models: &[ChatModelConfig]) -> String {
+    if let Some(d) = models.iter().find(|m| m.is_default) {
+        if crate::chat::is_platform_model(d) {
+            return crate::chat::PLATFORM_ENTRY_NAME.to_string();
+        }
+        return d.name.clone();
+    }
+    if models.iter().any(|m| crate::chat::is_platform_model(m)) {
+        return crate::chat::PLATFORM_ENTRY_NAME.to_string();
+    }
+    models.first().map(|m| m.name.clone()).unwrap_or_default()
 }
 
 /// 模型配置列表：返回时清空 api_key，填充 has_api_key（真实 Key 存系统钥匙串）
@@ -2268,24 +2313,43 @@ fn propagate_provider_keys(models: &[ChatModelConfig]) {
     }
 }
 
+/// 通用探测要用的 Key：前端传入值优先（尚未保存时），为空则用 key_id 从钥匙串读已保存的 Key。
+///
+/// ⚠️ 平台条目（`platform:<模型名>`）的钥匙串里存的是 `chat::PLATFORM_KEY_SENTINEL`，真凭据是
+/// **账号登录态**、只在真正发对话时由 `chat::resolve_api_key` 现取 —— 拿占位符当 Key 发出去
+/// 必然 401。平台供应商的连通性与模型列表一律走 `platform_models`（`/api/v1/ai/models`），
+/// 那条路才是平台自己的接口；平台中转也不提供 OpenAI 的 `GET {base}/models`（恒 404）。
+fn probe_key(api_key: &str, stored: Option<String>) -> Result<String, String> {
+    let key = if api_key.trim().is_empty() {
+        stored.ok_or_else(|| "未填写 API Key，且未找到已保存的 Key".to_string())?
+    } else {
+        api_key.trim().to_string()
+    };
+    if key.trim() == crate::chat::PLATFORM_KEY_SENTINEL {
+        return Err(
+            "平台供应商请用「测试连通/获取模型」（走平台账号接口），不能用平台占位 Key 探测通用 /models"
+                .to_string(),
+        );
+    }
+    Ok(key)
+}
+
 /// 连通性测试 + 拉取模型列表（OpenAI 兼容 `GET {base_url}/models`）
 ///
-/// 供设置页「测试连通」「获取模型」使用。api_key 优先用前端传入值（尚未保存时）；
-/// 传入为空则尝试用 key_id 从系统钥匙串读取已保存的 Key（已保存的供应商场景）。
+/// 供设置页「测试连通」「获取模型」使用，**只服务自备 Key 的供应商**；平台供应商走
+/// `platform_models`（理由见 `probe_key`）。
 #[tauri::command]
 pub async fn fetch_chat_provider_models(
     base_url: String,
     api_key: String,
     key_id: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let key = if api_key.trim().is_empty() {
-        key_id
-            .as_deref()
-            .and_then(crate::chat::get_api_key)
-            .ok_or_else(|| "未填写 API Key，且未找到已保存的 Key".to_string())?
+    let stored = if api_key.trim().is_empty() {
+        key_id.as_deref().and_then(crate::chat::get_api_key)
     } else {
-        api_key.trim().to_string()
+        None
     };
+    let key = probe_key(&api_key, stored)?;
     crate::chat::fetch_provider_models(&base_url, &key).await
 }
 
@@ -2403,14 +2467,13 @@ pub async fn send_chat_message(
         chat::list_recent_messages(&conn, session_id, CHAT_CONTEXT_WINDOW).map_err(err_str)?
     };
 
-    // 4) 解析模型配置
+    // 4) 解析模型配置：平台额度走「一个入口 + 多模型负载切换」，自备供应商精确命中（见 pick_chat_model）
     let models = config::load().chat_models;
-    let model = models
-        .iter()
-        .find(|m| m.name == session.model_name)
-        .or_else(|| models.iter().find(|m| m.is_default))
-        .cloned()
-        .ok_or_else(|| "未配置任何对话模型，请先在对话设置中添加".to_string())?;
+    let model = pick_chat_model(&models, &session.model_name)?;
+    if crate::chat::is_platform_model(&model) {
+        // 平台请求的实际模型是负载切换选出来的，落日志便于排查「这次用的是哪个模型」
+        log::info!("平台额度请求使用模型: {}", model.model);
+    }
 
     // 5) 流式请求（history 已含刚落的 user 消息）；回复累积进 reply 单份 buffer，
     //    成功即完整回复，出错时保留已生成部分（partial 语义），不再产生双份全量副本
@@ -2826,5 +2889,129 @@ mod tests {
             "sk-real-key"
         );
         assert!(api_key_for_ui(None).is_err());
+    }
+
+    /// 平台占位符不许当 Key 发去探测通用 `/models`：占位符不是凭据（真凭据是登录态），
+    /// 发出去只会得到 401，报错完全指不到真因（2026-09-17 用户反馈的 404 也是同一条错路：
+    /// 平台中转根本没有 `GET /v1/models`，平台列表接口是 `/api/v1/ai/models`）。
+    #[test]
+    fn probe_key_rejects_platform_placeholder() {
+        let sentinel = crate::chat::PLATFORM_KEY_SENTINEL.to_string();
+        assert!(probe_key("", Some(sentinel.clone())).is_err());
+        assert!(probe_key(&sentinel, None).is_err());
+        // 前端传了真 Key 就优先用它（尚未保存的供应商场景）
+        assert_eq!(probe_key(" sk-front ", None).unwrap(), "sk-front");
+        // 未传且钥匙串里也没有 → 明确提示
+        assert!(probe_key("", None).is_err());
+        assert_eq!(probe_key("", Some("sk-stored".into())).unwrap(), "sk-stored");
+    }
+
+    // ---- 平台额度：一个入口 + 多模型负载切换（自备供应商精确命中照旧）----
+
+    fn chat_model(id: &str, name: &str, is_default: bool) -> ChatModelConfig {
+        ChatModelConfig {
+            id: id.to_string(),
+            name: name.to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            model: name.to_string(),
+            api_key: String::new(),
+            is_default,
+            has_api_key: true,
+            provider_name: "自备供应商".to_string(),
+        }
+    }
+
+    fn platform_chat_model(model: &str) -> ChatModelConfig {
+        ChatModelConfig {
+            id: format!("platform:{model}"),
+            name: format!("{model}（平台额度）"),
+            base_url: "https://x-hub.example/v1".to_string(),
+            model: model.to_string(),
+            api_key: crate::chat::PLATFORM_KEY_SENTINEL.to_string(),
+            is_default: false,
+            has_api_key: true,
+            provider_name: crate::chat::PLATFORM_ENTRY_NAME.to_string(),
+        }
+    }
+
+    /// 平台侧只有一个模型 → 永远用它；多个 → 在它们之间轮询（用户不再选具体模型）
+    #[test]
+    fn platform_entry_load_balances_across_models() {
+        let one = vec![platform_chat_model("LongCat-2.0")];
+        for _ in 0..3 {
+            let m = pick_chat_model(&one, crate::chat::PLATFORM_ENTRY_NAME).unwrap();
+            assert_eq!(m.model, "LongCat-2.0");
+        }
+
+        let many = vec![
+            platform_chat_model("a"),
+            platform_chat_model("b"),
+            platform_chat_model("c"),
+        ];
+        let picked: Vec<String> = (0..4)
+            .map(|_| {
+                pick_chat_model(&many, crate::chat::PLATFORM_ENTRY_NAME)
+                    .unwrap()
+                    .model
+            })
+            .collect();
+        // 起点由进程内游标决定，断言只依赖「4 次覆盖全部 3 个且回到起点」——
+        // 这正是负载切换的语义：不偏向其中任何一个
+        assert_eq!(picked[0], picked[3]);
+        let uniq: std::collections::HashSet<&String> = picked[0..3].iter().collect();
+        assert_eq!(uniq.len(), 3);
+    }
+
+    /// 老会话存的是具体平台模型名（历史数据）→ 同样按平台口径轮询，不固化成当时那一个
+    #[test]
+    fn legacy_session_with_concrete_platform_name_still_load_balances() {
+        let models = vec![platform_chat_model("a"), platform_chat_model("b")];
+        let first = pick_chat_model(&models, "a（平台额度）").unwrap().model;
+        let second = pick_chat_model(&models, "a（平台额度）").unwrap().model;
+        assert_ne!(first, second);
+    }
+
+    /// 开关没开（配置里没有平台条目）时给明确指路的错误，而不是静默换用别的模型
+    #[test]
+    fn platform_entry_without_models_points_at_the_switch() {
+        let only_custom = vec![chat_model("m1", "DeepSeek", true)];
+        let e = pick_chat_model(&only_custom, crate::chat::PLATFORM_ENTRY_NAME).unwrap_err();
+        assert!(e.contains("平台额度未开启"), "实际: {e}");
+    }
+
+    /// 自备供应商照旧：精确命中用户选的那个模型，选不到才回退默认
+    #[test]
+    fn custom_provider_still_matches_exactly() {
+        let models = vec![
+            chat_model("m1", "DeepSeek", true),
+            chat_model("m2", "Kimi", false),
+        ];
+        assert_eq!(pick_chat_model(&models, "Kimi").unwrap().name, "Kimi");
+        assert_eq!(pick_chat_model(&models, "已删除的模型").unwrap().name, "DeepSeek");
+        assert!(pick_chat_model(&[], "任意").is_err());
+    }
+
+    /// 新会话默认名：自备默认优先；默认就是平台条目（或只有平台条目）时存入口名，不固化具体模型
+    #[test]
+    fn default_session_name_uses_platform_entry() {
+        assert_eq!(
+            default_session_model_name(&[chat_model("m1", "DeepSeek", true)]),
+            "DeepSeek"
+        );
+        assert_eq!(
+            default_session_model_name(&[platform_chat_model("a")]),
+            crate::chat::PLATFORM_ENTRY_NAME
+        );
+        assert_eq!(
+            default_session_model_name(&[chat_model("m1", "DeepSeek", true), platform_chat_model("a")]),
+            "DeepSeek"
+        );
+        let mut p = platform_chat_model("a");
+        p.is_default = true;
+        assert_eq!(
+            default_session_model_name(&[chat_model("m1", "DeepSeek", false), p]),
+            crate::chat::PLATFORM_ENTRY_NAME
+        );
+        assert_eq!(default_session_model_name(&[]), "");
     }
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { inject, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import { ChevronDown, Copy, Eye, EyeOff, FlaskConical, ListPlus, Pencil, Plus, Trash2, X } from 'lucide-vue-next'
-import { isTauri, tauriApi, type ChatModelConfig } from '../api/tauri'
+import { PLATFORM_ENTRY_NAME, isPlatformModel, isTauri, tauriApi, type ChatModelConfig } from '../api/tauri'
 import { useStore } from '../stores/workbench'
 
 const showToast = inject<(msg: string) => void>('showToast', () => {})
@@ -30,68 +30,107 @@ const loading = ref(false)
 const saving = ref(false)
 
 // ---- 平台免费额度（登录后可直接用，不需要自备 API Key） ----
-// 与自备 Key 的供应商**并存**：这里只是把平台模型写成本地配置，Key 用占位符表示
-// 「用账号会话换取额度」，Rust 侧调用时再替换成真实 token（见 chat.rs::PLATFORM_KEY_SENTINEL）。
-// ⚠️ 平台模型的 Key 一律**不在界面展示/复制**（占位符没有意义，真 token 也不该出 Rust），
-// 卡片里改显示一句「由账号登录态提供」的说明；后端 get_chat_api_key 对占位符直接报错兜底。
+// 形态：设置里只是一个**开启/关闭**开关 —— 它不渲染成供应商卡片（没有供应商名称/Base URL/
+// API Key/测试连通/获取模型这些字段，用户也不需要关心平台侧有哪几个模型）。
+// 写入的条目仍按 `platform:<模型名>` 存（后端靠这个前缀识别平台额度，见 chat.rs::is_platform_model），
+// Key 写占位符「用账号会话换额度」，Rust 侧请求时再换成真实 token（chat.rs::PLATFORM_KEY_SENTINEL）。
+// ⚠️ 平台 Key 一律不在界面展示/复制（占位符没有意义，真 token 也不该出 Rust）。
+// AI 对话里这批条目折叠成「x-hub 平台」一个入口，具体用哪个模型由后端在多个平台模型之间负载切换。
 const PLATFORM_SENTINEL = '__xhub_platform__'
 const platformBusy = ref(false)
+/// 平台条目：不进 providers（不渲染成卡片），但必须原样留在配置里（丢了等于关掉平台额度）
+const platformModels = ref<ChatModelConfig[]>([])
 
-/// 是否平台额度供应商：条目 id 为 `platform:<模型名>`（旧条目也可能只有 provider_name 标识）
-function isPlatform(p: ProviderEdit): boolean {
-  return p.models.some(
-    (m) => m.id.startsWith('platform:') || (m.provider_name ?? '').trim() === 'x-hub 平台',
-  )
+const platformEnabled = computed(() => platformModels.value.length > 0)
+
+/// 开关下方的状态说明：只说「开没开、平台现在有几个模型、对话里显示成什么」，
+/// 具体是哪些模型不在这里列（用户不需要选，后端会负载切换）
+const platformStatusText = computed(() => {
+  if (!platformEnabled.value) {
+    return '登录账号后即可使用平台提供的模型（走平台额度，不需要填 API Key）。开启后 AI 对话的模型列表里显示为「x-hub 平台」。'
+  }
+  const n = platformModels.value.length
+  return n > 1
+    ? `已开启 · 平台当前提供 ${n} 个模型，AI 对话里显示为「x-hub 平台」，多个模型之间自动负载切换`
+    : `已开启 · 平台当前提供 ${n} 个模型，AI 对话里显示为「x-hub 平台」`
+})
+
+/// 平台模型的列表与地址只能从平台账号接口取。
+///
+/// 平台中转只实现 `POST /v1/chat/completions`，**没有** OpenAI 的 `GET {base}/models`
+/// ——实测该路径恒 404 `{"error":"not_found"}`（2026-09-17 用户反馈「连接失败：接口返回 404」）；
+/// 平台自己的列表接口是 `/api/v1/ai/models`，鉴权走**账号登录态**而不是 API Key。
+/// 所以平台额度一律走这里，绝不能套用自备供应商那条 `GET {base_url}/models` 的通用探测。
+async function loadPlatformModels(): Promise<{ ids: string[]; baseUrl: string }> {
+  const account = await tauriApi.accountStatus()
+  if (!account.loggedIn) throw new Error('请先在「设置 → 账号」登录')
+  // 服务端地址是内置常量（设置里没有地址入口），后端正常都会回非空值；
+  // 这里只留防御性兜底，不再提示用户「去填地址」——那个入口已经不存在了
+  const server = (account.serverUrl || '').replace(/\/+$/, '')
+  if (!server) throw new Error('账号服务地址暂不可用，请稍后重试')
+  const names = await tauriApi.platformModels()
+  return { ids: names.map((n) => `platform:${n}`), baseUrl: `${server}/v1` }
 }
 
-async function addPlatformModels() {
-  if (!isTauri()) return
+/// 平台条目的统一构造：`platform:` 前缀是后端认出平台模型的依据（chat.rs::resolve_api_key），
+/// Key 写占位符（请求时换成账号 token），base_url 后端也会现算（这里只存一份便于展示）。
+function platformModel(id: string, baseUrl: string): ChatModelConfig {
+  const name = id.replace(/^platform:/, '')
+  return {
+    id,
+    name: `${name}（平台额度）`,
+    base_url: baseUrl,
+    model: name,
+    api_key: PLATFORM_SENTINEL,
+    is_default: false,
+    has_api_key: true,
+    provider_name: PLATFORM_ENTRY_NAME,
+  }
+}
+
+/// 开启平台额度：拉平台当前可用模型并整体写入配置（平台加/减模型时重新开关一次即同步）
+async function enablePlatform() {
+  if (!isTauri() || platformBusy.value) return
   platformBusy.value = true
   try {
-    const account = await tauriApi.accountStatus()
-    if (!account.loggedIn) {
-      showToast('请先在「设置 → 账号」登录')
-      return
-    }
-    // 服务端地址是内置常量（设置里没有地址入口），后端正常都会回非空值；
-    // 这里只留防御性兜底，不再提示用户「去填地址」——那个入口已经不存在了
-    const server = (account.serverUrl || '').replace(/\/+$/, '')
-    if (!server) {
-      showToast('账号服务地址暂不可用，请稍后重试')
-      return
-    }
-    const models = await tauriApi.platformModels()
-    if (!models.length) {
+    const { ids, baseUrl } = await loadPlatformModels()
+    if (!ids.length) {
       showToast('平台暂未开放任何模型')
       return
     }
-    const existing = collectAll()
-    const existingIds = new Set(existing.map((m) => m.id))
-    const added: ChatModelConfig[] = []
-    for (const name of models) {
-      const id = `platform:${name}`
-      if (existingIds.has(id)) continue
-      added.push({
-        id,
-        name: `${name}（平台额度）`,
-        base_url: `${server}/v1`,
-        model: name,
-        api_key: PLATFORM_SENTINEL,
-        is_default: false,
-        has_api_key: true,
-        provider_name: 'x-hub 平台',
-      })
-    }
-    if (!added.length) {
-      showToast('平台模型都已经添加过了')
-      return
-    }
-    const saved = await tauriApi.saveChatModels([...existing, ...added])
+    const existing = collectAll().filter((m) => !isPlatformModel(m))
+    const saved = await tauriApi.saveChatModels([...existing, ...ids.map((id) => platformModel(id, baseUrl))])
     store.setChatModels(saved)
-    await loadProviders()
-    showToast(`已添加 ${added.length} 个平台模型（用账号免费额度）`)
+    // 只更新平台条目本身，**不回读整个列表**：开关与自备供应商列表毫无关系，
+    // 回读会把卡片全部重建（展开态要重继承），还可能把用户正在填的新供应商卡片冲掉
+    platformModels.value = saved.filter(isPlatformModel)
+    showToast(
+      ids.length > 1
+        ? `平台额度已开启（${ids.length} 个模型，对话里按负载自动切换）`
+        : '平台额度已开启',
+    )
   } catch (e) {
-    showToast(`添加失败：${e}`)
+    showToast(`开启失败：${e}`)
+  } finally {
+    platformBusy.value = false
+  }
+}
+
+/// 关闭平台额度：把平台条目从配置里整体移除（对话里的「x-hub 平台」入口随之消失）
+async function disablePlatform() {
+  if (!isTauri() || platformBusy.value) return
+  platformBusy.value = true
+  const kept = platformModels.value
+  platformModels.value = []
+  try {
+    const saved = await tauriApi.saveChatModels(collectAll())
+    store.setChatModels(saved)
+    // 同上：平台条目已在前面就地清空（platformModels.value = []），无需回读整表
+    showToast('平台额度已关闭')
+  } catch (e) {
+    // 保存失败就把条目放回去，别让界面显示成「已关闭」而配置里其实还在
+    platformModels.value = kept
+    showToast(`关闭失败：${e}`)
   } finally {
     platformBusy.value = false
   }
@@ -124,13 +163,22 @@ function toProvider(m: ChatModelConfig): ProviderEdit {
   }
 }
 
-async function loadProviders() {
+/// 拉取模型配置并重建供应商卡片列表。
+///
+/// `silent` = 后台回读（开关切换 / 保存配置之后）：**不进 loading 态**，否则模板会把整块
+/// 卡片列表换成「加载中…」再换回来 —— 用户看到的就是开关点下去时界面闪一下。
+/// 首次挂载与显式 reload 才走 loading（那时列表本来就还没内容，占位是诚实的）。
+async function loadProviders(opts: { silent?: boolean } = {}) {
   if (!isTauri()) return
-  loading.value = true
+  if (!opts.silent) loading.value = true
   try {
     const list = await tauriApi.getChatModels()
+    // 平台条目单独摘出来（设置里它只是一个开关，不渲染成供应商卡片），其余按自备供应商分组
+    platformModels.value = list.filter(isPlatformModel)
+    const prev = new Map(providers.value.map((p) => [p.key, p]))
     const map = new Map<string, ProviderEdit>()
     for (const m of list) {
+      if (isPlatformModel(m)) continue
       const p = toProvider(m)
       if (map.has(p.key)) {
         map.get(p.key)!.models.push(m)
@@ -138,11 +186,25 @@ async function loadProviders() {
         map.set(p.key, p)
       }
     }
-    providers.value = [...map.values()]
+    // 重建卡片时继承已在界面上的展开态/勾选态：开关切换、保存配置都会回读一次，
+    // 若每次回读都把卡片收回折叠态，用户会看到自己刚展开的卡片"自己关上了"
+    providers.value = [...map.values()].map((p) => {
+      const old = prev.get(p.key)
+      if (!old) return p
+      return {
+        ...p,
+        expanded: old.expanded,
+        fetched: old.fetched,
+        selected: old.selected,
+        msg: old.msg,
+        savedKey: old.savedKey,
+        keyVisible: old.keyVisible,
+      }
+    })
   } catch (e) {
     showToast(`加载失败：${String(e)}`)
   } finally {
-    loading.value = false
+    if (!opts.silent) loading.value = false
   }
 }
 
@@ -174,7 +236,7 @@ function expand(p: ProviderEdit) {
   if (p.expanded && p.models.length > 0 && !p.hasApiKey) {
     p.hasApiKey = p.models.some((m) => m.has_api_key)
   }
-  if (p.expanded && p.hasApiKey && !p.savedKey && !isPlatform(p)) {
+  if (p.expanded && p.hasApiKey && !p.savedKey) {
     void loadSavedKey(p)
   }
 }
@@ -356,6 +418,9 @@ function collectAll(): ChatModelConfig[] {
     applyKey(p)
     out.push(...p.models)
   }
+  // 平台条目不在 providers 里（它只是一个开关，不渲染卡片），但必须原样带回：
+  // saveAll / 开关切换都是整体覆盖写配置，漏掉它等于把用户开着的平台额度悄悄关掉
+  out.push(...platformModels.value)
   // 全局默认归一
   const hasDefault = out.some((m) => m.is_default)
   if (!hasDefault && out.length > 0) out[0].is_default = true
@@ -385,7 +450,8 @@ async function saveAll() {
     // 同步进内存快照：后续任意 saveConfig 都带着最新模型，不会被旧快照覆盖
     store.setChatModels(saved)
     showToast('供应商配置已保存')
-    await loadProviders()
+    // 同样走静默回读：保存后把卡片列表换成「加载中…」再换回来，是一次没必要的整块闪烁
+    await loadProviders({ silent: true })
   } catch (e) {
     showToast(`保存失败：${String(e)}`)
   } finally {
@@ -404,18 +470,29 @@ defineExpose({ reload: () => void loadProviders() })
   <div class="ai-providers">
     <p class="ai-intro">配置 OpenAI 兼容的模型供应商（如 DeepSeek、OpenAI、Ollama）。填好 Base URL 与 API Key 后，可测试连通、拉取可用模型并勾选添加。API Key 仅保存在系统钥匙串。</p>
 
-    <!-- 平台免费额度：登录后可直接用，不需要自备 API Key；与下面的自备供应商并存 -->
-    <div class="ap-platform">
-      <div class="ap-platform-text">
-        <b>使用 x-hub 平台免费额度</b>
-        <span>登录账号后可直接添加平台提供的模型（用平台额度，不需要填 API Key）。自带 Key 的供应商不受影响。</span>
+    <!-- 平台免费额度：登录后可直接用，不需要自备 API Key。它不展开供应商字段（没有 Base URL /
+         API Key 要填，平台侧有哪些模型也不必让人关心），只有一个开关；与下面的自备供应商并存。 -->
+    <div class="setting-row ap-platform">
+      <div class="setting-info">
+        <span class="setting-name">使用 x-hub 平台免费额度</span>
+        <span class="setting-desc">{{ platformStatusText }}</span>
       </div>
-      <button class="ghost-btn" type="button" :disabled="platformBusy" @click="addPlatformModels">
-        {{ platformBusy ? '添加中…' : '添加平台模型' }}
+      <button
+        class="toggle"
+        role="switch"
+        type="button"
+        :aria-checked="platformEnabled"
+        :class="{ on: platformEnabled }"
+        :disabled="platformBusy"
+        :title="platformEnabled ? '关闭后平台额度条目会从配置中移除' : '开启后自动拉取平台当前可用的模型'"
+        @click="platformEnabled ? disablePlatform() : enablePlatform()"
+      >
+        <span class="toggle-knob"></span>
       </button>
     </div>
 
-    <div v-if="loading" class="ai-loading">加载中…</div>
+    <!-- 只有「还没有内容」时才让占位顶掉列表：已有卡片时的刷新一律静默，避免整块闪一下 -->
+    <div v-if="loading && providers.length === 0" class="ai-loading">加载中…</div>
 
     <template v-else>
       <!-- 供应商折叠卡片列表 -->
@@ -449,12 +526,8 @@ defineExpose({ reload: () => void loadProviders() })
           <div class="ai-field">
             <label class="ai-label">API Key</label>
             <div class="ai-key-row">
-              <!-- 平台额度：不展示 Key（存的是占位符，真凭据是账号登录态、只在请求时现取） -->
-              <div v-if="isPlatform(p)" class="key-display">
-                <span class="key-text">由账号登录态提供 · 无需填写</span>
-              </div>
               <!-- 已保存 Key：脱敏展示 + 眼睛查看全部 + 复制 -->
-              <template v-else-if="p.hasApiKey && !p.editingKey">
+              <template v-if="p.hasApiKey && !p.editingKey">
                 <div class="key-display">
                   <span class="key-text" :title="p.keyVisible ? p.savedKey : '点击眼睛查看全部'">
                     {{ p.keyVisible ? p.savedKey : maskKey(p.savedKey) }}
@@ -496,7 +569,7 @@ defineExpose({ reload: () => void loadProviders() })
             </div>
           </div>
 
-          <p v-if="p.msg" class="prov-msg" :class="{ ok: p.msg === '连通正常' || p.msg.startsWith('已添加') || p.msg.startsWith('获取到') }">{{ p.msg }}</p>
+          <p v-if="p.msg" class="prov-msg" :class="{ ok: p.msg.startsWith('连通正常') || p.msg.startsWith('已添加') || p.msg.startsWith('获取到') }">{{ p.msg }}</p>
 
           <!-- 获取到的模型列表：勾选添加 -->
           <div v-if="p.fetched.length" class="fetch-list">
@@ -548,33 +621,17 @@ defineExpose({ reload: () => void loadProviders() })
 </template>
 
 <style scoped>
-/* 平台免费额度卡片：与自备供应商区分，但不抢视觉重心 */
+/* 平台免费额度：一个开关行（.setting-row 通用样式来自设置页 shared.css），
+   与下面的自备供应商卡片刻意区分——它不是供应商，没有需要用户填的东西 */
 .ap-platform {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 4px 0 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-card-soft);
+  margin: 4px 0 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-soft);
 }
-.ap-platform-text {
+/* 说明文字用满整行剩余宽度：不给 max-width（ch 单位对中文只有半个字宽，会把话提前截在半行处） */
+.ap-platform .setting-info {
   flex: 1;
   min-width: 0;
-}
-.ap-platform-text b {
-  display: block;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-1);
-}
-.ap-platform-text span {
-  display: block;
-  margin-top: 2px;
-  font-size: 0.72rem;
-  line-height: 1.6;
-  color: var(--text-3);
 }
 
 .ai-intro {

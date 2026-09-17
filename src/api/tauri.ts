@@ -721,6 +721,14 @@ export interface ChatModelConfig {
   provider_name?: string
 }
 
+/** 平台免费额度在界面上的单一入口名（与后端 `chat.rs::PLATFORM_ENTRY_NAME` 是同一个值，改动需两端同步） */
+export const PLATFORM_ENTRY_NAME = 'x-hub 平台'
+
+/** 是否平台额度条目（写入时定死 `platform:` 前缀；旧条目可能只有 provider_name 标识，一并认） */
+export function isPlatformModel(m: ChatModelConfig): boolean {
+  return m.id.startsWith('platform:') || (m.provider_name ?? '').trim() === PLATFORM_ENTRY_NAME
+}
+
 export type ChatStreamEvent =
   | { type: 'chunk'; content: string }
   | { type: 'done'; message: ChatMessage; session: ChatSession }

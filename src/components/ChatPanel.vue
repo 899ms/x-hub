@@ -2,7 +2,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { marked, Renderer } from 'marked'
 import { ChevronDown, MessageSquare, PanelRightClose, Plus, Send, Settings2, X } from 'lucide-vue-next'
-import { isTauri, tauriApi, type ChatMessage, type ChatModelConfig, type ChatSession, type ChatStreamEvent } from '../api/tauri'
+import { PLATFORM_ENTRY_NAME, isPlatformModel, isTauri, tauriApi, type ChatMessage, type ChatModelConfig, type ChatSession, type ChatStreamEvent } from '../api/tauri'
 import AppSelect from './AppSelect.vue'
 
 const props = defineProps<{
@@ -53,10 +53,61 @@ const activeSession = computed(() => sessions.value.find((s) => s.id === activeS
 // 顶部直接显示当前对话标题（未命名时为「新对话」）
 const currentTitle = computed(() => activeSession.value?.title || '新对话')
 
-const modelOptions = computed(() =>
-  models.value.map((m) => ({ value: m.name, label: modelLabel(m), group: modelGroup(m) })),
-)
-const hasModels = computed(() => models.value.length > 0)
+// 平台额度在对话里是**一个入口**：模型下拉只显示「x-hub 平台」，不逐个列出平台的具体模型
+// ——具体用哪个由后端在多个平台模型之间负载切换（见 src-tauri commands::pick_chat_model）。
+// 自备供应商照旧：按供应商分组逐个列出，用户选哪个就是哪个。
+//（入口名与条目判定的单一来源在 api/tauri.ts，与 AiProviders 共用）
+
+// 平台入口的真实凭据是**账号登录态**：开关开了但没登录时同样发不出去，这里提前把状态查出来
+// （挂载与每次唤起都会随 loadModels 重查），让绿点/发送提示在发送前就说清原因
+const accountLoggedIn = ref(false)
+
+const platformEnabled = computed(() => models.value.some((m) => isPlatformModel(m)))
+
+const modelOptions = computed(() => {
+  const opts: { value: string; label: string; group: string }[] = []
+  if (platformEnabled.value) {
+    // 不设分组名：平台只有一个入口项，再套一层同名组头就成了「x-hub 平台 / x-hub 平台」两行
+    opts.push({ value: PLATFORM_ENTRY_NAME, label: PLATFORM_ENTRY_NAME, group: '' })
+  }
+  for (const m of models.value) {
+    if (isPlatformModel(m)) continue
+    opts.push({ value: m.name, label: modelLabel(m), group: modelGroup(m) })
+  }
+  return opts
+})
+const hasModels = computed(() => modelOptions.value.length > 0)
+
+// 会话里存的模型名 → 下拉显示值：平台的具体模型名（历史会话）统一归到平台入口
+function displayModelName(name: string): string {
+  const m = models.value.find((x) => x.name === name)
+  return m && isPlatformModel(m) ? PLATFORM_ENTRY_NAME : name
+}
+
+// 默认选中项：默认模型是平台条目（或只有平台条目）时用平台入口
+function defaultModelName(): string {
+  const def = models.value.find((m) => m.is_default)
+  if (def) return displayModelName(def.name)
+  return modelOptions.value[0]?.value ?? ''
+}
+
+// 当前选中项是否已具备可用凭据：平台入口的凭据是账号登录态（开关开且已登录才可用）
+const selectedReady = computed(() => {
+  if (selectedModel.value === PLATFORM_ENTRY_NAME) {
+    return platformEnabled.value && accountLoggedIn.value
+  }
+  return !!models.value.find((m) => m.name === selectedModel.value)?.has_api_key
+})
+
+// 绿点不亮时的一句缘由（悬停可见），把「为什么发不了」说在发送之前
+const readyHint = computed(() => {
+  if (selectedReady.value) return '模型就绪'
+  if (selectedModel.value === PLATFORM_ENTRY_NAME) {
+    if (!platformEnabled.value) return '平台额度未开启（设置 → AI 助手）'
+    return '平台额度需登录账号（设置 → 账号）'
+  }
+  return '当前模型未配置 API Key（设置 → AI 助手）'
+})
 
 // 去掉小数尾部的 ".0"（如 1.0 → 1）
 function trimZero(s: string): string {
@@ -122,13 +173,28 @@ async function openSession(id: number) {
   ])
   messages.value = msgs
   if (s) {
-    selectedModel.value = s.model_name
+    selectedModel.value = displayModelName(s.model_name)
     // 同步本地会话条目（标题 / token 等可能已变化）
     const i = sessions.value.findIndex((x) => x.id === id)
     if (i >= 0) sessions.value = sessions.value.map((x) => (x.id === id ? s : x))
   }
   // 打开会话强制定位到最新消息（非 force 模式会因 scrollTop=0 误判「不在底部」而停在第一句）
   scrollToBottom(true)
+  await commitSessionModel()
+}
+
+/// 把界面当前选中的模型写回当前会话。
+///
+/// **发送时后端只认会话里存的 model_name**（`send_chat_message` 按它解析模型配置），
+/// 所以显示归一之后必须落库，否则会出现「界面显示 A、实际按 B 发」的错位：最典型的
+/// 就是关掉平台额度后，老会话存的「x-hub 平台」已不可用，界面看着是别的模型、
+/// 一发却报「平台额度未开启」。
+async function commitSessionModel() {
+  if (!isTauri() || !selectedModel.value) return
+  const s = sessions.value.find((x) => x.id === activeSessionId.value)
+  if (!s || s.model_name === selectedModel.value) return
+  await tauriApi.setChatSessionModel(s.id, selectedModel.value)
+  s.model_name = selectedModel.value
 }
 
 async function createSession() {
@@ -214,10 +280,13 @@ function onWindowResize() {
 async function loadModels() {
   if (!isTauri()) return
   models.value = await tauriApi.getChatModels()
-  if (!selectedModel.value) {
-    const def = models.value.find((m) => m.is_default) ?? models.value[0]
-    if (def) selectedModel.value = def.name
-  }
+  // 平台入口的凭据是账号登录态，一并刷新（登录/退出只会发生在设置页，面板下次唤起时自然重查）
+  accountLoggedIn.value = (await tauriApi.accountStatus()).loggedIn
+  // 归一当前选中值：历史会话存的可能是某个具体平台模型名（平台已折叠成入口）、
+  // 也可能是已被移除的自备模型 —— 都回落到默认项
+  const cur = displayModelName(selectedModel.value)
+  selectedModel.value = modelOptions.value.some((o) => o.value === cur) ? cur : defaultModelName()
+  await commitSessionModel()
 }
 
 async function switchModel(name: string) {
@@ -243,12 +312,11 @@ async function send() {
     })
     return
   }
-  const cfg = models.value.find((m) => m.name === selectedModel.value)
-  if (!cfg || !cfg.has_api_key) {
-    showToast('当前模型未配置 API Key（设置 → AI 助手）', {
-      label: '去配置',
-      onClick: openModelSettings,
-    })
+  if (!selectedReady.value) {
+    // 未登录账号要走设置 → 账号，「去配置」跳的是 AI 助手分区，指错了路——这种情况不给按钮
+    const needLogin =
+      selectedModel.value === PLATFORM_ENTRY_NAME && platformEnabled.value && !accountLoggedIn.value
+    showToast(readyHint.value, needLogin ? undefined : { label: '去配置', onClick: openModelSettings })
     return
   }
 
@@ -649,7 +717,7 @@ defineExpose({
       <div class="cp-input-bar">
         <span v-if="sending" class="cp-hint">生成中…</span>
         <div class="model-sel">
-          <span class="dotg" :class="{ off: !models.find((m) => m.name === selectedModel)?.has_api_key }"></span>
+          <span class="dotg" :class="{ off: !selectedReady }" :title="readyHint"></span>
           <AppSelect
             v-if="hasModels"
             class="model-app-select"
