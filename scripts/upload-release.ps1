@@ -1,18 +1,15 @@
 # upload-release.ps1 — 上传 dist-release 产物到分发端点，并清理 `releases/win-x64/` 下最近 N 版之外的旧 zip。
-# 三通道：-Target cos（默认，腾讯云 COS）/-Target r2（过渡期兜底，Cloudflare R2）/-Target sftp（备选，自建 Nginx）/-Target all（双写）。
-# 过渡期每次发布直接 -Target all（cos + r2 依次各跑一遍）；详见 docs/self-hosted-distribution.md §6。
+# 通道：-Target cos（默认，腾讯云 COS，现行唯一有效通道）/-Target sftp（备选，自建 Nginx）。
+# R2 通道已于 2026-09 摘除；详见 docs/self-hosted-distribution.md §6。
 # 用法:
 #   .\scripts\upload-release.ps1                                 # cos → 腾讯云 COS（读 COS_* 环境变量）
-#   .\scripts\upload-release.ps1 -Target r2                      # → R2（读 R2_* 环境变量）
-#   .\scripts\upload-release.ps1 -Target all                     # → 双写：cos → r2 依次各跑一遍（任一失败立即中止）
 # 环境变量:
 #   COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET(含 APPID 后缀) / COS_REGION(如 ap-guangzhou)
-#   R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
 #   XHUB_DEPLOY_HOST / XHUB_DEPLOY_PORT(默认22) / XHUB_DEPLOY_USER(默认deploy) / XHUB_DEPLOY_KEY
 # 依赖: rclone (winget install --id Rclone.Rclone)
 
 param(
-  [ValidateSet('cos', 'sftp', 'r2', 'all')][string]$Target = 'cos',
+  [ValidateSet('cos', 'sftp')][string]$Target = 'cos',
 
   # —— cos（腾讯云 COS，长期主通道）——
   [string]$CosSecretId  = $env:COS_SECRET_ID,
@@ -28,12 +25,6 @@ param(
   [int]$HttpPort       = 8080,
   [string]$RemoteRoot  = "/srv/x-hub-dist",
 
-  # —— r2（过渡期兜底）——
-  [string]$AccountId       = $env:R2_ACCOUNT_ID,
-  [string]$AccessKeyId     = $env:R2_ACCESS_KEY_ID,
-  [string]$SecretAccessKey = $env:R2_SECRET_ACCESS_KEY,
-  [string]$Bucket          = "x-hub-dist",
-  [string]$R2BaseUrl       = "https://r2.dckxx.com",
 
   # —— 通用 ——
   [string]$DistDir   = (Join-Path $PSScriptRoot "..\dist-release"),
@@ -46,22 +37,6 @@ if (-not (Test-Path (Join-Path $DistDir "update.json"))) {
   Write-Error "本地产物缺失 update.json：请先运行 publish-release.ps1（$DistDir 不存在或未生成）。"
 }
 
-# --- 1. 双写模式：-Target all 依次调用自身跑 cos → r2（sftp 为独立备选通道，不参与双写）---
-if ($Target -eq 'all') {
-  foreach ($t in 'cos', 'r2') {
-    Write-Host ""
-    Write-Host "═══════ 双写通道 [$t] ═══════" -ForegroundColor Cyan
-    try {
-      $forward = @{} + $PSBoundParameters   # 转发用户显式传入的参数（Target 除外）
-      $forward['Target'] = $t
-      & $PSCommandPath @forward
-    } catch {
-      Write-Error "双写中止：通道 $t 失败 —— $($_.Exception.Message)（已完成通道不受影响，修复后可 -Target $t 单独重跑。）"
-    }
-  }
-  Write-Host "双写完成 ✔ cos + r2 均已更新" -ForegroundColor Green
-  exit 0
-}
 
 # --- 1. 检查 rclone ---
 if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
@@ -95,7 +70,7 @@ if ($Target -eq 'cos') {
   $remote  = "cos:$CosBucket"
   $urlBase = "https://$CosBucket.cos.$CosRegion.myqcloud.com"
   Write-Host "通道: cos → $remote/releases（缓存头随上传设置）"
-} elseif ($Target -eq 'sftp') {
+} else {
   if (-not $SftpHost -or -not $SftpKeyPath) {
     Write-Error "缺少部署参数。请用 -SftpHost/-SftpKeyPath 传入，或设置 XHUB_DEPLOY_HOST / XHUB_DEPLOY_KEY 环境变量（XHUB_DEPLOY_USER 默认 deploy、XHUB_DEPLOY_PORT 默认 22）。"
   }
@@ -114,23 +89,6 @@ if ($Target -eq 'cos') {
   $remote  = "xhubsftp:$RemoteRoot"
   $urlBase = "http://$SftpHost`:$HttpPort"
   Write-Host "通道: sftp → $remote/releases（缓存头由服务器端 Nginx 管理）"
-} else {
-  # ⛔ r2 通道已于 2026-09-15 随 R2 停用（对象已清空，备份在 E:\workspace\_x-hub-r2-backup）。
-  # 客户端升级清单默认读 COS，正常发版用默认的 -Target cos 即可；-Target all 会因 r2 失败而中止。
-  Write-Warning "r2 通道已停用（R2 桶已清空）：请改用 -Target cos。"
-  if (-not $AccountId -or -not $AccessKeyId -or -not $SecretAccessKey) {
-    Write-Error "缺少 R2 凭据。请用 -AccountId/-AccessKeyId/-SecretAccessKey 传入，或设置 R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY 环境变量。"
-  }
-
-  $env:RCLONE_CONFIG_R2_TYPE              = "s3"
-  $env:RCLONE_CONFIG_R2_PROVIDER          = "Cloudflare"
-  $env:RCLONE_CONFIG_R2_ACCESS_KEY_ID     = $AccessKeyId
-  $env:RCLONE_CONFIG_R2_SECRET_ACCESS_KEY = $SecretAccessKey
-  $env:RCLONE_CONFIG_R2_ENDPOINT          = "https://$AccountId.r2.cloudflarestorage.com"
-
-  $remote  = "r2:$Bucket"
-  $urlBase = $R2BaseUrl
-  Write-Host "通道: r2 → $remote/releases（缓存头随上传设置）"
 }
 
 $dest = "$remote/releases"

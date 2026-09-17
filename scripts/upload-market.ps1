@@ -4,20 +4,19 @@
 #    与服务端并存时会出现「清单与签名不是同一版」，客户端会拒收整份清单。
 #    应急绕过：设 XHUB_ALLOW_MANUAL_UPLOAD=1（仅在服务端不可用时；事后用 x-hub-server 的
 #    npm run verify:registry 核对线上清单与签名是同一对）。
-# 三通道：-Target cos（默认，腾讯云 COS）/-Target r2（过渡期兜底，Cloudflare R2）/-Target sftp（备选，自建 Nginx）/-Target all（双写）。
+# 通道：-Target cos（默认，腾讯云 COS，现行唯一有效通道）/-Target sftp（备选，自建 Nginx）。
+# R2 通道已于 2026-09 摘除（桶内 extensions/ 已清空、域名已作废，写进去也没人读），
+# 保留 sftp 是因为自建分发仍是一条可用的应急路线。
 # 用法:
 #   .\scripts\upload-market.ps1                                  # cos → 腾讯云 COS（读 COS_* 环境变量）
-#   .\scripts\upload-market.ps1 -Target r2                       # → R2（读 R2_* 环境变量）
 #   .\scripts\upload-market.ps1 -Target sftp                     # → 自建服务器（读 XHUB_DEPLOY_*）
-#   .\scripts\upload-market.ps1 -Target all                      # → 双写：cos → r2 依次各跑一遍（任一失败立即中止）
 # 环境变量:
 #   COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET(含 APPID 后缀) / COS_REGION(如 ap-guangzhou)
-#   R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
 #   XHUB_DEPLOY_HOST / XHUB_DEPLOY_PORT(默认22) / XHUB_DEPLOY_USER(默认deploy) / XHUB_DEPLOY_KEY
 # 依赖: rclone (winget install --id Rclone.Rclone)
 
 param(
-  [ValidateSet('cos', 'sftp', 'r2', 'all')][string]$Target = 'cos',
+  [ValidateSet('cos', 'sftp')][string]$Target = 'cos',
 
   # —— cos（腾讯云 COS，长期主通道）——
   [string]$CosSecretId  = $env:COS_SECRET_ID,
@@ -33,17 +32,10 @@ param(
   [int]$HttpPort       = 8080,
   [string]$RemoteRoot  = "/srv/x-hub-dist",
 
-  # —— r2（过渡期兜底）——
-  [string]$AccountId       = $env:R2_ACCOUNT_ID,
-  [string]$AccessKeyId     = $env:R2_ACCESS_KEY_ID,
-  [string]$SecretAccessKey = $env:R2_SECRET_ACCESS_KEY,
-  [string]$Bucket          = "x-hub-dist",
-  [string]$R2BaseUrl       = "https://r2.dckxx.com",
-
   # —— 通用 ——
   [string]$DistDir = (Join-Path $PSScriptRoot "..\dist-market"),
   [string]$Prefix  = "extensions",
-  # 抽查下载用的代理（如 http://127.0.0.1:7890）；直连 Cloudflare 慢的机器设置 XHUB_UPLOAD_PROXY 即可
+  # 抽查下载用的代理（如 http://127.0.0.1:7890）；直连对象存储慢的机器设置 XHUB_UPLOAD_PROXY 即可
   [string]$CheckProxy = $env:XHUB_UPLOAD_PROXY
 )
 
@@ -64,23 +56,6 @@ if ($isDistMarket -and $env:XHUB_ALLOW_MANUAL_UPLOAD -ne '1') {
 
 if (-not (Test-Path (Join-Path $DistDir "registry.json"))) {
   Write-Error "本地产物缺失 registry.json：请先运行 publish-extension.ps1（$DistDir 不存在或未生成）。"
-}
-
-# --- 1. 双写模式：-Target all 依次调用自身跑 cos → r2（sftp 为独立备选通道，不参与双写）---
-if ($Target -eq 'all') {
-  foreach ($t in 'cos', 'r2') {
-    Write-Host ""
-    Write-Host "═══════ 双写通道 [$t] ═══════" -ForegroundColor Cyan
-    try {
-      $forward = @{} + $PSBoundParameters   # 转发用户显式传入的参数（Target 除外）
-      $forward['Target'] = $t
-      & $PSCommandPath @forward
-    } catch {
-      Write-Error "双写中止：通道 $t 失败 —— $($_.Exception.Message)（已完成通道不受影响，修复后可 -Target $t 单独重跑。）"
-    }
-  }
-  Write-Host "双写完成 ✔ cos + r2 均已更新" -ForegroundColor Green
-  exit 0
 }
 
 # --- 1. 检查 rclone（PATH 未生效时自动定位 winget 安装路径）---
@@ -115,7 +90,7 @@ if ($Target -eq 'cos') {
   $remote  = "cos:$CosBucket"
   $urlBase = "https://$CosBucket.cos.$CosRegion.myqcloud.com" + $(if ($Prefix) { "/$Prefix" } else { "" })
   Write-Host "通道: cos → $remote/$Prefix（缓存头随上传设置）"
-} elseif ($Target -eq 'sftp') {
+} else {
   if (-not $SftpHost -or -not $SftpKeyPath) {
     Write-Error "缺少部署参数。请用 -SftpHost/-SftpKeyPath 传入，或设置 XHUB_DEPLOY_HOST / XHUB_DEPLOY_KEY 环境变量（XHUB_DEPLOY_USER 默认 deploy、XHUB_DEPLOY_PORT 默认 22）。"
   }
@@ -134,20 +109,6 @@ if ($Target -eq 'cos') {
   $remote  = "xhubsftp:$RemoteRoot"
   $urlBase = "http://$SftpHost`:$HttpPort" + $(if ($Prefix) { "/$Prefix" } else { "" })
   Write-Host "通道: sftp → $remote/$Prefix（缓存头由服务器端 Nginx 管理）"
-} else {
-  if (-not $AccountId -or -not $AccessKeyId -or -not $SecretAccessKey) {
-    Write-Error "缺少 R2 凭据。请用 -AccountId/-AccessKeyId/-SecretAccessKey 传入，或设置 R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY 环境变量。"
-  }
-
-  $env:RCLONE_CONFIG_R2_TYPE              = "s3"
-  $env:RCLONE_CONFIG_R2_PROVIDER          = "Cloudflare"
-  $env:RCLONE_CONFIG_R2_ACCESS_KEY_ID     = $AccessKeyId
-  $env:RCLONE_CONFIG_R2_SECRET_ACCESS_KEY = $SecretAccessKey
-  $env:RCLONE_CONFIG_R2_ENDPOINT          = "https://$AccountId.r2.cloudflarestorage.com"
-
-  $remote  = "r2:$Bucket"
-  $urlBase = if ($Prefix) { "$R2BaseUrl/$Prefix" } else { $R2BaseUrl }
-  Write-Host "通道: r2 → $remote/$Prefix（缓存头随上传设置）"
 }
 
 $dest = if ($Prefix) { "$remote/$Prefix" } else { $remote }
@@ -192,12 +153,12 @@ if ($local) {
   $dl = Join-Path $env:TEMP "market-check-$($local.Name)"
   $rel = $local.FullName.Substring((Resolve-Path $DistDir).Path.Length + 1).Replace('\','/')
   # 用系统 curl（--max-time 硬超时）：Invoke-WebRequest 在部分网络环境下读 CDN 包体会挂住且超时参数兜不住
-  # 直连 Cloudflare 慢的线路可设 XHUB_UPLOAD_PROXY（如 http://127.0.0.1:7890）让抽查走代理
+  # 直连对象存储慢的线路可设 XHUB_UPLOAD_PROXY（如 http://127.0.0.1:7890）让抽查走代理
   $curlArgs = @('-fsS', '--max-time', '120', '-o', $dl)
   if ($CheckProxy) { $curlArgs += @('-x', $CheckProxy) }
   $curlArgs += "$urlBase/$rel"
   curl.exe @curlArgs
-  if ($LASTEXITCODE -ne 0) { Write-Error "sha256 抽查下载失败（curl exit=$LASTEXITCODE，超时或非 2xx）：$urlBase/$rel —— 若直连 Cloudflare 过慢，请设置 XHUB_UPLOAD_PROXY 后重跑" }
+  if ($LASTEXITCODE -ne 0) { Write-Error "sha256 抽查下载失败（curl exit=$LASTEXITCODE，超时或非 2xx）：$urlBase/$rel —— 若直连对象存储过慢，请设置 XHUB_UPLOAD_PROXY 后重跑" }
   $dlHash = (Get-FileHash $dl -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($hash -ne $dlHash) { Write-Error "sha256 不一致！本地 $hash vs 远端 $dlHash" }
   Remove-Item $dl -Force

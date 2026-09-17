@@ -14,8 +14,12 @@
 > 内置 endpoint 自 v0.5.1（commit `c9c203c`）起指向 COS；老 `app.json` 里残留的停用域名在
 > **配置装载时一次性迁移**（`config.rs::migrate_retired_endpoints`，`market_endpoint` 与
 > `update_endpoint` 都覆盖），所以升级到含该逻辑的版本后自动自愈，不需要用户手工改配置。
-> 备选：自建 Nginx 静态托管（`scripts/server/` + §8），当前不启用。
-> 客户端（`market.rs` / `updater.rs`）零改动：只认 `market_endpoint` / `update_endpoint` 两个 URL + 内嵌 Ed25519 公钥。
+> **v0.6.1 又往前走了一步（2026-09-17）**：客户端**不再直连 COS**，也不再有 `market_endpoint` /
+> `update_endpoint` 这两个配置项 —— 清单/包/截图/升级包一律走平台服务端接口
+> （`https://x-hub.xfactor.top/api/v1/market/registry`、`/api/v1/app/update`，由 x-hub-server 的
+> `src/modules/market` 代理 COS，见该仓 `docs/DEPLOY-market-serving.md`）。两个字段降级为**兼容占位**、
+> 读到即被 `config.rs::migrate_legacy_endpoints` 归一为服务端地址并落盘；`DEFAULT_SERVER_URL` 同时切 https。
+> 客户端（`market.rs` / `updater.rs`）依旧只认一个 URL + 内嵌 Ed25519 公钥，地址改为按服务端常量拼。
 > 前置方案文档：`docs/r2-distribution-and-updater.md`（R2 时代的目录布局与签名约定，本文完全沿用；R2 相关部分已作废）。
 
 ## 1. 为什么 COS 优于自建 Nginx（当前处境下）
@@ -86,13 +90,13 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 | `XHUB_SIGNING_KEY` | `E:\workspace\.x-hub-signing\market.key` | Ed25519 签名私钥（不变） |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | — | **已作废**（R2 的 `extensions/` 已清空 → 市场侧 404；`releases/` 侧虽仍写得进去但没人再读） |
 
-用法（`-Target cos` 是默认且**现在唯一有效**的通道；`-Target r2` 随 R2 市场对象清空而失效，`-Target sftp` 属备选 Nginx 方案（不启用）。`-Target all` **不要再用**：它写的 R2 副本没有任何客户端会读，且 `upload-release` 那条因为 `releases/` 还能 200 而**静默不报错**（更好骗过自己），`upload-market` 那条会在 R2 侧的校验上 404 中止）：
+用法（`-Target cos` 是默认且**现在唯一有效**的通道；`-Target sftp` 属备选 Nginx 方案（不启用）。R2 通道与其 `all` 双写模式已于 2026-09 **从脚本里摘除**——`-Target r2` / `-Target all` 现在会被参数校验直接拒绝，不再有「写了没人读、还静默不报错」的坑）：
 
 ```powershell
 # 应用发版（仍然有效：客户端应用发布不经过扩展市场）
 ./scripts/publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version 0.6.0 `
   -SignKey E:\workspace\.x-hub-signing\market.key -Notes "…"
-./scripts/upload-release.ps1 -Target cos         # → 只写 COS（R2 已退役）
+./scripts/upload-release.ps1 -Target cos         # → 只写 COS（R2 通道已从脚本摘除）
 
 # 扩展发布 —— ⛔ 已停用（2026-09）：改走客户端「扩展中心 → 发布」，由服务端审核台签名并推送
 # ./scripts/publish-extension.ps1 -ExtDir …       # 需 XHUB_ALLOW_LOCAL_PUBLISH=1 才可绕过（应急）
@@ -132,20 +136,22 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 
 1. COS 就位并按 §3 验证通过（重点 **206**）。
 2. **存量拉平**（旧版本包必须留在 COS，各版本客户端都依赖旧路径）：
-   ```powershell
-   .\scripts\sync-r2-to-cos.ps1    # R2_* + COS_* 环境变量，一条命令同步 extensions + releases
-   ```
-3. 本机先验证：把数据根下 `app.json` 的 `market_endpoint` 改成
+   一次性脚本 `scripts/sync-r2-to-cos.ps1` 当时用来把 R2 存量同步到 COS；**该脚本已于 2026-09 删除**
+   （它用 `rclone sync` 会删除目标端多余对象，R2 侧清空后重跑等于把 COS 清空，留着是隐患）。
+   存量核对改为只读手段：`upload-market.ps1 -Target cos` 末尾的 HTTP 200 + sha256 抽查，
+   以及 x-hub-server 的 `npm run verify:registry`。
+3. 本机先验证：当时是把数据根下 `app.json` 的 `market_endpoint` 改成
    `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/extensions/registry.json`，
    刷新市场能拉清单、能安装扩展。
-   ⚠️ **界面上没有这个入口**（只有报错文案，入口在早期版本里已被移除）；含
-   `config.rs::migrate_retired_endpoints` 的版本（v0.6.1 起）会自动完成这个改写，无需手工编辑。
-4. **每次发版双传**（§4 的 `-Target cos` + `-Target r2` 都跑），保证两边 update.json / registry.json 一致；清单内的包 URL 优先指 COS（提前分流下载），R2 仅作清单可达性兜底。
+   ⚠️ 该字段自 v0.6.1 起**已废弃不再被读取**（地址按服务端常量拼），改它不会有任何效果；
+   老 `app.json` 里的残留值会被 `config.rs::migrate_legacy_endpoints` 归一为服务端接口地址并落盘。
+4. **每次发版双传**（历史做法，已废弃）：当时要求 §4 的 `-Target cos` + `-Target r2` 都跑；R2 通道现已从脚本摘除，正常发版只跑 `-Target cos`。
 
 ### 阶段 1：分水岭版本
 
 - 改 `src-tauri/src/config.rs` 的 `DEFAULT_MARKET_ENDPOINT` / `DEFAULT_UPDATE_ENDPOINT` → COS 域名，发版；
-- 该版本照常双传：老客户端从 R2 拿到这份 update.json → 包从 COS 下载 → 升级完成 → 从此走新链路；
+  （v0.6.1 起这两个常量已被 `market_registry_url()` / `update_manifest_url()` 取代，地址改为按
+  `DEFAULT_SERVER_URL` 拼平台服务端接口；自建分发要改的是 `DEFAULT_SERVER_URL` 并自行部署服务端代理。）- 该版本照常双传：老客户端从 R2 拿到这份 update.json → 包从 COS 下载 → 升级完成 → 从此走新链路；
 - 分水岭版发布后仍**保持双传**，进入观察期。
 
 ### 阶段 2：观察期（建议 ≥ 4~8 周，覆盖 2~3 个发版周期）**（已跳过）**
