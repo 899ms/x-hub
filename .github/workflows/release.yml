@@ -85,7 +85,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: 'x-hub ${{ github.ref_name }}'
+          # ⚠️ 参数名是 `name`，不是 `release_name`（写错会被静默忽略，标题退回 tag 名 vX.Y.Z；
+          #    v0.6.0 的 run 报过 "Unexpected input(s) 'release_name'"）
+          name: 'x-hub ${{ github.ref_name }}'
           body_path: release_notes.md
           files: |
             ${{ steps.package.outputs.zip_name }}
