@@ -6,10 +6,15 @@
 > CI（`release-extension.yml`）**均已停用**，仅作分发端点拓扑与应急参考。
 > 面向扩展作者的正式文档见 `x-hub-extensions/docs/guide/publishing.md`。
 
-> 状态：**发布脚本 / CI / 拉平脚本已全部改造完毕**；COS 侧待按 §2 开桶。
+> 状态：**已切换完成 —— COS 是唯一分发通道**。R2 自 **2026-09-15 停用**：`r2.dckxx.com` 与
+> `dist.x-hub.dev` 上的 `extensions/…` / `releases/…` 一律 **404**，§6 的三阶段切换停在阶段 1
+> （阶段 3 的 302 兜底**未采用**）。
+> 内置 endpoint 自 v0.5.1（commit `c9c203c`）起指向 COS；老 `app.json` 里残留的停用域名在
+> **配置装载时一次性迁移**（`config.rs::migrate_retired_endpoints`，`market_endpoint` 与
+> `update_endpoint` 都覆盖），所以升级到含该逻辑的版本后自动自愈，不需要用户手工改配置。
 > 备选：自建 Nginx 静态托管（`scripts/server/` + §8），当前不启用。
 > 客户端（`market.rs` / `updater.rs`）零改动：只认 `market_endpoint` / `update_endpoint` 两个 URL + 内嵌 Ed25519 公钥。
-> 前置方案文档：`docs/r2-distribution-and-updater.md`（R2 时代的目录布局与签名约定，本文完全沿用）。
+> 前置方案文档：`docs/r2-distribution-and-updater.md`（R2 时代的目录布局与签名约定，本文完全沿用；R2 相关部分已作废）。
 
 ## 1. 为什么 COS 优于自建 Nginx（当前处境下）
 
@@ -77,24 +82,24 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 | `COS_BUCKET` / `COS_REGION` | `x-hub-dist-1251402600` / `ap-guangzhou` | COS 通道（主） |
 | `XHUB_DIST_BASE_URL` | `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com` | 发布脚本拼清单内 URL（publish-*.ps1） |
 | `XHUB_SIGNING_KEY` | `E:\workspace\.x-hub-signing\market.key` | Ed25519 签名私钥（不变） |
-| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | 原 R2 凭据 | 过渡期 `-Target r2` 双传用（R2 退役后可清） |
+| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | — | **已作废**（R2 已退役，`-Target r2` 无意义，变量可清） |
 
-用法（上传脚本四通道：`-Target cos` 默认主通道，`-Target r2` 过渡期兜底，`-Target sftp` 备选 Nginx，`-Target all` 双写=cos+r2 依次各跑一遍、任一失败立即中止）：
+用法（`-Target cos` 是默认且**现在唯一可用**的通道；`-Target r2` 随 R2 退役失效，`-Target sftp` 属备选 Nginx 方案（不启用），`-Target all` 会先写 COS、再撞 R2 的 404 而中止 —— **不要再用 all**）：
 
 ```powershell
 # 应用发版（仍然有效：客户端应用发布不经过扩展市场）
-./scripts/publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version 0.5.1 `
+./scripts/publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version 0.6.0 `
   -SignKey E:\workspace\.x-hub-signing\market.key -Notes "…"
-./scripts/upload-release.ps1 -Target all         # → 双写：COS + R2（过渡期推荐）
+./scripts/upload-release.ps1 -Target cos         # → 只写 COS（R2 已退役）
 
 # 扩展发布 —— ⛔ 已停用（2026-09）：改走客户端「扩展中心 → 发布」，由服务端审核台签名并推送
 # ./scripts/publish-extension.ps1 -ExtDir …       # 需 XHUB_ALLOW_LOCAL_PUBLISH=1 才可绕过（应急）
-# ./scripts/upload-market.ps1 -Target all         # 需 XHUB_ALLOW_MANUAL_UPLOAD=1 才可绕过（应急）
+# ./scripts/upload-market.ps1 -Target cos         # 需 XHUB_ALLOW_MANUAL_UPLOAD=1 才可绕过（应急）
 ```
 
 脚本均以 rclone remote（环境变量临时配置，不落地）上传，末尾自动做 HTTP 200 + sha256 抽查校验；`upload-release.ps1` 保留 win-x64 只留最近 2 版的清理策略。对象存储通道的缓存头随上传设置（`--header-upload`，即写对象元数据 Cache-Control）。
 
-> 网络提示：直连 Cloudflare（r2.dckxx.com）过慢的机器，设置环境变量 `XHUB_UPLOAD_PROXY=http://127.0.0.1:7890`（或传 `-CheckProxy`）让脚本末尾的抽查下载走代理，只影响校验、不影响上传。
+> 网络提示：分发走腾讯云 COS 域名，国内通常直连即可；需要走代理的机器设置环境变量 `XHUB_UPLOAD_PROXY=http://127.0.0.1:7890`（或传 `-CheckProxy`）让脚本末尾的抽查下载走代理，只影响校验、不影响上传。
 
 ## 5. CI 通道（GitHub Actions，扩展发布）
 
@@ -107,24 +112,32 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 | `CDN_BASE_URL` | `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com` | 原有，改值 |
 | `UPDATE_SIGNING_KEY` | Ed25519 私钥（签名用） | **不变** |
 | `SSH_PRIVATE_KEY` / `DEPLOY_*` | — | **作废可删**（Nginx 备选才需要） |
-| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | — | R2 退役后可删（CI 已不用） |
+| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | — | **已作废**（R2 已退役，CI 与脚本均不再使用） |
 
-## 6. 过渡方案：三阶段切换，老用户升级不断链
+## 6. 过渡方案：三阶段切换，老用户升级不断链（**历史记录**）
 
-**原理**：老客户端能否升级，取决于它二进制里烘焙的默认 endpoint（当前 = R2）是否可达；而「清单从哪拉来」与「清单里包 URL 指向哪」互相独立——从 R2 拉到的 update.json 完全可以把包 URL 指向 COS。所以：
+> 阶段 0/1 已完成（分水岭版本 = v0.5.1，commit `c9c203c`）；阶段 3 的 302 兜底**未采用** ——
+> R2 直接停用，客户端侧改由「配置装载时迁移停用域名」兜底（见文首状态说明）。
+> 下面保留原文，便于回溯当时的判断依据。
+
+**原理**：老客户端能否升级，取决于它二进制里烘焙的默认 endpoint（R2 时代 = R2，v0.5.1 起 = COS）是否可达；而「清单从哪拉来」与「清单里包 URL 指向哪」互相独立——从 R2 拉到的 update.json 完全可以把包 URL 指向 COS。所以：
 
 - R2 存活期间，老用户永远能升级，且升级目标可以是 COS 上的包；
 - 「默认 endpoint 切到 COS」的那个版本是**分水岭版本**：升级过它的客户端从此走新链路；
 - R2 的退役时间由「活跃用户版本 ≥ 分水岭版本」决定，与 COS 上线时间解耦，**不存在「一换就升不了级」的窗口**。
 
-### 阶段 0：双活（现在 → 分水岭版发布）
+### 阶段 0：双活（**已完成**）
 
 1. COS 就位并按 §3 验证通过（重点 **206**）。
 2. **存量拉平**（旧版本包必须留在 COS，各版本客户端都依赖旧路径）：
    ```powershell
    .\scripts\sync-r2-to-cos.ps1    # R2_* + COS_* 环境变量，一条命令同步 extensions + releases
    ```
-3. 本机先验证：设置 → 扩展 → 市场源改为 `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/extensions/registry.json`（UI 可改），刷新市场能拉清单、能安装扩展。
+3. 本机先验证：把数据根下 `app.json` 的 `market_endpoint` 改成
+   `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/extensions/registry.json`，
+   刷新市场能拉清单、能安装扩展。
+   ⚠️ **界面上没有这个入口**（只有报错文案，入口在早期版本里已被移除）；含
+   `config.rs::migrate_retired_endpoints` 的版本（v0.6.1 起）会自动完成这个改写，无需手工编辑。
 4. **每次发版双传**（§4 的 `-Target cos` + `-Target r2` 都跑），保证两边 update.json / registry.json 一致；清单内的包 URL 优先指 COS（提前分流下载），R2 仅作清单可达性兜底。
 
 ### 阶段 1：分水岭版本
@@ -133,12 +146,15 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 - 该版本照常双传：老客户端从 R2 拿到这份 update.json → 包从 COS 下载 → 升级完成 → 从此走新链路；
 - 分水岭版发布后仍**保持双传**，进入观察期。
 
-### 阶段 2：观察期（建议 ≥ 4~8 周，覆盖 2~3 个发版周期）
+### 阶段 2：观察期（建议 ≥ 4~8 周，覆盖 2~3 个发版周期）**（已跳过）**
 
 - 继续双传；盯 Cloudflare R2 仪表盘的 Class B（读）操作数衰减；
 - 读量降到接近零 = 活跃客户端基本都过了分水岭 → 进入阶段 3。
 
-### 阶段 3：R2 优雅退役（302 兜底，客户端已验证跟随重定向）
+### 阶段 3：R2 优雅退役（302 兜底，客户端已验证跟随重定向）**（未采用）**
+
+> 实际做法：R2 于 2026-09-15 直接停用，没有配 302 —— 兜底改在客户端侧：
+> `config.rs::migrate_retired_endpoints` 在装载配置时把指向停用域名的端点改写成内置 COS 地址。
 
 - `market.rs` / `updater.rs` 的 reqwest 客户端均未关闭重定向（默认跟随最多 10 次），因此可在 Cloudflare 给 `r2.dckxx.com` 配 **Redirect Rule**：动态重定向 `concat("https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com", http.request.uri.path)`，状态码 302——清单/`.sig`/包/图标按路径通配全部覆盖；
 - DNS 侧：R2 桶的自定义域绑定可解除，但保留 `r2.dckxx.com` 的 DNS 记录并开启橙云代理（占位记录即可），Redirect Rule 才能接管该主机名的请求；
@@ -159,13 +175,13 @@ COS 默认域名长期可用，不必动。备案下来后如想用自己的域�
 
 ## 9. 与 R2 方案的差异备忘
 
-| 关注点 | R2（现状） | COS（目标） |
+| 关注点 | R2（已退役，2026-09-15） | COS（现役） |
 |---|---|---|
-| 域名 | 自定义域 `r2.dckxx.com`（Cloudflare 签发证书） | 默认域 `<bucket>.cos.<region>.myqcloud.com`（腾讯签发证书） |
+| 域名 | 自定义域 `r2.dckxx.com`（已停用，一律 404） | 默认域 `<bucket>.cos.<region>.myqcloud.com`（腾讯签发证书） |
 | 上传 | rclone s3 provider Cloudflare | rclone s3 provider TencentCOS |
 | 缓存头 | 上传时 `--header-upload` | 同左（写对象元数据） |
 | 断点续传 | 边缘支持 206 | 支持 206 |
 | 出口流量 | 免费 | ~0.5 元/GB（国内），个人规模月成本个位数元 |
 | 签名/验签 | 不变 | 不变 |
 | 清单格式 | 不变 | 不变 |
-| 退役兜底 | — | R2 侧 Redirect Rule 302 → COS（reqwest 默认跟随重定向，已验证代码未关闭） |
+| 退役兜底 | — | ~~R2 侧 Redirect Rule 302 → COS~~ **未采用**：直接停用 + 客户端装载时迁移停用域名 |

@@ -5,8 +5,13 @@
 > 本文里的 `scripts/publish-extension.ps1`（§方式 B：本地脚本）与 `release-extension.yml`（CI）
 > **均已停用**，保留仅作分发/签名约定与历史记录。
 
-> 状态：**P0+P1+P2 已实施**（2026-08-26）；**P3 应用升级已随 v0.3.0 实施**（`src-tauri/src/updater.rs` + `signing.rs`：update.json Ed25519 验签 + minimumUpgradable 跳级保护 + sha256 下载校验 + 重启自替换/回滚）。
+> 状态：**历史文档**。R2 已于 **2026-09-15 停用**（`r2.dckxx.com` / `dist.x-hub.dev` 一律 404），
+> 分发通道现为腾讯云 COS —— **现役方案见 `docs/self-hosted-distribution.md`**。
+> 本文保留的价值只在「目录布局 + Ed25519 签名/验签约定 + 应用自升级流程」，其中出现的
+> `r2.dckxx.com` / `dist.x-hub.dev` 域名与「默认 endpoint = R2」的描述**均已作废**，不要照抄。
 > 实施记录见文末附录。
+
+> （历史）实施状态：**P0+P1+P2 已实施**（2026-08-26）；**P3 应用升级已随 v0.3.0 实施**（`src-tauri/src/updater.rs` + `signing.rs`：update.json Ed25519 验签 + minimumUpgradable 跳级保护 + sha256 下载校验 + 重启自替换/回滚）。
 
 ## 1. 目标与现状
 
