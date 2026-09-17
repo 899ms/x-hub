@@ -10,7 +10,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-6.x-3178c6?logo=typescript&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-1.77+-dea584?logo=rust&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-local-003b57?logo=sqlite&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.6.0-blue)
+![Version](https://img.shields.io/badge/version-0.6.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 </div>
@@ -55,7 +55,7 @@
 无边框 + 透明自制标题栏（拖动/最大化/还原/置顶按钮/关闭至托盘）；系统托盘常驻；`Ctrl+Shift+Space` 全局唤起；记忆窗口位置尺寸；便签/倒计时独立浮窗。
 
 ### 🔄 应用自动更新
-**自研升级链路**：从 `releases/update.json` 升级清单拉取**新版本信息**（Ed25519 分离签名验签，内嵌公钥验签通过才信任）→ semver 版本比较 + **跳级保护**（`minimumUpgradable` 下限）→ **自动静默检查**（启动 5s 后 + 默认每 4 小时，可在 About 关闭）；发现新版本弹出**全局更新弹窗**（版本号 / 说明 / 体积 / 便携版标记），支持**跳过此版本**（记录到配置）/**立即更新**（流式下载 + 实时进度条 + sha256 完整性校验）/ 就绪后**立即重启**；重启时解包并两步 rename **自替换**，失败自动回滚、下次启动重试；About「检查更新」可手动触发。更新包分发在 R2 CDN，支持标准版 / 便携版分别取包。
+**自研升级链路**：从 `releases/update.json` 升级清单拉取**新版本信息**（Ed25519 分离签名验签，内嵌公钥验签通过才信任）→ semver 版本比较 + **跳级保护**（`minimumUpgradable` 下限）→ **自动静默检查**（启动 5s 后 + 默认每 4 小时，可在 About 关闭）；发现新版本弹出**全局更新弹窗**（版本号 / 说明 / 体积 / 便携版标记），支持**跳过此版本**（记录到配置）/**立即更新**（流式下载 + 实时进度条 + sha256 完整性校验）/ 就绪后**立即重启**；重启时解包并两步 rename **自替换**，失败自动回滚、下次启动重试；About「检查更新」可手动触发。更新包分发在腾讯云 COS，支持标准版 / 便携版分别取包。
 
 ### 💾 数据存储与便携
 所有数据默认本地存储，支持三种形态灵活切换：**标准版**数据默认在 `%APPDATA%\x-hub`，可在设置中「更改数据存储路径」迁移到任意目录（迁移后重启生效）；**便携版**只需在 exe 同目录放一个空文件 `portable`，数据即固定跟随 `exe\data` 子目录，整个文件夹拷到 U 盘即可随身携带；**数据备份/恢复**打包为 `x-hub-backup-时间戳.zip` 单个压缩包，便于归档与迁移。

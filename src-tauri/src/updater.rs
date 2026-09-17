@@ -208,14 +208,9 @@ fn sanitize_update_error(mut msg: String, endpoint: &str, sig_url: &str) -> Stri
     msg
 }
 
-/// 更新清单地址（用户可配置覆盖）。
+/// 更新清单地址（内置常量：平台服务端接口，服务端再代理 COS）。
 fn update_endpoint() -> String {
-    let cfg = crate::config::load();
-    if cfg.update_endpoint.trim().is_empty() {
-        crate::config::DEFAULT_UPDATE_ENDPOINT.to_string()
-    } else {
-        cfg.update_endpoint.trim().to_string()
-    }
+    crate::config::update_manifest_url()
 }
 
 /// 拉取更新清单并验签（未验签通过一律不信任）。返回 `(清单, 原字节)`。

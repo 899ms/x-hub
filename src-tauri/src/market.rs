@@ -1,7 +1,9 @@
 //! 扩展市场（spec §11 安装页「市场」tab）。
 //!
-//! 数据源为**远端市场清单**：`config::market_endpoint`（默认
-//! `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/extensions/registry.json`）。客户端拉取清单后做
+//! 数据源为**远端市场清单**：内置地址 `config::market_registry_url()`
+//! （`https://x-hub.xfactor.top/api/v1/market/registry`，v0.6.1 起走平台服务端接口——
+//! 服务端代理 COS 并把清单里的下载/图标地址改写成服务端地址后再用发布私钥重签；
+//! 此前是配置项 `market_endpoint`，直连 COS 桶，已废弃）。客户端拉取清单后做
 //! Ed25519 验签（`signing` 模块），通过才原子缓存到 `data_root()/market/registry.json`；
 //! 离线 / 验签失败时回退本地缓存，市场仍可浏览（带警示）。
 //!
@@ -188,12 +190,8 @@ fn sanitize_market_error(mut msg: String, endpoint: &str, sig_url: &str) -> Stri
 /// → 原子落缓存。任何一步失败都回退本地缓存并携带原因（不阻塞浏览）。
 #[tauri::command]
 pub async fn refresh_market_registry() -> Result<MarketStatus, String> {
-    let cfg = crate::config::load();
-    let endpoint = if cfg.market_endpoint.trim().is_empty() {
-        crate::config::DEFAULT_MARKET_ENDPOINT.to_string()
-    } else {
-        cfg.market_endpoint.trim().to_string()
-    };
+    // 地址是内置常量（平台服务端接口，服务端再代理 COS）：v0.6.1 起不再读配置
+    let endpoint = crate::config::market_registry_url();
     let sig_url = format!("{endpoint}.sig");
     log::info!("刷新市场清单: {endpoint}");
 

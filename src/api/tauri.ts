@@ -208,8 +208,6 @@ export interface AppConfig {
   extension_open_modes: Record<string, string>
   /** 开机自启动（登录 Windows 时自动驻留托盘） */
   run_at_startup: boolean
-  /** 应用升级清单远端地址（空 = 用默认值 https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/releases/update.json） */
-  update_endpoint: string
   /** 自动升级总开关（默认开启） */
   auto_update_enabled: boolean
   /** 静默检查更新频率（小时，默认 4） */

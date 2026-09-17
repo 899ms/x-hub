@@ -108,7 +108,6 @@ const state = reactive<StoreState>({
     sidebar_extensions: [],
     extension_open_modes: {},
     run_at_startup: false,
-    update_endpoint: '',
     auto_update_enabled: true,
     update_interval_hours: 4,
     skipped_update_version: '',

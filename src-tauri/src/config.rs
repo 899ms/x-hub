@@ -163,8 +163,12 @@ pub struct AppConfig {
     /// 扩展「默认打开方式」映射：extId → view / window / drawer（未设置时默认 view）
     #[serde(default)]
     pub extension_open_modes: std::collections::HashMap<String, String>,
-    /// 市场清单远端地址（空 = 用默认值）
-    #[serde(default = "default_market_endpoint")]
+    /// ⚠️ **已废弃、不再被读取**（v0.6.1）：市场清单地址的唯一真相源是内置常量
+    /// [`market_registry_url`]——从 v0.6.1 起客户端**不再直连对象存储**，清单/包/截图一律走
+    /// 平台服务端接口（`x-hub-server` 的 `src/modules/market`，服务端再代理 COS）。
+    /// 字段保留只为兼容旧 `app.json`：读到即被 [`migrate_legacy_endpoints`] 归一为服务端地址并落盘。
+    /// 不要再从它读地址（要恢复「自建分发可配置」时，请连同设置入口一起加回来）。
+    #[serde(default)]
     pub market_endpoint: String,
     /// ⚠️ **已废弃、不再被读取**（v0.6.x）：曾经是「开发者模式」总开关，现在**登记即加载**——
     /// 加进「我的扩展」的本机源码目录一律直挂（见 docs/adr/0005 的 v0.6.x 修订）。
@@ -189,8 +193,10 @@ pub struct AppConfig {
     /// 开机自启动（登录 Windows 时自动驻留托盘）
     #[serde(default)]
     pub run_at_startup: bool,
-    /// 应用自动升级清单远端地址（空 = 用默认值）
-    #[serde(default = "default_update_endpoint")]
+    /// ⚠️ **已废弃、不再被读取**（v0.6.1）：升级清单地址的唯一真相源是内置常量
+    /// [`update_manifest_url`]（同样走平台服务端接口，见 `market_endpoint` 字段注释）。
+    /// 字段保留只为兼容旧 `app.json`，读到即被 [`migrate_legacy_endpoints`] 归一并落盘。
+    #[serde(default)]
     pub update_endpoint: String,
     /// 自动升级总开关（默认开启）：关闭后不再发起版本检查
     #[serde(default = "default_true")]
@@ -268,29 +274,34 @@ fn default_runtime_strategy() -> String {
     "auto".to_string()
 }
 
-/// x-hub 平台服务端地址（账号登录 / 平台额度 / 申请开发者 / 发布扩展都基于它）。
+/// x-hub 平台服务端地址（账号登录 / 平台额度 / 申请开发者 / 发布扩展 / 市场清单 / 升级清单都基于它）。
 ///
 /// **唯一真相源，且刻意不可配置**：正式域名启用后，设置页的「服务器地址」入口已移除
 /// （见约定 52）。此前可配置是为了开发期临时指向本机联调地址，代价是老用户机器上
 /// 残留的临时地址会在正式域名上线后继续生效、而界面上又没有入口可以改回来。
-pub const DEFAULT_SERVER_URL: &str = "http://x-hub.xfactor.top";
+///
+/// v0.6.1 起为 `https`：域名已于 2026-09-17 上 Let's Encrypt 证书（http 会 301 到 https），
+/// 账号 token、市场清单、升级包与 AI 请求不再明文过网。
+pub const DEFAULT_SERVER_URL: &str = "https://x-hub.xfactor.top";
 
-/// 默认市场清单远端地址（腾讯云 COS 公有读桶）
-pub const DEFAULT_MARKET_ENDPOINT: &str = "https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/extensions/registry.json";
+/// 市场清单接口路径（服务端代理，客户端不再知道 COS 在哪里）。
+pub const MARKET_REGISTRY_PATH: &str = "/api/v1/market/registry";
 
-/// 默认应用升级清单远端地址（与实际部署的 COS 桶对应）
-pub const DEFAULT_UPDATE_ENDPOINT: &str = "https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/releases/update.json";
+/// 应用升级清单接口路径（同上）。
+pub const UPDATE_MANIFEST_PATH: &str = "/api/v1/app/update";
 
-fn default_update_endpoint() -> String {
-    DEFAULT_UPDATE_ENDPOINT.to_string()
+/// 市场清单地址（平台服务端接口，`.sig` 为同级 `{url}.sig`）。
+pub fn market_registry_url() -> String {
+    format!("{DEFAULT_SERVER_URL}{MARKET_REGISTRY_PATH}")
+}
+
+/// 应用升级清单地址（平台服务端接口，`.sig` 为同级 `{url}.sig`）。
+pub fn update_manifest_url() -> String {
+    format!("{DEFAULT_SERVER_URL}{UPDATE_MANIFEST_PATH}")
 }
 
 fn default_update_interval_hours() -> u64 {
     4
-}
-
-fn default_market_endpoint() -> String {
-    DEFAULT_MARKET_ENDPOINT.to_string()
 }
 
 /// 环形菜单默认 6 个按钮（ADR 0004）：工作台 / 速记 / 速达 / 全局搜索 / 剪贴板 / 设置
@@ -358,14 +369,16 @@ impl Default for AppConfig {
             runtime_strategy: "auto".to_string(),
             sidebar_extensions: Vec::new(),
             extension_open_modes: std::collections::HashMap::new(),
-            market_endpoint: default_market_endpoint(),
+            // 废弃字段（不再被读取）：市场清单地址真相源是 config::market_registry_url()
+            market_endpoint: String::new(),
             dev_mode_enabled: false, // 已废弃字段：仅为兼容旧 app.json 保留，不再读取
             dev_extensions: Vec::new(),
             skill_roots: Vec::new(),
             // 废弃字段（不再被读取）：地址真相源是 DEFAULT_SERVER_URL，见字段注释
             server_url: String::new(),
             run_at_startup: false,
-            update_endpoint: default_update_endpoint(),
+            // 废弃字段（不再被读取）：升级清单地址真相源是 config::update_manifest_url()
+            update_endpoint: String::new(),
             auto_update_enabled: true,
             update_interval_hours: default_update_interval_hours(),
             skipped_update_version: String::new(),
@@ -443,60 +456,41 @@ fn normalize(config: &mut AppConfig) -> bool {
         config.clock_quote = String::new();
         changed = true;
     }
-    if migrate_retired_endpoints(config) {
+    if migrate_legacy_endpoints(config) {
         changed = true;
     }
     changed
 }
 
-/// **已停用**的分发域名：R2 自定义域（`r2.dckxx.com`，2026-09-15 停用）与 R2 时代方案文档里
-/// 的示例域名（`dist.x-hub.dev`）。指向这些域名的端点现在只会拿到 404。
-const RETIRED_ENDPOINT_HOSTS: &[&str] = &["r2.dckxx.com", "dist.x-hub.dev"];
-
-/// 端点 host 是否落在 [`RETIRED_ENDPOINT_HOSTS`]（含子域；大小写与端口无关）。
-///
-/// 只认这两个「自家已停用」的域名，**不**做「凡不是内置地址就改写」的兜底：
-/// 自建分发的人会把常量改成自己的域名，任何宽于已知停用域名的判定都会误伤他们。
-fn is_retired_endpoint(url: &str) -> bool {
-    let url = url.trim().to_ascii_lowercase();
-    if url.is_empty() {
-        return false; // 空 = 用内置默认值，天然安全
-    }
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url.as_str());
-    let host = rest
-        .split(|c| c == '/' || c == ':' || c == '?' || c == '#')
-        .next()
-        .unwrap_or("");
-    RETIRED_ENDPOINT_HOSTS
-        .iter()
-        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-}
-
-/// 把指向已停用域名的 `market_endpoint` / `update_endpoint` 迁移到内置 COS 地址。
-///
-/// 为什么必须有：这两个字段**没有任何迁移逻辑**（内置默认值从 R2 换成 COS 是 v0.5.1 的
-/// commit c9c203c 做的），老 `app.json` 里存着 R2 的安装升级到新版后仍旧用旧地址刷新，
-/// 表现就是扩展中心顶部一条「市场源异常：拉取市场清单失败：HTTP 404 Not Found」——
-/// 且界面上没有入口能改回来，用户自己无法自救（0.6.0 发布后仍在多台机器上复现）。
-/// 迁移后这类安装自动自愈，无需手工编辑 app.json。
-fn migrate_retired_endpoints(config: &mut AppConfig) -> bool {
+/// `market_endpoint` / `update_endpoint` 两个字段自 v0.6.1 起**已废弃不再被读取**（清单地址
+/// 由 [`market_registry_url`] / [`update_manifest_url`] 按服务端地址拼），但老 `app.json`
+/// 里会残留 R2/COS 时代的地址：0.6.0 及更早的安装升级上来后，文件里的旧地址与程序实际
+/// 行为不一致，人工排查时会被误导（表现为「市场源异常：…404」但界面无从自救）。
+/// 这里把任何非服务端的残留值一句话归一并落盘；空值同样归一，保证文件里始终是当前真相。
+fn migrate_legacy_endpoints(config: &mut AppConfig) -> bool {
     let mut changed = false;
-    if is_retired_endpoint(&config.market_endpoint) {
-        log::warn!(
-            "市场源指向已停用的域名 {}，已迁移到内置地址 {}",
-            config.market_endpoint,
-            DEFAULT_MARKET_ENDPOINT
-        );
-        config.market_endpoint = DEFAULT_MARKET_ENDPOINT.to_string();
+    let registry = market_registry_url();
+    if config.market_endpoint.trim() != registry {
+        if !config.market_endpoint.trim().is_empty() {
+            log::info!(
+                "市场源字段已废弃（v0.6.1 起走服务端接口），{} → {}",
+                config.market_endpoint,
+                registry
+            );
+        }
+        config.market_endpoint = registry;
         changed = true;
     }
-    if is_retired_endpoint(&config.update_endpoint) {
-        log::warn!(
-            "更新源指向已停用的域名 {}，已迁移到内置地址 {}",
-            config.update_endpoint,
-            DEFAULT_UPDATE_ENDPOINT
-        );
-        config.update_endpoint = DEFAULT_UPDATE_ENDPOINT.to_string();
+    let manifest = update_manifest_url();
+    if config.update_endpoint.trim() != manifest {
+        if !config.update_endpoint.trim().is_empty() {
+            log::info!(
+                "更新源字段已废弃（v0.6.1 起走服务端接口），{} → {}",
+                config.update_endpoint,
+                manifest
+            );
+        }
+        config.update_endpoint = manifest;
         changed = true;
     }
     changed
@@ -533,6 +527,9 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
     "skill_roots",
     // 「跳过此版本」：只经 skip_update_version 变更
     "skipped_update_version",
+    // 已废弃的两个端点字段（v0.6.1）：真相源是内置常量，只由 migrate_legacy_endpoints 归一
+    "market_endpoint",
+    "update_endpoint",
 ];
 
 /// `save_config` 的「以磁盘为准」合并（**纯函数，便于回归测试**）：把前端整份提交的配置
@@ -555,6 +552,10 @@ pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
     merged.dev_extensions = disk.dev_extensions.clone();
     // 已废弃字段（登记即加载后不再读取），仍以磁盘为准以免被快照写回
     merged.dev_mode_enabled = disk.dev_mode_enabled;
+    // 已废弃的两个端点字段（v0.6.1）：前端启动快照里已经没有它们，不合并就会把磁盘上
+    // 归一后的服务端地址覆盖成空串（行为无影响，但文件里会来回翻烧饼）
+    merged.market_endpoint = disk.market_endpoint.clone();
+    merged.update_endpoint = disk.update_endpoint.clone();
     merged.skill_roots = disk.skill_roots.clone();
     merged.skipped_update_version = disk.skipped_update_version.clone();
 }
@@ -667,59 +668,50 @@ mod tests {
         assert!(loaded.accent_color.is_none());
     }
 
-    // ---------------- 已停用分发域名的一次性迁移 ----------------
-    // 守的是「老 app.json 里的 R2 地址没有任何迁移、升级后刷新市场永远 404」那个坑：
+    // ---------------- 已废弃端点字段的归一迁移 ----------------
+    // 守的是「老 app.json 里的 R2/COS 地址没有任何迁移、升级后刷新市场永远 404」那个坑：
     // 0.6.0 已发布后仍在多台机器上复现，界面上又没有任何入口能改回来。
+    // v0.6.1 起两个字段本身废弃（地址改为按服务端地址拼），归一迁移保证文件里不再留着
+    // 会误导排查的旧地址。
 
     #[test]
-    fn retired_endpoint_hosts_are_detected() {
-        assert!(is_retired_endpoint("https://r2.dckxx.com/extensions/registry.json"));
-        assert!(is_retired_endpoint("https://R2.DCKXX.COM/extensions/registry.json"));
-        assert!(is_retired_endpoint("http://r2.dckxx.com:8080/extensions/registry.json"));
-        assert!(is_retired_endpoint("https://dist.x-hub.dev/releases/update.json"));
-        assert!(is_retired_endpoint("https://cdn.dist.x-hub.dev/x.json"));
-        // 空值 = 用内置默认，天然安全；自建分发域名必须原样保留（不能宽到「非内置即改写」）
-        assert!(!is_retired_endpoint(""));
-        assert!(!is_retired_endpoint("   "));
-        assert!(!is_retired_endpoint(DEFAULT_MARKET_ENDPOINT));
-        assert!(!is_retired_endpoint("https://dist.example.com/extensions/registry.json"));
-        assert!(!is_retired_endpoint("https://my-r2.dckxx.com.evil.com/x.json"));
-        assert!(!is_retired_endpoint("https://notr2.dckxx.com/x.json"));
-    }
-
-    #[test]
-    fn retired_endpoints_migrate_to_builtin_and_persist() {
+    fn legacy_endpoint_values_are_normalized_and_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.json");
         let mut cfg = AppConfig::default();
+        // R2 时代残留 + COS 时代残留（0.6.0 及更早安装写进 app.json 的默认值）
         cfg.market_endpoint = "https://r2.dckxx.com/extensions/registry.json".to_string();
-        cfg.update_endpoint = "https://dist.x-hub.dev/releases/update.json".to_string();
+        cfg.update_endpoint =
+            "https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com/releases/update.json"
+                .to_string();
         fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
 
         let loaded = load_from(&path);
-        assert_eq!(loaded.market_endpoint, DEFAULT_MARKET_ENDPOINT);
-        assert_eq!(loaded.update_endpoint, DEFAULT_UPDATE_ENDPOINT);
+        assert_eq!(loaded.market_endpoint, market_registry_url());
+        assert_eq!(loaded.update_endpoint, update_manifest_url());
 
-        // 迁移必须落盘（否则用户手看 app.json 仍是停用地址，且每次启动都要重迁一遍）
+        // 归一必须落盘（否则用户手看 app.json 仍是旧地址，且每次启动都要重写一遍）
         let on_disk = fs::read_to_string(&path).unwrap();
-        assert!(on_disk.contains(DEFAULT_MARKET_ENDPOINT));
-        assert!(on_disk.contains(DEFAULT_UPDATE_ENDPOINT));
+        assert!(on_disk.contains(MARKET_REGISTRY_PATH));
+        assert!(on_disk.contains(UPDATE_MANIFEST_PATH));
         assert!(!on_disk.contains("r2.dckxx.com"));
-        assert!(!on_disk.contains("dist.x-hub.dev"));
+        assert!(!on_disk.contains("cos.ap-guangzhou"));
     }
 
     #[test]
-    fn custom_endpoints_are_left_untouched() {
+    fn default_config_gets_canonical_endpoints() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.json");
-        let mut cfg = AppConfig::default();
-        cfg.market_endpoint = "https://dist.example.com/extensions/registry.json".to_string();
-        cfg.update_endpoint = "https://dist.example.com/releases/update.json".to_string();
-        fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(&AppConfig::default()).unwrap()).unwrap();
 
         let loaded = load_from(&path);
-        assert_eq!(loaded.market_endpoint, "https://dist.example.com/extensions/registry.json");
-        assert_eq!(loaded.update_endpoint, "https://dist.example.com/releases/update.json");
+        assert_eq!(loaded.market_endpoint, market_registry_url());
+        assert_eq!(loaded.update_endpoint, update_manifest_url());
+        // 两个地址都必须落在平台服务端域名下，且带 https（http 会 301，POST 语义会丢）
+        for url in [market_registry_url(), update_manifest_url()] {
+            assert!(url.starts_with("https://"));
+            assert!(url.starts_with(DEFAULT_SERVER_URL));
+        }
     }
 
     // ---------------- merge_disk_authoritative 回归测试 ----------------
