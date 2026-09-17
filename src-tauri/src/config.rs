@@ -412,7 +412,13 @@ pub fn load_from(path: &Path) -> AppConfig {
         Ok(content) => match serde_json::from_str::<AppConfig>(&content) {
             Ok(config) => {
                 let mut config = config;
-                normalize(&mut config);
+                // 迁移结果必须落盘：只改内存的话每次启动都会重新迁移，
+                // 磁盘上那份已停用的地址永远留着（用户手工看一眼还是会被误导）。
+                if normalize(&mut config) {
+                    if let Err(e) = save_to(&config, path) {
+                        log::warn!("配置迁移结果写入失败（本次仍按迁移后的值运行）: {e}");
+                    }
+                }
                 config
             }
             Err(_) => {
@@ -429,10 +435,71 @@ pub fn load_from(path: &Path) -> AppConfig {
 
 /// 旧默认语录「日拱一卒」迁移：v0.1.19 起语录改为随机名言金句，
 /// 旧默认值视为「未自定义」，置空以启用随机金句。
-fn normalize(config: &mut AppConfig) {
+///
+/// 返回值 = 是否有改动（有则调用方负责落盘）。
+fn normalize(config: &mut AppConfig) -> bool {
+    let mut changed = false;
     if config.clock_quote == "日拱一卒，功不唐捐。" {
         config.clock_quote = String::new();
+        changed = true;
     }
+    if migrate_retired_endpoints(config) {
+        changed = true;
+    }
+    changed
+}
+
+/// **已停用**的分发域名：R2 自定义域（`r2.dckxx.com`，2026-09-15 停用）与 R2 时代方案文档里
+/// 的示例域名（`dist.x-hub.dev`）。指向这些域名的端点现在只会拿到 404。
+const RETIRED_ENDPOINT_HOSTS: &[&str] = &["r2.dckxx.com", "dist.x-hub.dev"];
+
+/// 端点 host 是否落在 [`RETIRED_ENDPOINT_HOSTS`]（含子域；大小写与端口无关）。
+///
+/// 只认这两个「自家已停用」的域名，**不**做「凡不是内置地址就改写」的兜底：
+/// 自建分发的人会把常量改成自己的域名，任何宽于已知停用域名的判定都会误伤他们。
+fn is_retired_endpoint(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    if url.is_empty() {
+        return false; // 空 = 用内置默认值，天然安全
+    }
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url.as_str());
+    let host = rest
+        .split(|c| c == '/' || c == ':' || c == '?' || c == '#')
+        .next()
+        .unwrap_or("");
+    RETIRED_ENDPOINT_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+}
+
+/// 把指向已停用域名的 `market_endpoint` / `update_endpoint` 迁移到内置 COS 地址。
+///
+/// 为什么必须有：这两个字段**没有任何迁移逻辑**（内置默认值从 R2 换成 COS 是 v0.5.1 的
+/// commit c9c203c 做的），老 `app.json` 里存着 R2 的安装升级到新版后仍旧用旧地址刷新，
+/// 表现就是扩展中心顶部一条「市场源异常：拉取市场清单失败：HTTP 404 Not Found」——
+/// 且界面上没有入口能改回来，用户自己无法自救（0.6.0 发布后仍在多台机器上复现）。
+/// 迁移后这类安装自动自愈，无需手工编辑 app.json。
+fn migrate_retired_endpoints(config: &mut AppConfig) -> bool {
+    let mut changed = false;
+    if is_retired_endpoint(&config.market_endpoint) {
+        log::warn!(
+            "市场源指向已停用的域名 {}，已迁移到内置地址 {}",
+            config.market_endpoint,
+            DEFAULT_MARKET_ENDPOINT
+        );
+        config.market_endpoint = DEFAULT_MARKET_ENDPOINT.to_string();
+        changed = true;
+    }
+    if is_retired_endpoint(&config.update_endpoint) {
+        log::warn!(
+            "更新源指向已停用的域名 {}，已迁移到内置地址 {}",
+            config.update_endpoint,
+            DEFAULT_UPDATE_ENDPOINT
+        );
+        config.update_endpoint = DEFAULT_UPDATE_ENDPOINT.to_string();
+        changed = true;
+    }
+    changed
 }
 
 /// 后端管理的字段清单（`merge_disk_authoritative` 保留哪些字段）。
@@ -598,6 +665,61 @@ mod tests {
         assert_eq!(loaded.theme_mode, "dark");
         assert_eq!(loaded.theme_preset, "indigo");
         assert!(loaded.accent_color.is_none());
+    }
+
+    // ---------------- 已停用分发域名的一次性迁移 ----------------
+    // 守的是「老 app.json 里的 R2 地址没有任何迁移、升级后刷新市场永远 404」那个坑：
+    // 0.6.0 已发布后仍在多台机器上复现，界面上又没有任何入口能改回来。
+
+    #[test]
+    fn retired_endpoint_hosts_are_detected() {
+        assert!(is_retired_endpoint("https://r2.dckxx.com/extensions/registry.json"));
+        assert!(is_retired_endpoint("https://R2.DCKXX.COM/extensions/registry.json"));
+        assert!(is_retired_endpoint("http://r2.dckxx.com:8080/extensions/registry.json"));
+        assert!(is_retired_endpoint("https://dist.x-hub.dev/releases/update.json"));
+        assert!(is_retired_endpoint("https://cdn.dist.x-hub.dev/x.json"));
+        // 空值 = 用内置默认，天然安全；自建分发域名必须原样保留（不能宽到「非内置即改写」）
+        assert!(!is_retired_endpoint(""));
+        assert!(!is_retired_endpoint("   "));
+        assert!(!is_retired_endpoint(DEFAULT_MARKET_ENDPOINT));
+        assert!(!is_retired_endpoint("https://dist.example.com/extensions/registry.json"));
+        assert!(!is_retired_endpoint("https://my-r2.dckxx.com.evil.com/x.json"));
+        assert!(!is_retired_endpoint("https://notr2.dckxx.com/x.json"));
+    }
+
+    #[test]
+    fn retired_endpoints_migrate_to_builtin_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.json");
+        let mut cfg = AppConfig::default();
+        cfg.market_endpoint = "https://r2.dckxx.com/extensions/registry.json".to_string();
+        cfg.update_endpoint = "https://dist.x-hub.dev/releases/update.json".to_string();
+        fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.market_endpoint, DEFAULT_MARKET_ENDPOINT);
+        assert_eq!(loaded.update_endpoint, DEFAULT_UPDATE_ENDPOINT);
+
+        // 迁移必须落盘（否则用户手看 app.json 仍是停用地址，且每次启动都要重迁一遍）
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains(DEFAULT_MARKET_ENDPOINT));
+        assert!(on_disk.contains(DEFAULT_UPDATE_ENDPOINT));
+        assert!(!on_disk.contains("r2.dckxx.com"));
+        assert!(!on_disk.contains("dist.x-hub.dev"));
+    }
+
+    #[test]
+    fn custom_endpoints_are_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.json");
+        let mut cfg = AppConfig::default();
+        cfg.market_endpoint = "https://dist.example.com/extensions/registry.json".to_string();
+        cfg.update_endpoint = "https://dist.example.com/releases/update.json".to_string();
+        fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.market_endpoint, "https://dist.example.com/extensions/registry.json");
+        assert_eq!(loaded.update_endpoint, "https://dist.example.com/releases/update.json");
     }
 
     // ---------------- merge_disk_authoritative 回归测试 ----------------
