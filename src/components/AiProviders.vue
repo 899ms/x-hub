@@ -32,8 +32,17 @@ const saving = ref(false)
 // ---- 平台免费额度（登录后可直接用，不需要自备 API Key） ----
 // 与自备 Key 的供应商**并存**：这里只是把平台模型写成本地配置，Key 用占位符表示
 // 「用账号会话换取额度」，Rust 侧调用时再替换成真实 token（见 chat.rs::PLATFORM_KEY_SENTINEL）。
+// ⚠️ 平台模型的 Key 一律**不在界面展示/复制**（占位符没有意义，真 token 也不该出 Rust），
+// 卡片里改显示一句「由账号登录态提供」的说明；后端 get_chat_api_key 对占位符直接报错兜底。
 const PLATFORM_SENTINEL = '__xhub_platform__'
 const platformBusy = ref(false)
+
+/// 是否平台额度供应商：条目 id 为 `platform:<模型名>`（旧条目也可能只有 provider_name 标识）
+function isPlatform(p: ProviderEdit): boolean {
+  return p.models.some(
+    (m) => m.id.startsWith('platform:') || (m.provider_name ?? '').trim() === 'x-hub 平台',
+  )
+}
 
 async function addPlatformModels() {
   if (!isTauri()) return
@@ -165,7 +174,7 @@ function expand(p: ProviderEdit) {
   if (p.expanded && p.models.length > 0 && !p.hasApiKey) {
     p.hasApiKey = p.models.some((m) => m.has_api_key)
   }
-  if (p.expanded && p.hasApiKey && !p.savedKey) {
+  if (p.expanded && p.hasApiKey && !p.savedKey && !isPlatform(p)) {
     void loadSavedKey(p)
   }
 }
@@ -440,8 +449,12 @@ defineExpose({ reload: () => void loadProviders() })
           <div class="ai-field">
             <label class="ai-label">API Key</label>
             <div class="ai-key-row">
+              <!-- 平台额度：不展示 Key（存的是占位符，真凭据是账号登录态、只在请求时现取） -->
+              <div v-if="isPlatform(p)" class="key-display">
+                <span class="key-text">由账号登录态提供 · 无需填写</span>
+              </div>
               <!-- 已保存 Key：脱敏展示 + 眼睛查看全部 + 复制 -->
-              <template v-if="p.hasApiKey && !p.editingKey">
+              <template v-else-if="p.hasApiKey && !p.editingKey">
                 <div class="key-display">
                   <span class="key-text" :title="p.keyVisible ? p.savedKey : '点击眼睛查看全部'">
                     {{ p.keyVisible ? p.savedKey : maskKey(p.savedKey) }}

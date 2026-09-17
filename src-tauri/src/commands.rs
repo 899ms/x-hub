@@ -2289,10 +2289,26 @@ pub async fn fetch_chat_provider_models(
     crate::chat::fetch_provider_models(&base_url, &key).await
 }
 
-/// 读取某个模型已保存的 API Key（设置页脱敏展示 / 眼睛查看 / 复制用）
+/// 读取某个模型已保存的 API Key（设置页脱敏展示 / 眼睛查看 / 复制用）。
+///
+/// ⚠️ 平台模型（`platform:<模型名>`）的条目**不下发占位符**：它钥匙串里存的是
+/// `chat::PLATFORM_KEY_SENTINEL`，真凭据是账号登录态、只在请求时由 `chat::resolve_api_key`
+/// 现取。把占位符交给界面只会有两种坏结果 —— 让人以为平台 Key 泄露了，或以为这里要填 Key
+/// （2026-09-17 用户反馈：界面不要展示 x-hub 平台的 key）。
 #[tauri::command]
 pub fn get_chat_api_key(model_id: String) -> Result<String, String> {
-    crate::chat::get_api_key(&model_id).ok_or_else(|| "未找到已保存的 API Key".to_string())
+    api_key_for_ui(crate::chat::get_api_key(&model_id))
+}
+
+/// 界面可见的 Key（纯函数，便于回归测试）：平台占位符一律返回 Err。
+fn api_key_for_ui(stored: Option<String>) -> Result<String, String> {
+    match stored {
+        Some(k) if k == crate::chat::PLATFORM_KEY_SENTINEL => {
+            Err("平台模型使用账号登录态，没有可展示的 API Key".to_string())
+        }
+        Some(k) => Ok(k),
+        None => Err("未找到已保存的 API Key".to_string()),
+    }
 }
 
 /// 保存 AI 对话面板宽度/高度（按方位使用）与展开状态（持久化）
@@ -2792,5 +2808,23 @@ fn parse_kind(kind: &str) -> Result<ResourceKind, String> {
         "web" => Ok(ResourceKind::Web),
         "file" => Ok(ResourceKind::File),
         _ => Err(format!("未知资源类型: {}", kind)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 平台模型的 Key 是占位符（真凭据是账号登录态、请求时现取），**任何界面都不该拿到它**：
+    /// 展示出来只会有两种坏结果 —— 让人以为平台 Key 泄露了，或让人以为这里必须填 Key。
+    #[test]
+    fn ui_never_receives_platform_key_placeholder() {
+        let sentinel = crate::chat::PLATFORM_KEY_SENTINEL.to_string();
+        assert!(api_key_for_ui(Some(sentinel)).is_err());
+        assert_eq!(
+            api_key_for_ui(Some("sk-real-key".to_string())).unwrap(),
+            "sk-real-key"
+        );
+        assert!(api_key_for_ui(None).is_err());
     }
 }
