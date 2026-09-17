@@ -5,7 +5,8 @@
 > 本文里的 `scripts/publish-extension.ps1`（§方式 B：本地脚本）与 `release-extension.yml`（CI）
 > **均已停用**，保留仅作分发/签名约定与历史记录。
 
-> 状态：**历史文档**。R2 已于 **2026-09-15 停用**（`r2.dckxx.com` / `dist.x-hub.dev` 一律 404），
+> 状态：**历史文档**。R2 已弃用：`r2.dckxx.com` 上的市场对象（`extensions/`，含 `registry.json`）
+> **已被清空 → 指向它的市场源一律 404**（`dist.x-hub.dev` 同样不可用），残留的 `releases/` 对象无人读取。
 > 分发通道现为腾讯云 COS —— **现役方案见 `docs/self-hosted-distribution.md`**。
 > 本文保留的价值只在「目录布局 + Ed25519 签名/验签约定 + 应用自升级流程」，其中出现的
 > `r2.dckxx.com` / `dist.x-hub.dev` 域名与「默认 endpoint = R2」的描述**均已作废**，不要照抄。

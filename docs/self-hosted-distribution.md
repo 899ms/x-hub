@@ -6,9 +6,11 @@
 > CI（`release-extension.yml`）**均已停用**，仅作分发端点拓扑与应急参考。
 > 面向扩展作者的正式文档见 `x-hub-extensions/docs/guide/publishing.md`。
 
-> 状态：**已切换完成 —— COS 是唯一分发通道**。R2 自 **2026-09-15 停用**：`r2.dckxx.com` 与
-> `dist.x-hub.dev` 上的 `extensions/…` / `releases/…` 一律 **404**，§6 的三阶段切换停在阶段 1
-> （阶段 3 的 302 兜底**未采用**）。
+> 状态：**已切换完成 —— COS 是唯一「有效」的分发通道**。R2 桶本身还在、`r2.dckxx.com` 也仍在服务
+> `releases/`（`-Target all` 今天还会往里写一份，校验也能 200 通过），但 **`extensions/` 已被清空**：
+> 指向 `r2.dckxx.com/extensions/…` 的市场源一律 **404** —— 这正是客户端「市场源异常：拉取市场清单失败：
+> HTTP 404 Not Found」的来源（`dist.x-hub.dev` 同样不可用）。§6 的三阶段切换停在阶段 1，
+> 阶段 3 的 302 兜底**未采用**。
 > 内置 endpoint 自 v0.5.1（commit `c9c203c`）起指向 COS；老 `app.json` 里残留的停用域名在
 > **配置装载时一次性迁移**（`config.rs::migrate_retired_endpoints`，`market_endpoint` 与
 > `update_endpoint` 都覆盖），所以升级到含该逻辑的版本后自动自愈，不需要用户手工改配置。
@@ -82,9 +84,9 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 | `COS_BUCKET` / `COS_REGION` | `x-hub-dist-1251402600` / `ap-guangzhou` | COS 通道（主） |
 | `XHUB_DIST_BASE_URL` | `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com` | 发布脚本拼清单内 URL（publish-*.ps1） |
 | `XHUB_SIGNING_KEY` | `E:\workspace\.x-hub-signing\market.key` | Ed25519 签名私钥（不变） |
-| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | — | **已作废**（R2 已退役，`-Target r2` 无意义，变量可清） |
+| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | — | **已作废**（R2 的 `extensions/` 已清空 → 市场侧 404；`releases/` 侧虽仍写得进去但没人再读） |
 
-用法（`-Target cos` 是默认且**现在唯一可用**的通道；`-Target r2` 随 R2 退役失效，`-Target sftp` 属备选 Nginx 方案（不启用），`-Target all` 会先写 COS、再撞 R2 的 404 而中止 —— **不要再用 all**）：
+用法（`-Target cos` 是默认且**现在唯一有效**的通道；`-Target r2` 随 R2 市场对象清空而失效，`-Target sftp` 属备选 Nginx 方案（不启用）。`-Target all` **不要再用**：它写的 R2 副本没有任何客户端会读，且 `upload-release` 那条因为 `releases/` 还能 200 而**静默不报错**（更好骗过自己），`upload-market` 那条会在 R2 侧的校验上 404 中止）：
 
 ```powershell
 # 应用发版（仍然有效：客户端应用发布不经过扩展市场）
@@ -153,8 +155,9 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 
 ### 阶段 3：R2 优雅退役（302 兜底，客户端已验证跟随重定向）**（未采用）**
 
-> 实际做法：R2 于 2026-09-15 直接停用，没有配 302 —— 兜底改在客户端侧：
-> `config.rs::migrate_retired_endpoints` 在装载配置时把指向停用域名的端点改写成内置 COS 地址。
+> 实际做法：**没有**配 302 —— R2 上的市场对象（`extensions/`，含 `registry.json`）已清空，
+> 残留的 `releases/` 对象没有客户端会读；兜底改在客户端侧：
+> `config.rs::migrate_retired_endpoints` 在装载配置时把指向这些域名的端点改写成内置 COS 地址。
 
 - `market.rs` / `updater.rs` 的 reqwest 客户端均未关闭重定向（默认跟随最多 10 次），因此可在 Cloudflare 给 `r2.dckxx.com` 配 **Redirect Rule**：动态重定向 `concat("https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com", http.request.uri.path)`，状态码 302——清单/`.sig`/包/图标按路径通配全部覆盖；
 - DNS 侧：R2 桶的自定义域绑定可解除，但保留 `r2.dckxx.com` 的 DNS 记录并开启橙云代理（占位记录即可），Redirect Rule 才能接管该主机名的请求；
@@ -175,9 +178,9 @@ COS 默认域名长期可用，不必动。备案下来后如想用自己的域�
 
 ## 9. 与 R2 方案的差异备忘
 
-| 关注点 | R2（已退役，2026-09-15） | COS（现役） |
+| 关注点 | R2（已弃用） | COS（现役） |
 |---|---|---|
-| 域名 | 自定义域 `r2.dckxx.com`（已停用，一律 404） | 默认域 `<bucket>.cos.<region>.myqcloud.com`（腾讯签发证书） |
+| 域名 | 自定义域 `r2.dckxx.com`（`extensions/` 已清空 → **市场 404**；`releases/` 仍能 200） | 默认域 `<bucket>.cos.<region>.myqcloud.com`（腾讯签发证书） |
 | 上传 | rclone s3 provider Cloudflare | rclone s3 provider TencentCOS |
 | 缓存头 | 上传时 `--header-upload` | 同左（写对象元数据） |
 | 断点续传 | 边缘支持 206 | 支持 206 |
