@@ -738,16 +738,6 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
 }
-.pub-quota {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin: 4px 0 10px;
-  font-size: 0.72rem;
-  color: var(--text-3);
-}
 .pub-quota-detail {
   padding: 1px 8px;
   border: 1px solid var(--border-soft);

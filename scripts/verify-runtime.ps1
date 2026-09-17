@@ -5,7 +5,7 @@
 #   pwsh -File scripts/verify-runtime.ps1 -LogPath "D:\app\data\logs\x-hub.log"   # 便携版/自定义数据目录
 #
 # 它只读日志、不改任何东西。逐项告诉你是「已生效 / 未观察到 / 有问题」，
-# 把「资产作用域收紧 + 独立协议 + 开发者模式」这三件事从"目测"变成"有据可查"。
+# 把「资产作用域收紧 + 独立协议 + 本机源码目录直挂」这三件事从"目测"变成"有据可查"。
 
 param(
   [string]$LogPath = "$env:APPDATA\x-hub\logs\x-hub.log"
@@ -114,7 +114,7 @@ Write-Host "──────────────────────�
 Write-Host ("通过 {0} ｜ 需人工看 {1} ｜ 失败 {2}" -f $pass, $wait, $fail)
 Write-Host ""
 Write-Host "提醒：本脚本只能证明「后端日志」层面的事；界面观感（图标/壁纸/剪贴板图片、热重载）" -ForegroundColor DarkGray
-Write-Host "      仍需按 ACCEPTANCE-signing-migration.md §二 的 A–H 目测一遍。" -ForegroundColor DarkGray
+Write-Host "      仍需按 x-hub-server docs/ACCEPTANCE-signing-migration.md §二（客户端实机验收）目测一遍。" -ForegroundColor DarkGray
 Write-Host ""
 
 exit $(if ($fail -gt 0) { 1 } else { 0 })
