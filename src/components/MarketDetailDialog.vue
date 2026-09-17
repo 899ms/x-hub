@@ -54,11 +54,14 @@ function onShotError(url: string) {
 }
 
 // 换扩展时重置展示区状态（同一个弹窗实例复用）
+// ⚠️ 坏图名单必须一起清空：它是「这张 URL 加载失败过」的记忆，跨扩展留着会让
+//    「地址恰好与之前那张坏图相同」的新扩展截图被无辜藏掉，看起来像没传截图
 watch(
   () => props.extension?.id,
   () => {
     shotIndex.value = 0
     shotPreview.value = false
+    shotFailed.value = new Set()
   },
 )
 

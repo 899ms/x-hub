@@ -215,7 +215,8 @@ const tab = ref<'installed' | 'market' | 'dev'>('installed')
 // ---- 我的扩展（「我的扩展」直挂的本机源码目录）----
 // 列表来源是 get_dev_mode_status（注册了哪些目录），**不是**已加载的扩展清单：
 // 目录无效 / 冲突时不会被加载，但用户仍然要能看到并移除它们（见 ADR 0005）。
-const devMode = ref<DevModeStatus>({ enabled: false, extensions: [] })
+// enabled 是「开发者模式开关」的遗留字段，恒为 true（约定 55）；初值必须与 ExtensionsPanel 一致
+const devMode = ref<DevModeStatus>({ enabled: true, extensions: [] })
 const devBusy = ref(false)
 
 /** 路径比较：统一分隔符与大小写（同一目录的两种写法要能对上） */
