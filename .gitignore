@@ -56,3 +56,6 @@ promo/
 
 # Article assets (local drafts)
 article-assets/
+
+# 一次性 UI 校验页（无头浏览器截图用，不进构建、不进仓库）
+dev-dialog-preview/

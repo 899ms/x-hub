@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, ref, watch } from 'vue'
-import { Trash2, X } from 'lucide-vue-next'
+import { Trash2, X, FolderOpen } from 'lucide-vue-next'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import { accentOf, iconSrc } from '../composables/useResourceIcon'
 import { tauriApi, type ExtensionEntry } from '../api/tauri'
@@ -124,6 +124,21 @@ function setOpenMode(mode: (typeof OPEN_MODES)[number]['value']) {
   showToast(`已设为默认在「${label}」打开`)
 }
 
+/** 在系统文件管理器中打开扩展目录（开发调试用） */
+const openingDir = ref(false)
+
+async function openDir() {
+  if (!ext.value) return
+  openingDir.value = true
+  try {
+    await tauriApi.openExtensionDir(ext.value.id)
+  } catch (e) {
+    showToast(`打开目录失败：${String(e)}`)
+  } finally {
+    openingDir.value = false
+  }
+}
+
 async function confirmUninstall() {
   if (!ext.value) return
   uninstalling.value = true
@@ -180,6 +195,22 @@ async function confirmUninstall() {
                 <div class="es-kv-row"><dt>主形态</dt><dd>{{ kindLabel(ext.kind) }}</dd></div>
                 <div v-if="ext.surfaces.length" class="es-kv-row">
                   <dt>支持形态</dt><dd>{{ ext.surfaces.map(kindLabel).join(' / ') }}</dd>
+                </div>
+                <div v-if="ext.dir" class="es-kv-row es-dir-row">
+                  <dt>目录</dt>
+                  <dd>
+                    <span class="es-dir-path" :title="ext.dir">{{ ext.dir }}</span>
+                    <button
+                      class="es-dir-btn"
+                      type="button"
+                      :disabled="openingDir"
+                      :title="`在文件管理器中打开：${ext.dir}`"
+                      @click="openDir"
+                    >
+                      <FolderOpen :size="13" :stroke-width="2" aria-hidden="true" />
+                      打开目录
+                    </button>
+                  </dd>
                 </div>
               </dl>
               <p v-if="ext.description" class="es-desc">{{ ext.description }}</p>
@@ -286,6 +317,8 @@ async function confirmUninstall() {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* 弹窗外壳自带 24px padding，本卡片自排内边距：清零避免与头/体/脚叠加成双份 */
+  padding: 0;
 }
 .es-head {
   display: flex;
@@ -336,6 +369,8 @@ async function confirmUninstall() {
   gap: 12px;
   max-height: 40vh;
   overflow-y: auto;
+  /* 卡片 padding 清零后由头/体/脚各自排 18px 内边距，与市场详情、发布弹窗全一致 */
+  padding: 0 18px;
 }
 .es-block {
   display: flex;
@@ -376,6 +411,54 @@ async function confirmUninstall() {
 .es-kv-row dd {
   margin: 0;
   color: var(--text-1);
+}
+/* 目录行：路径等宽省略 + 「打开目录」按钮（开发调试快速定位扩展所在目录） */
+.es-dir-row dd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+.es-dir-path {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-2);
+  /* 最多两行：路径尾部（目录名本身）比开头更需要看得见，故不做单行省略号截断 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  word-break: break-all;
+  overflow: hidden;
+}
+.es-dir-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+.es-dir-btn:hover:not(:disabled) {
+  background: var(--brand-50);
+  border-color: var(--brand-500);
+  color: var(--brand-500);
+}
+.es-dir-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 .es-desc {
   margin: 2px 0 0;
@@ -485,7 +568,7 @@ async function confirmUninstall() {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-top: 4px;
+  padding: 4px 18px 16px;
 }
 .es-confirm-tip {
   margin: 0;

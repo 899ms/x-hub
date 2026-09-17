@@ -54,15 +54,15 @@ if ($extProto.Count -gt 0) {
   Report 'WAIT' "没有观察到扩展加载记录" "请在实机里打开任意一个已装扩展，然后重跑本脚本"
 }
 
-# 2) 开发者模式是否已应用
-$devApplied = $session | Where-Object { $_ -match '开发者模式已应用' }
-$devEnabled = $session | Where-Object { $_ -match '开发者模式已开启' }
+# 2) 本机源码目录（开发扩展）是否已应用
+$devApplied = $session | Where-Object { $_ -match '本机源码目录已应用' }
+$devAdded = $session | Where-Object { $_ -match '本机扩展目录已添加' }
 if ($devApplied.Count -gt 0) {
-  Report 'PASS' "开发者模式已重放（启动时按配置放行源码目录）" @($devApplied)[-1]
-} elseif ($devEnabled.Count -gt 0) {
-  Report 'PASS' "开发者模式本次会话内已开启" @($devEnabled)[-1]
+  Report 'PASS' "本机源码目录已重放（启动时按配置放行源码目录）" @($devApplied)[-1]
+} elseif ($devAdded.Count -gt 0) {
+  Report 'PASS' "本机源码目录本次会话内已添加（登记即加载）" @($devAdded)[-1]
 } else {
-  Report 'WAIT' "未观察到开发者模式记录" "若你还没在「设置 → 扩展」里开启它，属正常"
+  Report 'WAIT' "未观察到本机源码目录记录" "若你还没在「扩展中心 → 我的扩展」里添加目录，属正常"
 }
 
 # 3) 资产作用域是否放行失败（白名单目录创建/放行出错会让图标/壁纸/剪贴板图片显示不出来）

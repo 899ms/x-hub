@@ -2,10 +2,12 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
-import { MoreHorizontal, PackageOpen, Plus, RefreshCw } from 'lucide-vue-next'
+import { MoreHorizontal, FolderCog, FolderOpen, PackageOpen, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
 import {
   isTauri,
   tauriApi,
+  type DevExtensionInfo,
+  type DevModeStatus,
   type MarketDownloadProgress,
   type MarketExtension,
   type MarketStatus,
@@ -52,7 +54,21 @@ const extensions = ref<ExtensionEntry[]>([])
 const loading = ref(true)
 const failedIcons = ref(new Set<string>())
 
-const visibleCount = computed(() => extensions.value.filter((e) => !e.invalid).length)
+/** 已安装清单：「我的扩展」直挂的源码目录不算「已安装」，它们有自己的标签页 */
+const installedExtensions = computed(() => extensions.value.filter((e) => e.source !== 'dev'))
+
+const visibleCount = computed(() => installedExtensions.value.filter((e) => !e.invalid).length)
+
+/** 标签页下的一句话说明：让用户不问「这一页是干嘛的」 */
+const subtitle = computed(() => {
+  if (tab.value === 'installed') {
+    return visibleCount.value ? `已安装 ${visibleCount.value} 个扩展` : '管理已安装的扩展：点开使用，右侧可更新或卸载'
+  }
+  if (tab.value === 'market') return '发现并安装新扩展'
+  return devMode.value.extensions.length
+    ? `本机源码目录 ${devMode.value.extensions.length} 个，改代码即自动重载`
+    : '添加本机扩展源码目录，边写边看效果'
+})
 
 function accentFor(e: ExtensionEntry) {
   return accentOf(e.name)
@@ -100,6 +116,35 @@ function descText(e: ExtensionEntry): string {
   return e.description || e.id
 }
 
+/** 在系统文件管理器中打开扩展目录（开发调试：改完代码一眼找到源码） */
+async function openDir(e: ExtensionEntry) {
+  if (!isTauri()) {
+    showToast('打开扩展目录需在桌面应用中使用')
+    return
+  }
+  try {
+    await tauriApi.openExtensionDir(e.id)
+  } catch (err) {
+    showToast(`打开目录失败：${String(err)}`)
+  }
+}
+
+/** 发布配额（账号级）：展示在扩展管理页，供发布前心里有数；取不到就不显示，不打扰 */
+const quota = ref<{ drafts_remaining?: number; published_remaining?: number; daily_submits_remaining?: number } | null>(
+  null,
+)
+
+async function loadQuota() {
+  if (!isTauri()) return
+  try {
+    // 列表与配额同一个响应（服务端 dev/submissions 返回 quota）；这里只要配额，列表忽略
+    const r = await tauriApi.devListSubmissions(1, 1)
+    quota.value = r.quota ?? null
+  } catch {
+    // 未登录 / 服务不可达：静默（配额只是参考信息，不挡任何操作）
+  }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -118,6 +163,8 @@ async function load() {
       : []
     // 安装/卸载后同步刷新工作台模块库，让新扩展的 module 形态立即出现在自定义布局中
     await loadExtensionModules()
+    // 发布配额跟着刷新（装/卸/发布都会改变「在架可新增」「待处理」的余量）
+    void loadQuota()
     // 扩展列表变化（装/卸/更新）时通知宿主刷新侧栏固定扩展，让已卸载的图标立即消失
     emit('changed')
   } catch (e) {
@@ -129,8 +176,12 @@ async function load() {
 
 onMounted(() => {
   void load()
+  // 发布配额（账号级）——发布弹窗里已不再展示，改由本页承载
+  void loadQuota()
   // 已安装 tab 也需要市场数据来判断「可更新」，故启动即拉取一次市场清单
   void loadMarket()
+  // 「我的扩展」标签页的目录清单（列表真源；发布入口是否出现也看它）
+  void loadDevMode()
   // 运行时热更新：轮询扩展目录内容戳，变化（新装/卸载/改 manifest）即刷新列表，无需重启
   stampTimer = window.setInterval(() => void pollStamp(), 5000)
 })
@@ -159,7 +210,107 @@ function onInstall() {
   switchTab('market')
 }
 
-const tab = ref<'installed' | 'market'>('installed')
+const tab = ref<'installed' | 'market' | 'dev'>('installed')
+
+// ---- 我的扩展（「我的扩展」直挂的本机源码目录）----
+// 列表来源是 get_dev_mode_status（注册了哪些目录），**不是**已加载的扩展清单：
+// 目录无效 / 冲突时不会被加载，但用户仍然要能看到并移除它们（见 ADR 0005）。
+const devMode = ref<DevModeStatus>({ enabled: false, extensions: [] })
+const devBusy = ref(false)
+
+/** 路径比较：统一分隔符与大小写（同一目录的两种写法要能对上） */
+function normalizePath(p: string): string {
+  return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+}
+
+/** 该直挂目录对应到已加载的扩展（目录有效且 manifest 可解析时才有） */
+function devEntryFor(d: DevExtensionInfo): ExtensionEntry | undefined {
+  const key = normalizePath(d.path)
+  return extensions.value.find((e) => e.source === 'dev' && normalizePath(e.dir) === key)
+}
+
+/** 可以打开 / 发布：目录有效且已加载（未加载 = 目录无效或与已装扩展同 id） */
+function devReady(d: DevExtensionInfo): boolean {
+  return d.exists && d.valid && !d.conflict
+}
+
+/** 发布入口：源码已加载出来才能打包上传；能否真正发布由发布弹窗的开发者认证把关 */
+function canPublish(d: DevExtensionInfo): boolean {
+  return devReady(d) && !!devEntryFor(d)
+}
+
+function devAccent(d: DevExtensionInfo) {
+  return accentOf(d.name || d.id || d.path)
+}
+
+function devInitial(d: DevExtensionInfo): string {
+  return (d.name || d.id || '?').charAt(0).toUpperCase()
+}
+
+function devDesc(d: DevExtensionInfo): string {
+  if (!d.exists) return '目录不存在（可能已被移动或删除）'
+  if (!d.valid) return d.error ?? 'manifest.json 无法解析'
+  if (d.conflict) return '与已装扩展同 id：已装优先，此目录不会被加载（请先卸载已装版本）'
+  return d.path
+}
+
+async function loadDevMode() {
+  if (!isTauri()) return
+  try {
+    devMode.value = await tauriApi.getDevModeStatus()
+  } catch {
+    // 后端不可用（浏览器预览）时静默：该标签页只在桌面端有意义
+  }
+}
+
+/** 添加本机扩展源码目录（须含 manifest.json） */
+async function pickDevDir() {
+  if (!isTauri()) {
+    showToast('添加本地扩展需在桌面应用中操作')
+    return
+  }
+  try {
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: '选择扩展源码目录（须含 manifest.json）',
+    })
+    const path = typeof picked === 'string' ? picked : null
+    if (!path) return
+    devBusy.value = true
+    devMode.value = await tauriApi.addDevExtension(path)
+    showToast('已添加到「我的扩展」并立即加载，改代码即自动重载')
+    await load()
+  } catch (e) {
+    showToast(String(e))
+  } finally {
+    devBusy.value = false
+  }
+}
+
+/** 移除直挂目录（只解除挂载，不动磁盘上的源码） */
+async function removeDevDir(path: string) {
+  try {
+    devMode.value = await tauriApi.removeDevExtension(path)
+    showToast('已从「我的扩展」移除')
+    await load()
+  } catch (e) {
+    showToast(String(e))
+  }
+}
+
+function onDevRowClick(d: DevExtensionInfo) {
+  if (!devReady(d)) {
+    showToast(devDesc(d))
+    return
+  }
+  const e = devEntryFor(d)
+  if (!e) {
+    showToast('该目录尚未加载：请确认 manifest.json 合法且未与已装扩展同 id')
+    return
+  }
+  onRowClick(e)
+}
 const marketStatus = ref<MarketStatus | null>(null)
 const marketLoading = ref(false)
 const installingId = ref<string | null>(null)
@@ -192,10 +343,12 @@ const appVersion = ref('')
 /** 是否已发起过一次市场加载（成功或失败都置位；避免每次切换 tab 重复拉远端清单） */
 let marketRequested = false
 
-function switchTab(t: 'installed' | 'market') {
+function switchTab(t: 'installed' | 'market' | 'dev') {
   tab.value = t
   // 仅首次切到市场才拉取；之后切换不重载（数据缓存于 marketStatus，手动点刷新按钮才重新拉）
   if (t === 'market' && !marketRequested) void loadMarket()
+  // 我的扩展：每次切过去都重新取一遍，避免磁盘上的目录被外部改动后状态是旧的
+  if (t === 'dev') void loadDevMode()
 }
 
 async function loadMarket() {
@@ -437,20 +590,43 @@ function onMore(e: ExtensionEntry) {
           >
             市场
           </button>
+          <button
+            class="ec-tab"
+            :class="{ active: tab === 'dev' }"
+            type="button"
+            @click="switchTab('dev')"
+          >
+            我的扩展
+          </button>
         </div>
-        <p class="ec-subtitle">
-          {{ tab === 'installed' ? (visibleCount ? `已安装 ${visibleCount} 个扩展` : '管理已安装的扩展') : '发现并安装新扩展' }}
-        </p>
+        <p class="ec-subtitle">{{ subtitle }}</p>
       </div>
       <div class="ec-actions">
-        <button class="pill-btn" type="button" @click="onInstall">
-          <Plus :size="14" :stroke-width="2" aria-hidden="true" />
-          安装扩展
-        </button>
-        <button class="ghost-btn" type="button" @click="onLocalFileInstall">
-          <PackageOpen :size="14" :stroke-width="2" aria-hidden="true" />
-          导入扩展包
-        </button>
+        <template v-if="tab === 'dev'">
+          <button class="pill-btn" type="button" :disabled="devBusy" @click="pickDevDir">
+            <FolderCog :size="14" :stroke-width="2" aria-hidden="true" />
+            选择目录
+          </button>
+        </template>
+        <template v-else>
+          <button class="pill-btn" type="button" @click="onInstall">
+            <Plus :size="14" :stroke-width="2" aria-hidden="true" />
+            安装扩展
+          </button>
+          <button class="ghost-btn" type="button" @click="onLocalFileInstall">
+            <PackageOpen :size="14" :stroke-width="2" aria-hidden="true" />
+            导入扩展包
+          </button>
+        </template>
+        <!-- 发布配额：账号级的（不限当前扩展、不限来源），放在扩展管理页比塞进发布弹窗更好找。
+             ⚠️ 三个数都是**剩余**额度（服务端只回剩余、不回上限，见 PRD），文案必须写成「还可…」——
+             写成「待处理 5」会被读成「已经有 5 条待处理」（实际含义是「还能再提交 5 条」）。 -->
+        <p v-if="quota" class="ec-quota" title="发布扩展的平台配额（全账号共用；数字是还能用的额度）">
+          发布配额：待处理还可
+          <b :class="{ full: quota.drafts_remaining === 0 }">{{ quota.drafts_remaining ?? '—' }}</b> 条 · 今日还可提交
+          <b :class="{ full: quota.daily_submits_remaining === 0 }">{{ quota.daily_submits_remaining ?? '—' }}</b> 次 · 在架还可新增
+          <b :class="{ full: quota.published_remaining === 0 }">{{ quota.published_remaining ?? '—' }}</b> 个
+        </p>
       </div>
     </header>
 
@@ -459,16 +635,16 @@ function onMore(e: ExtensionEntry) {
         <p>正在扫描扩展…</p>
       </div>
 
-      <div v-else-if="extensions.length === 0" class="ec-empty">
+      <div v-else-if="installedExtensions.length === 0" class="ec-empty">
         <PackageOpen :size="40" :stroke-width="1.5" aria-hidden="true" />
         <h3>还没有安装任何扩展</h3>
-        <p>安装扩展后，工作台就能扩展出你需要的功能</p>
-        <button class="pill-btn" type="button" @click="onInstall">安装第一个扩展</button>
+        <p>到「市场」挑一个装上，工作台就能扩展出你需要的功能</p>
+        <button class="pill-btn" type="button" @click="onInstall">去市场看看</button>
       </div>
 
       <div v-else class="ec-list">
         <div
-          v-for="e in extensions"
+          v-for="e in installedExtensions"
           :key="e.id"
           class="ec-row"
           :class="{ invalid: e.invalid, disabled: e.disabled, clickable: !e.invalid && !e.disabled }"
@@ -491,7 +667,6 @@ function onMore(e: ExtensionEntry) {
           <div class="ec-meta">
             <div class="ec-name-line">
               <span class="ec-name">{{ e.name }}</span>
-              <span v-if="e.source === 'dev'" class="ec-tag ec-tag-dev">开发中</span>
               <span v-if="isInstalledRevoked(e)" class="ec-tag ec-tag-revoked">已下架</span>
               <span v-if="e.invalid" class="ec-tag ec-tag-invalid">不可用</span>
               <template v-else>
@@ -524,16 +699,7 @@ function onMore(e: ExtensionEntry) {
 
           <div class="ec-right">
             <button
-              v-if="e.source === 'dev'"
-              class="ec-update-btn"
-              type="button"
-              :title="`把「${e.name}」打包发布到扩展市场`"
-              @click.stop="publishTarget = e"
-            >
-              发布
-            </button>
-            <button
-              v-if="updateFor(e) && e.source !== 'dev'"
+              v-if="updateFor(e)"
               class="ec-update-btn"
               type="button"
               :disabled="updatingId === e.id"
@@ -542,6 +708,16 @@ function onMore(e: ExtensionEntry) {
               {{ updateBtnText(e) }}
             </button>
             <span class="ec-version">v{{ e.version || '—' }}</span>
+            <button
+              class="ec-more"
+              type="button"
+              :disabled="e.invalid"
+              :aria-label="`打开 ${e.name} 所在目录`"
+              :title="e.invalid ? '此扩展目录不可用' : `打开所在目录：${e.dir}`"
+              @click.stop="e.invalid ? undefined : openDir(e)"
+            >
+              <FolderOpen :size="16" :stroke-width="2" aria-hidden="true" />
+            </button>
             <button
               class="ec-more"
               type="button"
@@ -555,6 +731,105 @@ function onMore(e: ExtensionEntry) {
         </div>
       </div>
     </template>
+
+    <!-- 我的扩展：「我的扩展」直挂的本机源码目录（增删 + 开启后可发布） -->
+    <div v-else-if="tab === 'dev'" class="ec-dev">
+      <div class="ec-hint">
+        <p class="ec-hint-line">
+          添加本机扩展源码目录（须含 <code>manifest.json</code>）后<b>立即加载</b>，<b>目录即真源</b>：改代码保存约 1.5 秒自动重载，可用真实数据与 service 后端；先在本机把效果调好，觉得可以了再走发布（需要开发者认证）。
+        </p>
+        <p class="ec-hint-line">
+          这类扩展<b>不复制进「已安装」</b>，也不参与市场更新与卸载；移除目录即撤销，磁盘上的源码不动。
+        </p>
+      </div>
+
+      <div v-if="!isTauri()" class="ec-empty">
+        <p>本地扩展调试需在桌面应用中使用</p>
+      </div>
+
+      <div v-else-if="devMode.extensions.length === 0" class="ec-empty">
+        <FolderCog :size="40" :stroke-width="1.5" aria-hidden="true" />
+        <h3>还没有添加本机扩展</h3>
+        <p>选一个含 manifest.json 的源码目录，改完保存就能在宿主里看到效果</p>
+        <button class="pill-btn" type="button" :disabled="devBusy" @click="pickDevDir">
+          选择源码目录
+        </button>
+      </div>
+
+      <div v-else class="ec-list">
+        <div
+          v-for="d in devMode.extensions"
+          :key="d.path"
+          class="ec-row"
+          :class="{ invalid: !d.exists || !d.valid || d.conflict, clickable: devReady(d) }"
+          role="button"
+          :tabindex="devReady(d) ? 0 : undefined"
+          @click="onDevRowClick(d)"
+          @keydown.enter="onDevRowClick(d)"
+        >
+          <div class="ec-icon" :style="{ background: devAccent(d).soft }">
+            <img
+              v-if="devEntryFor(d)?.icon"
+              :src="iconSrc(devEntryFor(d)!.icon!)"
+              :alt="d.name"
+              draggable="false"
+            />
+            <span v-else :style="{ color: devAccent(d).text }">{{ devInitial(d) }}</span>
+          </div>
+
+          <div class="ec-meta">
+            <div class="ec-name-line">
+              <span class="ec-name">{{ d.name || d.id || '（manifest 无法解析）' }}</span>
+              <span class="ec-tag ec-tag-dev">源码直挂</span>
+              <span v-if="d.version" class="ec-tag ec-tag-kind">v{{ d.version }}</span>
+            </div>
+            <p class="ec-desc" :title="d.path">{{ devDesc(d) }}</p>
+          </div>
+
+          <div class="ec-right">
+            <button
+              v-if="canPublish(d)"
+              class="ec-update-btn"
+              type="button"
+              :title="`把「${d.name || d.id}」打包发布到扩展市场`"
+              @click.stop="publishTarget = devEntryFor(d)!"
+            >
+              发布
+            </button>
+            <button
+              v-if="devEntryFor(d)"
+              class="ec-more"
+              type="button"
+              :aria-label="`打开 ${d.name || d.id} 源码目录`"
+              :title="`打开源码目录：${d.path}`"
+              @click.stop="openDir(devEntryFor(d)!)"
+            >
+              <FolderOpen :size="16" :stroke-width="2" aria-hidden="true" />
+            </button>
+            <button
+              v-if="devEntryFor(d)"
+              class="ec-more"
+              type="button"
+              :aria-label="`${d.name || d.id} 设置`"
+              :data-tip="`${d.name || d.id} 设置`"
+              @click.stop="onMore(devEntryFor(d)!)"
+            >
+              <MoreHorizontal :size="16" :stroke-width="2" aria-hidden="true" />
+            </button>
+            <button
+              class="ec-remove-btn"
+              type="button"
+              :disabled="devBusy"
+              :title="`从「我的扩展」移除（不删除磁盘上的源码）`"
+              @click.stop="removeDevDir(d.path)"
+            >
+              <Trash2 :size="13" :stroke-width="2" aria-hidden="true" />
+              移除
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div v-else class="ec-market">
       <div class="ec-market-toolbar">
@@ -737,8 +1012,26 @@ function onMore(e: ExtensionEntry) {
 .ec-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   flex-shrink: 0;
+}
+/* 发布配额：账号级余量（不限当前扩展），占满一行右对齐；归零的那项标红加粗，一眼看出被什么卡住 */
+.ec-quota {
+  flex-basis: 100%;
+  margin: 0;
+  text-align: right;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.ec-quota b {
+  font-weight: 650;
+  color: var(--text-1);
+}
+.ec-quota b.full {
+  color: var(--c-red-ink);
 }
 
 .ec-empty {
@@ -961,9 +1254,75 @@ function onMore(e: ExtensionEntry) {
   cursor: pointer;
   transition: background 150ms ease-out, color 150ms ease-out;
 }
-.ec-more:hover {
+.ec-more:hover:not(:disabled) {
   background: var(--brand-50);
   color: var(--brand-500);
+}
+.ec-more:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 我的扩展（源码直挂）：顶部说明 + 目录清单 */
+.ec-dev {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.ec-hint {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--frost-surface);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-card);
+}
+.ec-hint-line {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.ec-hint-line b {
+  color: var(--text-1);
+}
+.ec-hint-line code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-card-soft);
+  font-size: 0.72rem;
+}
+.ec-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+.ec-remove-btn:hover:not(:disabled) {
+  background: var(--c-red-soft);
+  border-color: var(--c-red-ink);
+  color: var(--c-red-ink);
+}
+.ec-remove-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* 市场 */

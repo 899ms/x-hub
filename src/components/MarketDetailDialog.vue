@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ExternalLink, Package, Shield, ShieldAlert, X } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ChevronLeft, ChevronRight, ExternalLink, ImageOff, Package, Shield, ShieldAlert, X } from 'lucide-vue-next'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import { isTauri, tauriApi, type MarketExtension } from '../api/tauri'
 import { accentOf } from '../composables/useResourceIcon'
@@ -26,9 +26,41 @@ useFocusTrap(visible, cardRef)
 
 /** 图标是否可显示（https URL 加载失败则回退首字母） */
 const iconFailed = ref(false)
-/** 截图放大预览：点缩略图打开，点任意处关闭 */
-const shotPreview = ref<string | null>(null)
+/** 截图放大预览：点主图打开，点任意处关闭；开着时 ←/→ 继续翻页 */
+const shotPreview = ref(false)
+/** 截图展示区当前主图下标（缩略图条/左右箭头切换） */
+const shotIndex = ref(0)
+/** 加载失败的截图（远端 URL 失效时剔出展示区，不留破图） */
+const shotFailed = ref<Set<string>>(new Set())
 const m = computed(() => props.extension)
+
+/** 可展示的截图（清单里 screenshots 为空 = 该扩展没传过展示图） */
+const shots = computed(() =>
+  ((m.value?.screenshots ?? []) as string[]).filter((s) => !shotFailed.value.has(s)),
+)
+const currentShot = computed(() => shots.value[shotIndex.value] ?? '')
+
+/** 切换主图（缩略图点选 / 左右箭头 / 键盘翻页共用；循环） */
+function showShot(i: number) {
+  const n = shots.value.length
+  if (!n) return
+  shotIndex.value = ((i % n) + n) % n
+}
+
+function onShotError(url: string) {
+  shotFailed.value.add(url)
+  // 当前主图的图挂了就退回第一张可用的
+  if (shotIndex.value >= shots.value.length) shotIndex.value = 0
+}
+
+// 换扩展时重置展示区状态（同一个弹窗实例复用）
+watch(
+  () => props.extension?.id,
+  () => {
+    shotIndex.value = 0
+    shotPreview.value = false
+  },
+)
 
 function initial(): string {
   const e = m.value
@@ -81,7 +113,14 @@ const normalPermissions = computed(() =>
 )
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && visible.value) emit('close')
+  if (!visible.value) return
+  if (shotPreview.value) {
+    if (e.key === 'Escape') shotPreview.value = false
+    if (e.key === 'ArrowLeft') showShot(shotIndex.value - 1)
+    if (e.key === 'ArrowRight') showShot(shotIndex.value + 1)
+    return
+  }
+  if (e.key === 'Escape') emit('close')
 }
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
@@ -117,20 +156,65 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <div class="md-body">
             <p class="md-desc">{{ m!.description || '暂无描述' }}</p>
 
-            <!-- 截图（作者发布时上传）：让用户先看清这扩展长什么样、能干什么 -->
-            <div v-if="m!.screenshots?.length" class="md-section md-shots">
-              <div class="md-section-title">截图</div>
-              <div class="md-shot-strip">
+            <!-- 图片展示区（作者发布时上传的截图）：主图 + 缩略图切换，点击主图放大 -->
+            <div class="md-section md-shots">
+              <div class="md-section-title">
+                截图预览
+                <span v-if="shots.length > 1" class="md-shots-count">{{ shotIndex + 1 }} / {{ shots.length }}</span>
+              </div>
+
+              <div v-if="shots.length" class="md-showcase">
                 <button
-                  v-for="(s, i) in m!.screenshots"
+                  class="md-stage"
+                  type="button"
+                  :aria-label="`放大查看第 ${shotIndex + 1} 张截图`"
+                  @click="shotPreview = true"
+                >
+                  <img
+                    :src="currentShot"
+                    :alt="`${m!.name} 截图 ${shotIndex + 1}`"
+                    @error="onShotError(currentShot)"
+                  />
+                </button>
+                <button
+                  v-if="shots.length > 1"
+                  class="md-nav md-nav-prev"
+                  type="button"
+                  aria-label="上一张截图"
+                  @click="showShot(shotIndex - 1)"
+                >
+                  <ChevronLeft :size="16" :stroke-width="2.2" aria-hidden="true" />
+                </button>
+                <button
+                  v-if="shots.length > 1"
+                  class="md-nav md-nav-next"
+                  type="button"
+                  aria-label="下一张截图"
+                  @click="showShot(shotIndex + 1)"
+                >
+                  <ChevronRight :size="16" :stroke-width="2.2" aria-hidden="true" />
+                </button>
+              </div>
+
+              <div v-if="shots.length > 1" class="md-shot-strip">
+                <button
+                  v-for="(s, i) in shots"
                   :key="s"
                   class="md-shot"
+                  :class="{ active: i === shotIndex }"
                   type="button"
                   :aria-label="`查看第 ${i + 1} 张截图`"
-                  @click="shotPreview = s"
+                  @click="showShot(i)"
                 >
-                  <img :src="s" :alt="`截图 ${i + 1}`" loading="lazy" />
+                  <img :src="s" :alt="`截图 ${i + 1}`" loading="lazy" @error="onShotError(s)" />
                 </button>
+              </div>
+
+              <!-- ⚠️ 空态必须写「=== 0」，不能挂 v-else 到缩略图条上：缩略图条的条件是 `> 1`（单图不显示），
+                   v-else 会在「只有 1 张截图」时与主图同时渲染 → 明明有图却提示「作者还没有上传截图」 -->
+              <div v-if="!shots.length" class="md-shot-empty">
+                <ImageOff :size="16" :stroke-width="1.8" aria-hidden="true" />
+                <span>作者还没有上传截图，装上后到「我的扩展」里看看实际效果</span>
               </div>
             </div>
 
@@ -210,9 +294,28 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             </div>
           </div>
 
-          <!-- 截图放大：覆盖整屏，点任意处关闭（和笔记图片预览同一交互口径） -->
-          <div v-if="shotPreview" class="md-lightbox" @click="shotPreview = null">
-            <img :src="shotPreview" alt="截图" />
+          <!-- 截图放大：覆盖整屏，点任意处关闭；多图时 ←/→ 翻页（和笔记图片预览同一交互口径） -->
+          <div v-if="shotPreview" class="md-lightbox" @click="shotPreview = false">
+            <img :src="currentShot" :alt="`${m!.name} 截图 ${shotIndex + 1}`" />
+            <template v-if="shots.length > 1">
+              <button
+                class="md-lb-nav md-lb-prev"
+                type="button"
+                aria-label="上一张截图"
+                @click.stop="showShot(shotIndex - 1)"
+              >
+                <ChevronLeft :size="20" :stroke-width="2.2" aria-hidden="true" />
+              </button>
+              <button
+                class="md-lb-nav md-lb-next"
+                type="button"
+                aria-label="下一张截图"
+                @click.stop="showShot(shotIndex + 1)"
+              >
+                <ChevronRight :size="20" :stroke-width="2.2" aria-hidden="true" />
+              </button>
+              <span class="md-lb-count">{{ shotIndex + 1 }} / {{ shots.length }}</span>
+            </template>
           </div>
 
           <div class="md-foot">
@@ -240,6 +343,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 弹窗外壳自带 24px padding；本卡片由头/体/脚各自排内边距，清零后才与
+     扩展设置弹窗（已安装 / 我的扩展里那个）的 18px 完全对齐 */
+  padding: 0;
 }
 .md-head {
   display: flex;
@@ -300,26 +406,87 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   gap: 13px;
   padding: 14px 18px 16px;
 }
-/* 截图：横向缩略图条 + 点击放大 */
+/* 截图展示区：主图（16:10 舞台）+ 缩略图切换 + 放大灯箱 */
 .md-shots {
-  margin-top: 12px;
+  gap: 8px;
+}
+.md-shots-count {
+  margin-left: auto;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-4, var(--text-3));
+  font-variant-numeric: tabular-nums;
+}
+.md-showcase {
+  position: relative;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.md-stage {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-card-soft);
+  cursor: zoom-in;
+}
+.md-stage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.md-stage:hover {
+  border-color: var(--brand-500);
+}
+/* 左右翻页：叠在主图两侧，默认半透明、hover 主图才明显 */
+.md-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: #fff;
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 150ms ease-out;
+}
+.md-nav:hover {
+  opacity: 1;
+}
+.md-nav-prev {
+  left: 8px;
+}
+.md-nav-next {
+  right: 8px;
 }
 .md-shot-strip {
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  padding-bottom: 4px;
+  padding: 2px;
 }
 .md-shot {
   flex: 0 0 auto;
-  width: 168px;
-  height: 100px;
+  width: 108px;
+  height: 64px;
   padding: 0;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   overflow: hidden;
   background: var(--bg-card-soft);
-  cursor: zoom-in;
+  cursor: pointer;
+  transition: border-color 150ms ease-out;
 }
 .md-shot img {
   display: block;
@@ -329,6 +496,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 }
 .md-shot:hover {
   border-color: var(--brand-500);
+}
+.md-shot.active {
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 1px var(--brand-500);
+}
+.md-shot-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 12px;
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius-md);
+  color: var(--text-3);
+  font-size: 0.75rem;
+  line-height: 1.5;
 }
 .md-lightbox {
   position: fixed;
@@ -346,6 +528,45 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   max-height: 100%;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-card);
+}
+.md-lb-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: #fff;
+  opacity: 0.7;
+  cursor: pointer;
+  transition: opacity 150ms ease-out;
+}
+.md-lb-nav:hover {
+  opacity: 1;
+}
+.md-lb-prev {
+  left: 20px;
+}
+.md-lb-next {
+  right: 20px;
+}
+.md-lb-count {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--scrim);
+  color: #fff;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
 }
 .md-desc {
   margin: 0;

@@ -166,8 +166,9 @@ pub struct AppConfig {
     /// 市场清单远端地址（空 = 用默认值）
     #[serde(default = "default_market_endpoint")]
     pub market_endpoint: String,
-    /// 开发者模式总开关（默认关闭）：开启后本机扩展源码目录可作为「开发扩展」直挂加载
-    /// （不复制进扩展根；见 docs/adr/0005-developer-mode-local-source-mount.md）
+    /// ⚠️ **已废弃、不再被读取**（v0.6.x）：曾经是「开发者模式」总开关，现在**登记即加载**——
+    /// 加进「我的扩展」的本机源码目录一律直挂（见 docs/adr/0005 的 v0.6.x 修订）。
+    /// 字段保留只为兼容旧 `app.json` 里残留的 false，读到即忽略；不要再恢复读取。
     #[serde(default)]
     pub dev_mode_enabled: bool,
     /// ⚠️ **已废弃、不再被读取**：x-hub 平台服务端地址的唯一真相源是内置常量
@@ -176,10 +177,15 @@ pub struct AppConfig {
     /// 若哪天又需要可配置，请连同设置入口一起加回来，不要只恢复读取。
     #[serde(default)]
     pub server_url: String,
-    /// 开发者模式：本机扩展源码目录列表（绝对路径，目录须含 manifest.json）。
-    /// ⚠️ 这些目录会被动态加入资产协议作用域，只暴露给扩展内容协议；不要添加敏感目录。
+    /// 「我的扩展」：本机扩展源码目录列表（绝对路径，目录须含 manifest.json）。
+    /// 登记即加载（无需开关）；⚠️ 这些目录会被动态加入资产协议作用域，只暴露给扩展内容协议；
+    /// 不要添加敏感目录。见 docs/adr/0005-developer-mode-local-source-mount.md
     #[serde(default)]
     pub dev_extensions: Vec<String>,
+    /// 扩展开发技能包（Skills）的自定义安装根目录（自动探测的助手目录之外的 skills 根）。
+    /// 安装到自定义目录时登记，供设置 →「扩展 → Skills」列出；只解除登记时见 `remove_skill_root`。
+    #[serde(default)]
+    pub skill_roots: Vec<String>,
     /// 开机自启动（登录 Windows 时自动驻留托盘）
     #[serde(default)]
     pub run_at_startup: bool,
@@ -353,8 +359,9 @@ impl Default for AppConfig {
             sidebar_extensions: Vec::new(),
             extension_open_modes: std::collections::HashMap::new(),
             market_endpoint: default_market_endpoint(),
-            dev_mode_enabled: false,
+            dev_mode_enabled: false, // 已废弃字段：仅为兼容旧 app.json 保留，不再读取
             dev_extensions: Vec::new(),
+            skill_roots: Vec::new(),
             // 废弃字段（不再被读取）：地址真相源是 DEFAULT_SERVER_URL，见字段注释
             server_url: String::new(),
             run_at_startup: false,
@@ -426,6 +433,63 @@ fn normalize(config: &mut AppConfig) {
     if config.clock_quote == "日拱一卒，功不唐捐。" {
         config.clock_quote = String::new();
     }
+}
+
+/// 后端管理的字段清单（`merge_disk_authoritative` 保留哪些字段）。
+///
+/// 判定标准：**只由后端命令写盘、前端不回写**（前端 `state.config` 是启动快照）。
+/// 新增这类字段时必须同步两处：① `merge_disk_authoritative` 里合并它；
+/// ② 这里登记名字 —— 回归测试 `merge_keeps_backend_managed_fields` 逐个按此清单断言，
+/// 漏了任何一步都会红（这个坑踩过两次，两次都是用户升级后才发现的）。
+#[cfg(test)]
+const BACKEND_MANAGED_FIELDS: &[&str] = &[
+    // AI 对话模型配置：只经 save_chat_models 变更
+    "chat_models",
+    // AI 对话独立窗：开关经 chat_window_save_mode、几何由拖拽/缩放记忆
+    "chat_window_mode",
+    "chat_window_width",
+    "chat_window_height",
+    "chat_window_x",
+    "chat_window_y",
+    "chat_window_pinned",
+    // 悬浮球：开关经 save_settings、位置由 drag_end 记忆
+    "floating_ball_enabled",
+    "floating_ball_auto_hide",
+    "floating_ball_with_main",
+    "floating_ball_buttons",
+    "floating_ball_x",
+    "floating_ball_y",
+    // 「我的扩展」本机源码目录：只经 add/remove_dev_extension 变更
+    "dev_extensions",
+    "dev_mode_enabled",
+    // Skills 自定义安装根：只经 install_skill / remove_skill_root 变更
+    "skill_roots",
+    // 「跳过此版本」：只经 skip_update_version 变更
+    "skipped_update_version",
+];
+
+/// `save_config` 的「以磁盘为准」合并（**纯函数，便于回归测试**）：把前端整份提交的配置
+/// 与磁盘上的当前配置合并，后端管理的字段一律取磁盘值，其余（用户可编辑项）以前端提交为准。
+///
+/// 为什么必须这样：前端提交的是**启动快照**（`state.config`），既不认识也不会回写这些后端字段，
+/// 让它们跟着快照落盘就等于「保存任意设置 = 把这些字段回滚到启动时刻」。最迷惑的一次是
+/// 「加完源码目录顺手把卡片拖进工作台」→ `setDashboardLayout` 整份保存 → 刚加的扩展从
+/// 「我的扩展」里凭空消失（扩展其实还在运行、卡片也还在）。
+pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
+    // 独立窗几何/开关（chat_window::preserve_disk_fields）
+    crate::chat_window::preserve_disk_fields(merged, disk);
+    merged.chat_models = disk.chat_models.clone();
+    merged.floating_ball_enabled = disk.floating_ball_enabled;
+    merged.floating_ball_auto_hide = disk.floating_ball_auto_hide;
+    merged.floating_ball_with_main = disk.floating_ball_with_main;
+    merged.floating_ball_buttons = disk.floating_ball_buttons.clone();
+    merged.floating_ball_x = disk.floating_ball_x;
+    merged.floating_ball_y = disk.floating_ball_y;
+    merged.dev_extensions = disk.dev_extensions.clone();
+    // 已废弃字段（登记即加载后不再读取），仍以磁盘为准以免被快照写回
+    merged.dev_mode_enabled = disk.dev_mode_enabled;
+    merged.skill_roots = disk.skill_roots.clone();
+    merged.skipped_update_version = disk.skipped_update_version.clone();
 }
 
 pub fn save(config: &AppConfig) -> Result<(), String> {
@@ -534,5 +598,154 @@ mod tests {
         assert_eq!(loaded.theme_mode, "dark");
         assert_eq!(loaded.theme_preset, "indigo");
         assert!(loaded.accent_color.is_none());
+    }
+
+    // ---------------- merge_disk_authoritative 回归测试 ----------------
+    // 这一组守的是「后端管理的字段被前端启动快照整份覆盖」那个坑（踩过两次）。
+    // 反向也守：用户可编辑项必须仍然以前端提交为准，不能被合并顺手冻住。
+
+    /// 造一份「磁盘上的当前配置」：后端管理的字段全部设成**非默认值**，
+    /// 这样「被快照覆盖」一定表现为断言失败，而不是恰好等于默认值蒙混过关。
+    fn disk_with_backend_values() -> AppConfig {
+        AppConfig {
+            chat_models: vec![ChatModelConfig {
+                id: "disk-model".to_string(),
+                name: "磁盘上的模型".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+                model: "disk-model-v1".to_string(),
+                api_key: String::new(),
+                is_default: true,
+                has_api_key: false,
+                provider_name: "Disk".to_string(),
+            }],
+            chat_window_mode: true,
+            chat_window_width: 777.0,
+            chat_window_height: 666.0,
+            chat_window_x: Some(111.0),
+            chat_window_y: Some(222.0),
+            chat_window_pinned: true,
+            floating_ball_enabled: false,
+            floating_ball_auto_hide: false,
+            floating_ball_with_main: true,
+            floating_ball_buttons: vec!["view:disk".to_string()],
+            floating_ball_x: Some(333.0),
+            floating_ball_y: Some(444.0),
+            dev_extensions: vec!["E:\\src\\my-ext".to_string()],
+            dev_mode_enabled: true,
+            skill_roots: vec!["E:\\skills-custom".to_string()],
+            skipped_update_version: "9.9.9".to_string(),
+            ..AppConfig::default()
+        }
+    }
+
+    /// 模拟前端整份提交里「后端字段被冲掉」的那一半：把磁盘配置序列化后**删掉登记的键**
+    /// 再反序列化回来 —— 复现「前端不认识这些字段」的路径（如 `skill_roots`）。
+    /// 注意另一条路径（前端认识、但带的是启动快照旧值，如 `chat_models`/`floating_ball_*`）
+    /// 的形态等价：值不是当前的磁盘值。两条都由下面的断言覆盖。
+    /// 补缺用的是 `AppConfig::default()` 的**同名字段值**（容器级 `#[serde(default)]`），
+    /// 不是字段类型的 `Default` —— 所以默认模型/默认悬浮球按钮会填进来，而不是空值。
+    fn snapshot_without_backend_fields(disk: &AppConfig) -> AppConfig {
+        let mut value = serde_json::to_value(disk).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        for field in BACKEND_MANAGED_FIELDS {
+            obj.remove(*field);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn merge_keeps_backend_managed_fields() {
+        let disk = disk_with_backend_values();
+        let snapshot = snapshot_without_backend_fields(&disk);
+
+        // 前提校验：快照确实与磁盘不同（否则这个测试什么也没守）
+        assert_ne!(
+            snapshot.dev_extensions, disk.dev_extensions,
+            "快照里的 dev_extensions 应当已被清空，测试前提不成立"
+        );
+        assert_ne!(
+            snapshot.skill_roots, disk.skill_roots,
+            "快照里的 skill_roots 应当已被清空，测试前提不成立"
+        );
+        // 注意：容器级 `#[serde(default)]` 会用 `AppConfig::default()` 的**同名字段值**补缺，
+        // 所以缺字段的快照拿到的是默认模型/默认悬浮球按钮，而不是空值 —— 正是旧快照的形状。
+        assert_ne!(
+            serde_json::to_value(&snapshot.chat_models).unwrap(),
+            serde_json::to_value(&disk.chat_models).unwrap()
+        );
+
+        let mut merged = snapshot.clone();
+        merge_disk_authoritative(&mut merged, &disk);
+
+        // 比对整体 JSON：字段级断言写漏了也逃不掉（JSON 里每个键都要等于磁盘值）
+        assert_eq!(
+            serde_json::to_value(&merged.chat_models).unwrap(),
+            serde_json::to_value(&disk.chat_models).unwrap()
+        );
+        assert_eq!(merged.chat_window_mode, disk.chat_window_mode);
+        assert_eq!(merged.chat_window_width, disk.chat_window_width);
+        assert_eq!(merged.chat_window_height, disk.chat_window_height);
+        assert_eq!(merged.chat_window_x, disk.chat_window_x);
+        assert_eq!(merged.chat_window_y, disk.chat_window_y);
+        assert_eq!(merged.chat_window_pinned, disk.chat_window_pinned);
+        assert_eq!(merged.floating_ball_enabled, disk.floating_ball_enabled);
+        assert_eq!(merged.floating_ball_auto_hide, disk.floating_ball_auto_hide);
+        assert_eq!(
+            merged.floating_ball_with_main,
+            disk.floating_ball_with_main
+        );
+        assert_eq!(merged.floating_ball_buttons, disk.floating_ball_buttons);
+        assert_eq!(merged.floating_ball_x, disk.floating_ball_x);
+        assert_eq!(merged.floating_ball_y, disk.floating_ball_y);
+        assert_eq!(merged.dev_extensions, disk.dev_extensions);
+        assert_eq!(merged.dev_mode_enabled, disk.dev_mode_enabled);
+        assert_eq!(merged.skill_roots, disk.skill_roots);
+        assert_eq!(merged.skipped_update_version, disk.skipped_update_version);
+    }
+
+    /// 清单漏登就是这条红：任何登记在案的名字都必须是 `AppConfig` 真实存在的字段，
+    /// 且合并后确实取到了磁盘值（名字打错/字段改名都能被抓到）。
+    #[test]
+    fn backend_managed_field_list_is_real_and_effective() {
+        let disk = disk_with_backend_values();
+        let mut merged = snapshot_without_backend_fields(&disk);
+        merge_disk_authoritative(&mut merged, &disk);
+
+        let merged_json = serde_json::to_value(&merged).unwrap();
+        let disk_json = serde_json::to_value(&disk).unwrap();
+        for field in BACKEND_MANAGED_FIELDS {
+            assert!(
+                merged_json.get(field).is_some(),
+                "BACKEND_MANAGED_FIELDS 里的 `{field}` 不是 AppConfig 的字段（名字写错或字段已改名）"
+            );
+            assert_eq!(
+                merged_json.get(field),
+                disk_json.get(field),
+                "`{field}` 声明为后端管理，但合并后没有取磁盘值"
+            );
+        }
+    }
+
+    /// 反向：用户可编辑项必须仍以前端提交为准（合并别把手伸过头，把所有设置都冻成磁盘旧值）。
+    #[test]
+    fn merge_keeps_user_editable_fields_from_snapshot() {
+        let disk = AppConfig::default();
+        let mut snapshot = snapshot_without_backend_fields(&disk);
+        snapshot.theme_mode = "dark".to_string();
+        snapshot.theme_preset = "midnight".to_string();
+        snapshot.accent_color = Some("#8b8bff".to_string());
+        snapshot.sidebar_toggle = true;
+        snapshot.window.width = 1280.0;
+        snapshot.dashboard_layout = r#"[{"id":"clock"}]"#.to_string();
+
+        let mut merged = snapshot.clone();
+        merge_disk_authoritative(&mut merged, &disk);
+
+        assert_eq!(merged.theme_mode, "dark");
+        assert_eq!(merged.theme_preset, "midnight");
+        assert_eq!(merged.accent_color.as_deref(), Some("#8b8bff"));
+        assert!(merged.sidebar_toggle);
+        assert_eq!(merged.window.width, 1280.0);
+        assert_eq!(merged.dashboard_layout, snapshot.dashboard_layout);
     }
 }

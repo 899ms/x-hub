@@ -11,7 +11,11 @@ import PanelLoading from './settings/PanelLoading.vue';
 
 const props = defineProps<{ initialSection?: string }>()
 
-const emit = defineEmits<{ (e: 'open-layout-editor'): void }>()
+const emit = defineEmits<{
+  (e: 'open-layout-editor'): void
+  /** 面板里的「去扩展中心」入口（本地扩展目录的增删已挪到扩展中心「我的扩展」标签页） */
+  (e: 'open-extensions'): void
+}>()
 
 // ---- 两级分类导航 ----
 // 左栏只列 5 个大类，当前大类的子项在它下方缩进展开；右侧**只挂载当前大类**的分区。
@@ -28,7 +32,7 @@ const SECTIONS = [
   { id: 'online', label: '联网' },
   { id: 'account', label: '账号' },
   { id: 'extensions', label: '扩展' },
-  { id: 'myext', label: '我的扩展' },
+  { id: 'skills', label: 'Skills' },
   { id: 'data', label: '数据' },
   { id: 'about', label: '关于' },
 ] as const
@@ -58,7 +62,7 @@ const SECTION_GROUP: Record<SectionId, GroupId> = {
   clipboard: 'features',
   online: 'features',
   extensions: 'extensions',
-  myext: 'extensions',
+  skills: 'extensions',
   account: 'account',
   data: 'data',
   about: 'data',
@@ -308,7 +312,11 @@ onMounted(() => {
       <!-- 右侧内容：只挂载当前大类的分区（其余不渲染 —— 这是点设置不再先空白的关键） -->
       <div ref="contentRef" class="sv-content">
         <!-- 当前大类面板（按需加载）：具体设置项都在 ./settings/*.vue 里 -->
-        <component :is="currentPanel" @open-layout-editor="emit('open-layout-editor')" />
+        <component
+          :is="currentPanel"
+          @open-layout-editor="emit('open-layout-editor')"
+          @open-extensions="emit('open-extensions')"
+        />
       </div>
     </div>
   </div>

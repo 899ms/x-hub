@@ -637,7 +637,7 @@
 .settings-view .settings-lock{
   flex-shrink: 0;
 }
-/* ---- 开发者模式（源码目录直挂） ---- */
+/* ---- 本机源码目录直挂（开发扩展的目录路径 / Skills 目标路径） ---- */
 .settings-view .dev-dir-path{
   font-family: ui-monospace, Consolas, monospace;
   font-size: 0.72rem;

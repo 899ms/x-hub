@@ -195,7 +195,7 @@ fn default_kind() -> String {
 
 /// 扩展来源：已装（位于扩展根，可被市场更新 / 卸载）
 pub const SOURCE_INSTALLED: &str = "installed";
-/// 扩展来源：开发者模式直挂的本机源码目录（不参与市场更新与卸载，见 docs/adr/0005）
+/// 扩展来源：「我的扩展」直挂的本机源码目录（不参与市场更新与卸载，见 docs/adr/0005）
 pub const SOURCE_DEV: &str = "dev";
 
 /// 已安装扩展的注册表项（返回给前端的展示结构）。
@@ -216,7 +216,7 @@ pub struct ExtensionEntry {
     pub icon: Option<String>,
     /// 扩展目录绝对路径
     pub dir: String,
-    /// 来源："installed"（已装，位于扩展根）| "dev"（开发者模式直挂的本机源码目录）
+    /// 来源："installed"（已装，位于扩展根）| "dev"（「我的扩展」直挂的本机源码目录）
     pub source: String,
     /// manifest 缺失 / 解析失败时为 true
     pub invalid: bool,
@@ -276,34 +276,33 @@ pub fn scan_extensions(app: &tauri::AppHandle) -> Result<Vec<ExtensionEntry>, St
         }
     }
 
-    // 开发者模式：本机源码目录直挂（不复制进扩展根，见 docs/adr/0005）。
+    // 本机源码目录直挂（不复制进扩展根，见 docs/adr/0005）。
     // 已装扩展优先：同 id 冲突时跳过开发目录，避免「打开的到底是哪一份」这种排查噩梦。
+    // 注：v0.6.x 起**不再有「开发者模式」开关**——加进「我的扩展」就等于要调试，登记即加载。
     let cfg = crate::config::load();
-    if cfg.dev_mode_enabled {
-        // 只把**有效**的已装扩展计入同 id 冲突检查：invalid 条目的 id 取自目录名，
-        // 一个坏目录（没有 manifest）会凭目录名把同名的开发扩展顶掉，列表里就只剩那条「不可用」。
-        let installed_ids: std::collections::HashSet<String> = entries
-            .iter()
-            .filter(|e| !e.invalid)
-            .map(|e| e.id.clone())
-            .collect();
-        for dir in &cfg.dev_extensions {
-            let path = std::path::PathBuf::from(dir);
-            if !path.is_dir() {
-                log::warn!("开发扩展目录不存在，已跳过: {dir}");
-                continue;
-            }
-            let entry = load_extension(&path, SOURCE_DEV);
-            if installed_ids.contains(&entry.id) {
-                log::warn!(
-                    "开发扩展 {} 与已装扩展同 id，已跳过开发目录 {}",
-                    entry.id,
-                    dir
-                );
-                continue;
-            }
-            entries.push(entry);
+    // 只把**有效**的已装扩展计入同 id 冲突检查：invalid 条目的 id 取自目录名，
+    // 一个坏目录（没有 manifest）会凭目录名把同名的开发扩展顶掉，列表里就只剩那条「不可用」。
+    let installed_ids: std::collections::HashSet<String> = entries
+        .iter()
+        .filter(|e| !e.invalid)
+        .map(|e| e.id.clone())
+        .collect();
+    for dir in &cfg.dev_extensions {
+        let path = std::path::PathBuf::from(dir);
+        if !path.is_dir() {
+            log::warn!("开发扩展目录不存在，已跳过: {dir}");
+            continue;
         }
+        let entry = load_extension(&path, SOURCE_DEV);
+        if installed_ids.contains(&entry.id) {
+            log::warn!(
+                "开发扩展 {} 与已装扩展同 id，已跳过开发目录 {}",
+                entry.id,
+                dir
+            );
+            continue;
+        }
+        entries.push(entry);
     }
 
     // dependsOn 后处理：收集已安装的 valid 扩展 id，回填 missing_dependencies
@@ -337,7 +336,7 @@ pub fn read_manifest(dir: &Path) -> Result<ExtensionManifest, String> {
 }
 
 /// 加载单个扩展目录为注册表项（永不 panic，损坏时返回 invalid 项）。
-/// `source` 区分「已装扩展」（扩展根）与「开发扩展」（开发者模式直挂的源码目录）。
+/// `source` 区分「已装扩展」（扩展根）与「开发扩展」（「我的扩展」直挂的源码目录）。
 fn load_extension(dir: &Path, source: &str) -> ExtensionEntry {
     let dir_str = dir.to_string_lossy().into_owned();
     let fallback_name = dir
@@ -428,9 +427,9 @@ pub fn list_extensions(app: tauri::AppHandle) -> Result<Vec<ExtensionEntry>, Str
     Ok(entries)
 }
 
-// ---------------- 开发者模式：本机源码目录直挂（docs/adr/0005） ----------------
+// ---------------- 「我的扩展」：本机源码目录直挂（docs/adr/0005） ----------------
 
-/// 单个开发扩展目录的解析结果（设置页展示用）
+/// 单个开发扩展目录的解析结果（扩展中心「我的扩展」展示用）
 #[derive(Debug, Clone, Serialize)]
 pub struct DevExtensionInfo {
     /// 注册的源码目录（配置中原样保存的路径）
@@ -448,23 +447,21 @@ pub struct DevExtensionInfo {
     pub exists: bool,
 }
 
-/// 开发者模式状态（get/set/add/remove 命令的统一返回）
+/// 本机源码目录清单（get/add/remove 命令的统一返回）。
+/// `enabled` 为兼容旧前端保留，恒为 true——v0.6.x 起没有「开发者模式」开关，登记即加载。
 #[derive(Debug, Clone, Serialize)]
 pub struct DevModeStatus {
     pub enabled: bool,
     pub extensions: Vec<DevExtensionInfo>,
 }
 
-/// 把配置中的开发扩展目录加入资产作用域并填开发注册表。
-/// 启动重放与「开启开发者模式 / 新增目录」时调用；目录的作用域放行不落盘，重启必须重放。
+/// 把配置中的本机源码目录加入资产作用域并填开发注册表。
+/// 启动重放与「新增目录」时调用；目录的作用域放行不落盘，重启必须重放。
 pub fn apply_dev_extensions(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<crate::ext_protocol::DevExtensionDirs>() {
         state.clear();
     }
     let cfg = crate::config::load();
-    if !cfg.dev_mode_enabled {
-        return;
-    }
     for dir in &cfg.dev_extensions {
         let path = std::path::PathBuf::from(dir);
         if !path.is_dir() {
@@ -484,10 +481,10 @@ pub fn apply_dev_extensions(app: &tauri::AppHandle) {
             state.insert(id, path.clone());
         }
     }
-    log::info!("开发者模式已应用：{} 个源码目录", cfg.dev_extensions.len());
+    log::info!("本机源码目录已应用：{} 个", cfg.dev_extensions.len());
 }
 
-/// 撤销某目录的作用域放行并从开发注册表移除（移除目录 / 关闭开发者模式时调用）
+/// 撤销某目录的作用域放行并从开发注册表移除（移除目录时调用）
 fn revoke_dev_dir(app: &tauri::AppHandle, dir: &str) {
     let path = std::path::PathBuf::from(dir);
     if let Err(e) = app.asset_protocol_scope().forbid_directory(&path, true) {
@@ -502,7 +499,7 @@ fn revoke_dev_dir(app: &tauri::AppHandle, dir: &str) {
     }
 }
 
-/// 汇总开发者模式状态（含与已装扩展的 id 冲突检测）
+/// 汇总本机源码目录清单（含与已装扩展的 id 冲突检测）
 fn dev_mode_status(app: &tauri::AppHandle) -> DevModeStatus {
     let cfg = crate::config::load();
     let installed_ids: std::collections::HashSet<String> = extensions_root(app)
@@ -541,42 +538,18 @@ fn dev_mode_status(app: &tauri::AppHandle) -> DevModeStatus {
         });
     }
     DevModeStatus {
-        enabled: cfg.dev_mode_enabled,
+        enabled: true,
         extensions,
     }
 }
 
-/// 读取开发者模式状态
+/// 读取本机源码目录清单（「我的扩展」标签页的列表真源）
 #[tauri::command]
 pub fn get_dev_mode_status(app: tauri::AppHandle) -> Result<DevModeStatus, String> {
     Ok(dev_mode_status(&app))
 }
 
-/// 开关开发者模式：开启时立即放行已注册目录，关闭时撤销全部放行
-#[tauri::command]
-pub fn set_dev_mode_enabled(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<DevModeStatus, String> {
-    let mut cfg = crate::config::load();
-    if cfg.dev_mode_enabled == enabled {
-        return Ok(dev_mode_status(&app));
-    }
-    if !enabled {
-        for dir in &cfg.dev_extensions {
-            revoke_dev_dir(&app, dir);
-        }
-    }
-    cfg.dev_mode_enabled = enabled;
-    crate::config::save(&cfg)?;
-    if enabled {
-        apply_dev_extensions(&app);
-    }
-    log::info!("开发者模式{}", if enabled { "已开启" } else { "已关闭" });
-    Ok(dev_mode_status(&app))
-}
-
-/// 添加一个开发扩展目录（含 manifest.json 的源码目录）；保存后立即生效，无需重启
+/// 添加一个本机扩展源码目录（含 manifest.json 的目录）；保存后立即放行并加载，无需重启
 #[tauri::command]
 pub fn add_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeStatus, String> {
     let p = std::path::PathBuf::from(path.trim());
@@ -603,31 +576,35 @@ pub fn add_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeS
         .map_err(|e| format!("IO_ERROR: 解析目录失败：{e}"))?;
     let dir_str = canonical.to_string_lossy().into_owned();
 
+    // 读-改-写必须持配置写锁（见 config::lock 的约定）：否则会与并发的 save_config
+    // 互相覆盖（前端整份配置落盘），刚登记的目录在下次读盘时凭空消失
+    let _guard = crate::config::lock();
     let mut cfg = crate::config::load();
-    if !cfg
+    let already = cfg
         .dev_extensions
         .iter()
-        .any(|d| std::path::PathBuf::from(d) == canonical)
-    {
+        .any(|d| std::path::PathBuf::from(d) == canonical);
+    if !already {
         cfg.dev_extensions.push(dir_str.clone());
         crate::config::save(&cfg)?;
     }
-    if cfg.dev_mode_enabled {
-        app.asset_protocol_scope()
-            .allow_directory(&canonical, true)
-            .map_err(|e| format!("IO_ERROR: 目录放行失败：{e}"))?;
-        if let Some(state) = app.try_state::<crate::ext_protocol::DevExtensionDirs>() {
-            state.insert(manifest.id.clone(), canonical.clone());
-        }
+    // 登记即放行：本机源码目录加进来就是要调试，不设额外开关（ADR 0005 v0.6.x 修订）
+    app.asset_protocol_scope()
+        .allow_directory(&canonical, true)
+        .map_err(|e| format!("IO_ERROR: 目录放行失败：{e}"))?;
+    if let Some(state) = app.try_state::<crate::ext_protocol::DevExtensionDirs>() {
+        state.insert(manifest.id.clone(), canonical.clone());
     }
-    log::info!("开发扩展已添加: {} -> {dir_str}", manifest.id);
+    log::info!("本机扩展目录已添加: {} -> {dir_str}", manifest.id);
     Ok(dev_mode_status(&app))
 }
 
-/// 移除一个开发扩展目录（源码目录本身不动）
+/// 移除一个本机扩展源码目录（源码目录本身不动）
 #[tauri::command]
 pub fn remove_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeStatus, String> {
     let target = std::path::PathBuf::from(path.trim());
+    // 同 add_dev_extension：读-改-写持配置写锁，避免与并发的整份 save_config 互相覆盖
+    let _guard = crate::config::lock();
     let mut cfg = crate::config::load();
     let before = cfg.dev_extensions.len();
     cfg.dev_extensions
@@ -636,18 +613,18 @@ pub fn remove_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevMo
         crate::config::save(&cfg)?;
     }
     revoke_dev_dir(&app, &target.to_string_lossy());
-    log::info!("开发扩展目录已移除: {}", target.display());
+    log::info!("本机扩展目录已移除: {}", target.display());
     Ok(dev_mode_status(&app))
 }
 
-/// 开发目录内容戳：对每个开发扩展目录下的文件（相对路径 + mtime 秒）做 FNV-1a。
+/// 本机源码目录内容戳：对每个目录下的文件（相对路径 + mtime 秒）做 FNV-1a。
 /// 前端轮询它以触发热重载——HTML/CSS/JS 改动都算变更（`extensions_stamp` 只盯 manifest，
 /// 那是给"已装扩展被外部改动"用的，开发调试需要全目录口径）。
 #[tauri::command]
 pub fn dev_extensions_stamp(app: tauri::AppHandle) -> Result<u64, String> {
     let _ = app;
     let cfg = crate::config::load();
-    if !cfg.dev_mode_enabled || cfg.dev_extensions.is_empty() {
+    if cfg.dev_extensions.is_empty() {
         return Ok(0);
     }
     let mut dirs: Vec<String> = cfg.dev_extensions.clone();
@@ -980,7 +957,7 @@ pub fn read_extension_entry(
     id: String,
     surface: Option<String>,
 ) -> Result<String, String> {
-    // 已装扩展与开发扩展共用同一条解析路径（开发扩展由开发者模式注册源码目录）
+    // 已装扩展与开发扩展共用同一条解析路径（开发扩展由「我的扩展」登记源码目录）
     let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
     let manifest = read_manifest(&dir)?;
 
@@ -1075,6 +1052,19 @@ pub async fn open_extension_window(app: tauri::AppHandle, id: String) -> Result<
     Ok(())
 }
 
+/// 在系统文件管理器中打开扩展所在目录（开发调试用：改完代码直接跳过去）。
+///
+/// 目录一律经 `ext_protocol::resolve_ext_dir` 解析——已装扩展 → 扩展根，开发扩展 → 源码目录；
+/// 直接 `extensions_root().join(id)` 会让「我的扩展」里的源码目录打不开（同 `uninstall_extension` 的坑）。
+#[tauri::command]
+pub fn open_extension_dir(app: tauri::AppHandle, id: String) -> Result<String, String> {
+    let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
+    let path = dir.to_string_lossy().to_string();
+    crate::process::open_path(&path)?;
+    log::info!("打开扩展目录: {id} → {path}");
+    Ok(path)
+}
+
 /// 卸载扩展：停止其 service 后端进程（如有）并删除扩展目录。
 /// （卸载 UI 在 §12.7 扩展中心补全时接入，此处先落地服务端清理逻辑）
 #[tauri::command]
@@ -1089,7 +1079,7 @@ pub fn uninstall_extension(app: tauri::AppHandle, id: String) -> Result<(), Stri
             .is_some();
         if is_dev {
             return Err(format!(
-                "INVALID_ARGUMENT: {id} 是开发扩展（源码目录直挂），请在「设置 → 扩展 → 开发者模式」中移除"
+                "INVALID_ARGUMENT: {id} 是开发扩展（源码目录直挂），请在「扩展中心 → 我的扩展」中移除"
             ));
         }
         return Err(format!("NOT_FOUND: 扩展 {id} 未安装"));

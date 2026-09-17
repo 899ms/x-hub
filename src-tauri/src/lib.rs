@@ -29,6 +29,7 @@ mod runtime;
 mod service;
 mod shortcut;
 pub mod signing;
+mod skills;
 mod sticky_window;
 mod sysmon;
 mod todo_reminder;
@@ -316,9 +317,9 @@ pub fn run() {
             app.manage(DbState(std::sync::Mutex::new(conn)));
             app.manage(clipboard::ClipboardState::default());
             app.manage(service::ServiceState::default());
-            // 开发扩展目录映射（开发者模式注册；扩展协议与扫描按它解析源码目录）
+            // 开发扩展目录映射（「我的扩展」登记；扩展协议与扫描按它解析源码目录）
             app.manage(ext_protocol::DevExtensionDirs::default());
-            // 开发者模式重放：资产作用域放行不落盘，重启必须按配置重新放行
+            // 本机源码目录重放：资产作用域放行不落盘，重启必须按配置重新放行
             extension::apply_dev_extensions(app.handle());
 
             // 账号会话启动校验（异步，不阻塞窗口创建）：token 失效则静默清理
@@ -620,14 +621,19 @@ pub fn run() {
             extension::extensions_stamp,
             extension::read_extension_entry,
             extension::open_extension_window,
+            extension::open_extension_dir,
             extension::uninstall_extension,
             extension::get_extension_permissions,
             extension::set_extension_permission,
             extension::get_dev_mode_status,
-            extension::set_dev_mode_enabled,
             extension::add_dev_extension,
             extension::remove_dev_extension,
             extension::dev_extensions_stamp,
+            // 扩展开发技能包（Skills）：内置 x-hub-extension 一键装到本机 AI 助手的 skills 目录
+            skills::get_skill_overview,
+            skills::install_skill,
+            skills::uninstall_skill,
+            skills::remove_skill_root,
             // 平台账号（登录 / 额度 / 开发者申请）
             // 注意：服务端地址内置为常量（见 config::DEFAULT_SERVER_URL），无 account_set_server 命令
             account::account_status,

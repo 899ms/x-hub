@@ -566,6 +566,11 @@ function onOpenChatSettings() {
   activeView.value = 'settings'
 }
 
+/** 设置 → 扩展中心（本机源码目录的增删都在那里） */
+function onOpenExtensionsView() {
+  activeView.value = 'extensions'
+}
+
 async function restoreChatPanel() {
   if (!isTauri()) return
   try {
@@ -836,7 +841,11 @@ provide('showToast', showToast)
 
         <!-- 设置：独立视图 -->
         <section v-else-if="activeView === 'settings'" class="view view-settings" tabindex="-1" aria-label="设置">
-          <SettingsView :initial-section="settingsSection" @open-layout-editor="openLayoutEditor" />
+          <SettingsView
+            :initial-section="settingsSection"
+            @open-layout-editor="openLayoutEditor"
+            @open-extensions="onOpenExtensionsView"
+          />
         </section>
 
         <!-- 自定义布局编辑器：独立视图（从设置进入，完成后回主页面） -->

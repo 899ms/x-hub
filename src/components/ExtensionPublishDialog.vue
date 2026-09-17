@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, inject, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
-import { ImagePlus, X } from 'lucide-vue-next'
+import { ImagePlus, Info, X } from 'lucide-vue-next'
 import { useFocusTrap } from '../composables/useFocusTrap'
 import {
   isTauri,
@@ -30,8 +30,157 @@ const result = ref<SubmitResult | null>(null)
 const errorText = ref('')
 
 const submissions = ref<DevSubmissionRow[]>([])
-const listLoading = ref(false)
+/**
+ * 展示用的分页：**全量始终在内存里**（判定与配额明细要用全量），列表只限制渲染条数。
+ * 提交记录可能上百条，一次性渲染既慢又没法定位，所以显示层做「每页 20 条 + 显示更多」。
+ */
+const PAGE_SIZE = 20
+const visibleCount = ref(PAGE_SIZE)
+const allLoading = ref(false)
+/** 全量是否已拉到（阻塞判定与配额明细必须基于全量，只看第 1 页会出现「有待审却放行」「数字对不上明细」） */
+const allLoaded = ref(false)
 const quota = ref<{ drafts_remaining?: number; published_remaining?: number; daily_submits_remaining?: number } | null>(null)
+
+/** 当前扩展的提交记录（列表只显示这一份：看版本历史不该被别的扩展刷屏） */
+const extSubmissions = computed(() => submissions.value.filter((s) => s.ext_id === props.extension?.id))
+
+/** 列表里要显示的记录（超过一页时按当前页截断） */
+const visibleSubmissions = computed(() => extSubmissions.value.slice(0, visibleCount.value))
+/** 还有未展示的记录 */
+const hasMore = computed(() => extSubmissions.value.length > visibleCount.value)
+
+/** 展开配额明细（「待处理 N」到底是哪几条） */
+const showDraftDetail = ref(false)
+
+/** 市场清单里的撤销列表（`id@version`）：判断某条已上架的提交是否已被下架 */
+const revokedKeys = ref<string[]>([])
+
+/** 某条提交对应的版本是否已被平台下架（下架只写 `revoked` 表、**不改 submissions.status**） */
+function isDelisted(s: DevSubmissionRow): boolean {
+  return s.status === 'published' && revokedKeys.value.includes(`${s.ext_id}@${s.version}`)
+}
+
+/** 列表里要显示的记录状态：已下架的不再算「已上架」 */
+function statusKey(s: DevSubmissionRow): string {
+  return isDelisted(s) ? 'delisted' : s.status
+}
+
+/** 能否撤回（与服务端 `not_withdrawable` 的白名单一致；`approved` 不可撤回） */
+function isWithdrawable(s: DevSubmissionRow): boolean {
+  return (WITHDRAWABLE as readonly string[]).includes(s.status)
+}
+
+// ---- 提交阻塞判定：拦在打包之前 ----
+// 服务端只有在**整包上传完成之后**才校验，撞上限制的代价是白等几分钟的打包上传（`publisher.rs::dev_submit`
+// 先 pack_to_temp + upload，服务端 `checkDevQuota` 才回 429）。所以这里前置判定、就地说明原因。
+//
+// 口径：**同一扩展同时只允许一个待审版本**——有一条未走完流程的提交时必须先撤回或等结果。
+// ⚠️ 两个集合刻意分开，别合并：
+//   · `WITHDRAWABLE`（阻塞集合）：能撤回的才拦——拦住也一定能靠自己解开，不会「被拦又无从下手」；
+//   · `DRAFT_STATUSES`（配额明细集合）：服务端 `quotaView` 的 drafts 口径，比上面**多一个 `approved`**
+//     （审核通过、但还没真正写进市场清单的短暂过渡态）。它占名额，却**不可撤回**（服务端只允许
+//     uploaded / gate_failed / pending_review 撤回），所以只用于算明细、不用于拦提交。
+const WITHDRAWABLE = ['uploaded', 'pending_review', 'gate_failed'] as const
+const DRAFT_STATUSES = ['uploaded', 'pending_review', 'gate_failed', 'approved'] as const
+
+/** 占用「待处理」名额的提交（账号级、含所有扩展，与配额视图数字同源） */
+const draftBlockers = computed(() =>
+  submissions.value.filter((s) => (DRAFT_STATUSES as readonly string[]).includes(s.status)),
+)
+
+/** 该扩展当前未走完流程、且**可撤回**的提交（倒序取最新一条） */
+const blockingSubmission = computed(() => {
+  const extId = props.extension?.id
+  if (!extId) return null
+  return submissions.value.find((s) => s.ext_id === extId && (WITHDRAWABLE as readonly string[]).includes(s.status)) ?? null
+})
+
+/** 阻塞原因（null = 可以提交） */
+const blockReason = computed<{ kind: 'reviewing' | 'gate_failed' | 'quota'; text: string; hint: string } | null>(
+  () => {
+    const s = blockingSubmission.value
+    if (s) {
+      if (s.status === 'gate_failed') {
+        return {
+          kind: 'gate_failed',
+          text: `v${s.version} 上次提交未过关卡，还没有走完流程`,
+          hint: '改完源码后重新提交即可；若不想再交这一版，先在下方「我的提交」里撤回它。',
+        }
+      }
+      return {
+        kind: 'reviewing',
+        text: `v${s.version} 正在审核中`,
+        hint: '同一扩展同时只允许一个待审版本：等审核通过或驳回后再提交新版本；若要现在就改，先在下方「我的提交」里撤回它。',
+      }
+    }
+    // 配额：只判「剩余为 0」——服务端只回剩余次数、不回上限（PRD 附录 A），且官方账号不受配额约束，
+    // 所以这里只做能确定的拦截，其余情形交给服务端报错兜底。
+    if (quota.value?.drafts_remaining === 0) {
+      return {
+        kind: 'quota',
+        text: '账号的「待处理」额度已用完',
+        hint: '先在下方撤回不需要的提交，或等审核结果出来后再提交。',
+      }
+    }
+    if (quota.value?.daily_submits_remaining === 0) {
+      return { kind: 'quota', text: '今日提交次数已用完', hint: '明天再来，或先在下方撤回不需要的提交。' }
+    }
+    return null
+  },
+)
+
+/** 提交前的最后一道闸：校验刚拉到的配额，避免信息过期后仍然白等一轮打包上传 */
+function checkSubmittable(): boolean {
+  if (blockReason.value) {
+    const r = blockReason.value
+    errorText.value = `${r.text}。${r.hint}`
+    return false
+  }
+  return true
+}
+
+// 「我的提交」里被指引的那一行：短暂高亮（配合说明里的可点行动）
+const highlightedId = ref<number | null>(null)
+let highlightTimer: number | null = null
+
+/** 说明里的行动指引：滚到「我的提交」里那条阻塞本次提交的记录并高亮它（撤回入口就在那一行） */
+function focusBlockingSubmission() {
+  const s = blockingSubmission.value
+  if (!s) {
+    document.getElementById('pub-list-head')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    return
+  }
+  focusSubmission(s.id)
+}
+
+/** 滚到列表里指定那条提交并短暂高亮（配额明细 / 阻塞说明共用） */
+function focusSubmission(id: number) {
+  // 目标可能在「显示更多」之后才渲染：先确保它落在当前渲染条数内
+  const idx = submissions.value.findIndex((s) => s.id === id)
+  if (idx >= visibleCount.value) visibleCount.value = idx + 1
+  highlightedId.value = id
+  if (highlightTimer !== null) window.clearTimeout(highlightTimer)
+  highlightTimer = window.setTimeout(() => (highlightedId.value = null), 2600)
+  void nextTick(() => {
+    const el = document.getElementById(`pub-sub-${id}`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      return
+    }
+    // 兜底：目标行确实不在列表里时，至少落到列表头部并给个交代，别静默无反应
+    document.getElementById('pub-list-head')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    errorText.value = '这条提交不在当前列表里（可能是列表未完整加载），点「刷新」重试。'
+  })
+}
+
+/** 展开/收起配额明细（展开后把面板滚进视野，避免它长在视线之外） */
+function toggleDraftDetail() {
+  showDraftDetail.value = !showDraftDetail.value
+  if (!showDraftDetail.value) return
+  void nextTick(() => {
+    document.getElementById('pub-draft-detail')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  })
+}
 
 const STATUS_TEXT: Record<string, string> = {
   uploaded: '已上传',
@@ -41,6 +190,8 @@ const STATUS_TEXT: Record<string, string> = {
   rejected: '已驳回',
   published: '已上架',
   withdrawn: '已撤回',
+  /** 派生状态（非服务端 status）：平台已下架该版本，见 `isDelisted` */
+  delisted: '已下架',
 }
 
 function fmtTime(ms: number): string {
@@ -49,17 +200,59 @@ function fmtTime(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-async function loadSubmissions() {
+/** 「显示更多」：只放大渲染条数，数据早已全量在手 */
+function showMore() {
+  visibleCount.value += PAGE_SIZE
+}
+
+/**
+ * 拉全量提交记录（翻页到底）。
+ *
+ * 为什么必须全量：阻塞判定与「待处理 N 条」的明细都要看**所有**未走完流程的提交，
+ * 而列表首屏只渲染 20 条——只看第 1 页会出现「明明有待审版本却放行」和「数字对不上明细」。
+ * 失败时降级为「用已加载的部分」并置 `allLoaded=false`，界面会标注数据不完整。
+ */
+async function loadAllSubmissions() {
   if (!isTauri()) return
-  listLoading.value = true
+  allLoading.value = true
+  allLoaded.value = false
   try {
-    const r = await tauriApi.devListSubmissions(1, 20)
-    submissions.value = r.submissions ?? []
-    quota.value = r.quota ?? null
+    const first = await tauriApi.devListSubmissions(1, 100)
+    let rows = first.submissions ?? []
+    const t = typeof first.total === 'number' ? first.total : rows.length
+    quota.value = first.quota ?? quota.value
+    let p = 1
+    while (rows.length < t && p < 20) {
+      p += 1
+      const r = await tauriApi.devListSubmissions(p, 100)
+      const batch = r.submissions ?? []
+      if (!batch.length) break
+      rows = [...rows, ...batch]
+    }
+    submissions.value = rows
+    visibleCount.value = PAGE_SIZE
+    allLoaded.value = true
   } catch {
-    // 未登录 / 未配置服务器时静默：表单区会给出提示
+    // 全量拉取失败：保留已有数据，`allLoaded=false` 让界面别把明细说得太满
+    allLoaded.value = false
   } finally {
-    listLoading.value = false
+    allLoading.value = false
+  }
+}
+
+/**
+ * 同步「已下架」状态：下架动作只写服务端 `revoked` 表 + 重签市场清单，
+ * **不会**把 `submissions.status` 从 `published` 改掉（见 x-hub-server `routes.ts::/admin/market/:id/revoke`），
+ * 所以作者侧那条记录会一直显示「已上架」——客户端只能拿清单的 `revoked`（`id@version`）自己对照。
+ */
+async function loadRevokedKeys() {
+  if (!isTauri()) return
+  try {
+    // 优先拉最新清单；联网失败时回退读本地缓存（Rust 端把验签过的清单缓存到数据根）
+    const status = await tauriApi.refreshMarketRegistry().catch(() => tauriApi.getMarketRegistry())
+    revokedKeys.value = status?.revoked ?? []
+  } catch {
+    revokedKeys.value = []
   }
 }
 
@@ -126,6 +319,9 @@ async function submit() {
   const ext = props.extension
   if (!ext) return
   if (!isTauri()) return
+  // 阻塞判定可能基于几分钟前拉到的列表/配额，提交前再跟服务端核一次（失败不拦，交给服务端兜底）
+  await loadAllSubmissions()
+  if (!checkSubmittable()) return
   submitting.value = true
   result.value = null
   errorText.value = ''
@@ -138,7 +334,8 @@ async function submit() {
       screenshots.value,
     )
     quota.value = result.value.quota ?? quota.value
-    await loadSubmissions()
+    // 提交后刷新：新记录要立刻出现在列表里（它现在也是一条「待处理」）
+    await loadAllSubmissions()
   } catch (e) {
     errorText.value = String(e)
   } finally {
@@ -149,7 +346,8 @@ async function submit() {
 async function withdraw(row: DevSubmissionRow) {
   try {
     await tauriApi.devWithdrawSubmission(row.id)
-    await loadSubmissions()
+    // 撤回后刷新列表与配额：按钮的置灰状态要立刻跟着放开
+    await loadAllSubmissions()
   } catch (e) {
     errorText.value = String(e)
   }
@@ -178,17 +376,42 @@ async function toggleDetail(row: DevSubmissionRow) {
   }
 }
 
+/** 弹窗打开时的初始化：这些数据（提交记录 / 配额 / 预检 / 已下架清单）是判定与展示的输入，每次打开都刷新 */
+function initDialog() {
+  result.value = null
+  errorText.value = ''
+  changelog.value = ''
+  homepage.value = ''
+  minAppVersion.value = ''
+  precheck.value = null
+  showDraftDetail.value = false
+  submissions.value = []
+  visibleCount.value = PAGE_SIZE
+  allLoaded.value = false
+  void runPrecheck()
+  void loadAllSubmissions()
+  void loadRevokedKeys()
+}
+
 watch(visible, (v) => {
   if (v) {
-    result.value = null
+    initDialog()
+  } else {
+    // 关窗即收尾：不残留上一次的错误与高亮
     errorText.value = ''
-    changelog.value = ''
-    homepage.value = ''
-    minAppVersion.value = ''
-    precheck.value = null
-    void runPrecheck()
-    void loadSubmissions()
+    highlightedId.value = null
+    if (highlightTimer !== null) {
+      window.clearTimeout(highlightTimer)
+      highlightTimer = null
+    }
   }
+  // ⚠️ 必须 immediate：弹窗组件常在「已经打开」的状态下首次挂载（例如刚打开扩展中心就点发布、
+  // 或父组件把它与别的弹窗一起渲染），此时 watch 不会触发 → 提交记录/配额永远为空，
+  // 「打包并发布」也就永远不会进入置灰态，用户必须关掉再开一次才正常。
+}, { immediate: true })
+
+onBeforeUnmount(() => {
+  if (highlightTimer !== null) window.clearTimeout(highlightTimer)
 })
 </script>
 
@@ -275,11 +498,6 @@ watch(visible, (v) => {
             </p>
           </div>
 
-          <div v-if="quota" class="pub-quota">
-            剩余配额：待处理 {{ quota.drafts_remaining ?? '—' }} · 今日可提交
-            {{ quota.daily_submits_remaining ?? '—' }} · 在架可新增 {{ quota.published_remaining ?? '—' }}
-          </div>
-
           <div v-if="errorText" class="pub-error">{{ errorText }}</div>
 
           <div v-if="result" class="pub-result" :class="{ ok: result.gatePassed }">
@@ -299,18 +517,36 @@ watch(visible, (v) => {
           </div>
 
           <div class="pub-list">
-            <div class="pub-list-head">
-              <span>我的提交</span>
-              <button class="ghost-btn" type="button" :disabled="listLoading" @click="loadSubmissions">
-                刷新
+            <div id="pub-list-head" class="pub-list-head">
+              <span>
+                提交记录
+                <span v-if="submissions.length" class="pub-list-count">
+                  （账号共 {{ submissions.length }} 条{{ hasMore ? `，显示 ${visibleSubmissions.length} 条` : '' }}）
+                </span>
+              </span>
+              <button class="ghost-btn" type="button" :disabled="allLoading" @click="loadAllSubmissions">
+                {{ allLoading ? '刷新中…' : '刷新' }}
               </button>
             </div>
-            <p v-if="!submissions.length" class="pub-empty">还没有提交记录</p>
-            <div v-for="s in submissions" :key="s.id" class="pub-item">
+            <p v-if="allLoading && !submissions.length" class="pub-empty">正在加载提交记录…</p>
+            <p v-else-if="!submissions.length" class="pub-empty">账号下还没有提交记录</p>
+            <p v-else-if="!extSubmissions.length" class="pub-empty">这个扩展还没有提交记录</p>
+            <div
+              v-for="s in visibleSubmissions"
+              :id="`pub-sub-${s.id}`"
+              :key="s.id"
+              class="pub-item"
+              :class="{ 'pub-item-highlight': highlightedId === s.id }"
+            >
               <div class="pub-item-main">
-                <span class="pub-item-title">{{ s.ext_id }} <b>v{{ s.version }}</b></span>
+                <!-- 别的扩展的记录也列在这里（账号级列表，撤回入口要能点到，见下方配额明细），
+                     但用标签明确区分，避免看起来像本扩展的版本 -->
+                <span v-if="s.ext_id !== extension?.id" class="pub-item-other">
+                  其他扩展 · {{ s.ext_id }}
+                </span>
+                <span class="pub-item-title"><b>v{{ s.version }}</b></span>
                 <span class="pub-item-meta">
-                  <span class="pub-tag" :class="`st-${s.status}`">{{ STATUS_TEXT[s.status] ?? s.status }}</span>
+                  <span class="pub-tag" :class="`st-${statusKey(s)}`">{{ STATUS_TEXT[statusKey(s)] ?? s.status }}</span>
                   {{ fmtTime(s.created_at) }}
                 </span>
                 <span v-if="s.review_note" class="pub-item-note">驳回原因：{{ s.review_note }}</span>
@@ -331,7 +567,7 @@ watch(visible, (v) => {
                   {{ detailId === s.id ? '收起' : '详情' }}
                 </button>
                 <button
-                  v-if="['uploaded', 'gate_failed', 'pending_review'].includes(s.status)"
+                  v-if="isWithdrawable(s)"
                   class="ghost-btn"
                   type="button"
                   @click="withdraw(s)"
@@ -339,15 +575,91 @@ watch(visible, (v) => {
                   撤回
                 </button>
               </div>
+              <p v-if="isDelisted(s)" class="pub-item-delisted">
+                该版本已被平台下架，不再出现在市场清单里。要重新上架请联系平台，或改好问题后提交新版本。
+              </p>
+            </div>
+            <button v-if="hasMore" class="ghost-btn pub-more" type="button" @click="showMore">
+              显示更多（还有 {{ extSubmissions.length - visibleSubmissions.length }} 条）
+            </button>
+
+            <!-- 提交记录（账号级，含所有扩展）：既占用账号的「待处理」额度，也是撤回入口所在。
+                 ⚠️ 文案别只写「待处理 N 条」——那是**占用**数；扩展中心里的「待处理还可 N 条」是**剩余**额度，
+                 两个 N 方向相反，必须各自写明「占用 … 额度」/「还可 …」（见约定 61）。 -->
+            <p class="pub-draft-hint">
+              <span v-if="draftBlockers.length">
+                提交记录共 <b>{{ submissions.length }}</b> 条（账号级，含其他扩展）：其中
+                <b>{{ draftBlockers.length }}</b> 条未走完流程，占用账号的「待处理」额度
+              </span>
+              <span v-else>提交记录共 <b>{{ submissions.length }}</b> 条（账号级，含其他扩展）：当前没有未走完流程的</span>
+              <button
+                v-if="draftBlockers.length"
+                class="pub-quota-detail"
+                type="button"
+                :aria-expanded="showDraftDetail"
+                @click="toggleDraftDetail"
+              >
+                {{ showDraftDetail ? '收起' : '看是哪几条' }}
+              </button>
+            </p>
+            <div v-if="showDraftDetail" id="pub-draft-detail" class="pub-detail">
+              <ul class="pub-detail-list">
+                <li v-for="b in draftBlockers" :key="b.id">
+                  <!-- 本扩展的直接跳过去（撤回入口就在那一行）；别的扩展没有对应行，用展开的「本扩展的提交」过滤 -->
+                  <button
+                    v-if="b.ext_id === extension?.id"
+                    class="pub-detail-item"
+                    type="button"
+                    @click="focusSubmission(b.id)"
+                  >
+                    <span class="pub-detail-id">{{ extension?.name || extension?.id }}</span>
+                    <span class="pub-detail-ver">v{{ b.version }}</span>
+                    <span class="pub-tag" :class="`st-${b.status}`">{{ STATUS_TEXT[b.status] ?? b.status }}</span>
+                    <span class="pub-detail-time">{{ fmtTime(b.created_at) }}</span>
+                  </button>
+                  <span v-else class="pub-detail-item pub-detail-item-static">
+                    <span class="pub-detail-id">{{ b.ext_id }}</span>
+                    <span class="pub-detail-ver">v{{ b.version }}</span>
+                    <span class="pub-tag" :class="`st-${b.status}`">{{ STATUS_TEXT[b.status] ?? b.status }}</span>
+                    <span class="pub-detail-time">{{ fmtTime(b.created_at) }}</span>
+                  </span>
+                </li>
+              </ul>
+              <p v-if="!allLoaded" class="pub-detail-warn">
+                提交记录未完整加载（网络或登录异常），上面的明细可能不全，请点「刷新」重试。
+              </p>
             </div>
           </div>
         </div>
 
         <div class="pub-foot">
-          <button class="ghost-btn" type="button" @click="emit('close')">关闭</button>
-          <button class="pill-btn" type="button" :disabled="submitting" @click="submit">
-            {{ submitting ? '正在打包上传…' : '打包并发布' }}
-          </button>
+          <!-- 提交被拦时就地写明原因 + 去哪解（按钮置灰不能是哑的；见 `blockReason`） -->
+          <p v-if="blockReason" class="pub-block" :class="`pub-block-${blockReason.kind}`">
+            <Info :size="13" :stroke-width="2" aria-hidden="true" />
+            <span>
+              <b>{{ blockReason.text }}</b> —— {{ blockReason.hint }}
+              <button
+                v-if="blockingSubmission"
+                class="pub-block-link"
+                type="button"
+                @click="focusBlockingSubmission"
+              >
+                定位到这条记录
+              </button>
+            </span>
+          </p>
+          <div class="pub-foot-actions">
+            <button class="ghost-btn" type="button" @click="emit('close')">关闭</button>
+            <button
+              class="pill-btn"
+              type="button"
+              :disabled="submitting || !!blockReason"
+              :title="blockReason ? `${blockReason.text}：${blockReason.hint}` : ''"
+              @click="submit"
+            >
+              {{ submitting ? '正在打包上传…' : '打包并发布' }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -360,13 +672,16 @@ watch(visible, (v) => {
   max-height: 86vh;
   display: flex;
   flex-direction: column;
+  /* 弹窗外壳自带 24px padding；本卡片由头/体/脚各自排内边距，清零后与扩展设置弹窗、
+     市场详情弹窗的 18px 对齐（同一个扩展的四处弹窗内边距必须一致） */
+  padding: 0;
 }
 .pub-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 18px 20px 12px;
+  padding: 16px 18px 0;
 }
 .pub-sub {
   margin: 3px 0 0;
@@ -374,7 +689,7 @@ watch(visible, (v) => {
   color: var(--text-3);
 }
 .pub-body {
-  padding: 0 20px;
+  padding: 14px 18px 0;
   overflow: auto;
   flex: 1;
 }
@@ -424,8 +739,149 @@ watch(visible, (v) => {
   min-width: 0;
 }
 .pub-quota {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   margin: 4px 0 10px;
   font-size: 0.72rem;
+  color: var(--text-3);
+}
+.pub-quota-detail {
+  padding: 1px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 0.69rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+.pub-quota-detail:hover {
+  background: var(--brand-50);
+  border-color: var(--brand-500);
+  color: var(--brand-500);
+}
+/* 配额明细：占用「待处理」名额的提交逐条列出，点一条即跳到「我的提交」里那一行 */
+.pub-detail {
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-card-soft);
+}
+.pub-detail-head {
+  margin: 0 0 6px;
+  font-size: 0.71rem;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.pub-detail-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+.pub-detail-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-1);
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease-out;
+}
+.pub-detail-item:hover {
+  background: var(--brand-50);
+}
+.pub-detail-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.69rem;
+  color: var(--text-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 46%;
+}
+.pub-detail-ver {
+  font-weight: 650;
+  flex-shrink: 0;
+}
+.pub-detail-time {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 0.67rem;
+  color: var(--text-3);
+}
+.pub-detail-warn {
+  margin: 6px 0 0;
+  font-size: 0.69rem;
+  line-height: 1.5;
+  color: var(--c-orange-ink);
+}
+.pub-list-count {
+  font-weight: 400;
+  color: var(--text-3);
+}
+/* 别的扩展的记录：淡色标签，避免被误认成本扩展的版本 */
+.pub-item-other {
+  display: inline-block;
+  margin-bottom: 2px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-card-soft);
+  color: var(--text-3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.65rem;
+}
+/* 待处理明细入口（配额行搬到扩展管理页后，明细留在提交列表下方） */
+.pub-draft-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 0;
+  font-size: 0.71rem;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.pub-draft-hint b {
+  color: var(--text-1);
+  font-weight: 650;
+}
+.pub-detail-item-static {
+  cursor: default;
+}
+.pub-detail-item-static:hover {
+  background: transparent;
+}
+.pub-more {
+  width: 100%;
+  margin-top: 8px;
+  justify-content: center;
+}
+/* 已下架：服务端 status 仍是 published，客户端按清单 revoked 派生（见 isDelisted） */
+.pub-item-delisted {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  font-size: 0.69rem;
+  line-height: 1.5;
+  color: var(--c-orange-ink);
+}
+.pub-tag.st-delisted {
+  background: var(--c-gray-soft, var(--bg-card-soft));
   color: var(--text-3);
 }
 .pub-precheck-loading {
@@ -542,6 +998,7 @@ watch(visible, (v) => {
 }
 .pub-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 7px 0;
@@ -703,8 +1160,57 @@ watch(visible, (v) => {
 }
 .pub-foot {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+.pub-foot-actions {
+  display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 14px 20px 18px;
+}
+/* 提交被拦的原因说明：常驻在按钮旁（不能只靠置灰或点击后的 toast） */
+.pub-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.74rem;
+  line-height: 1.6;
+  background: var(--c-orange-soft);
+  color: var(--c-orange-ink);
+}
+.pub-block svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.pub-block b {
+  font-weight: 650;
+}
+.pub-block-quota {
+  background: var(--bg-card-soft);
+  color: var(--text-2);
+}
+.pub-block-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+/* 被「定位到这条记录」指到的行：短暂高亮，撤回入口就在这一行 */
+.pub-item-highlight {
+  border-radius: 8px;
+  background: var(--brand-50);
+  box-shadow: inset 0 0 0 1px var(--brand-500);
 }
 </style>
+

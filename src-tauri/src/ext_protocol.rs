@@ -45,7 +45,7 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
 /// 「扩展更新后仍加载旧资源」变成排查成本极高的偶发问题。
 const CACHE_CONTROL: &str = "no-store";
 
-/// 开发扩展目录映射（扩展 id → 源码目录）。开发者模式注册时填充；
+/// 开发扩展目录映射（扩展 id → 源码目录）。「我的扩展」登记时填充；
 /// 已装扩展**不在**此表，回退 `<数据根>/extensions/<id>`。
 #[derive(Default)]
 pub struct DevExtensionDirs(pub Mutex<HashMap<String, PathBuf>>);
@@ -112,7 +112,7 @@ fn encode_rel_path(rel: &str) -> String {
         .join("/")
 }
 
-/// 解析某扩展的内容目录：优先开发者模式注册的源码目录，其次已装扩展根。
+/// 解析某扩展的内容目录：优先「我的扩展」登记的源码目录，其次已装扩展根。
 pub fn resolve_ext_dir(app: &tauri::AppHandle, id: &str) -> Result<PathBuf, String> {
     if let Some(state) = app.try_state::<DevExtensionDirs>() {
         if let Some(dir) = state.get(id) {

@@ -498,7 +498,7 @@ pub fn pack_dir_to_archive(
 }
 
 /// 把扩展目录打成 `.xhpack`（zip 格式，**manifest.json 必须在包根**）。
-/// 已装扩展与开发扩展都可打包（按 id 解析目录，开发者模式直挂的源码目录同样适用）。
+/// 已装扩展与开发扩展都可打包（按 id 解析目录，「我的扩展」直挂的源码目录同样适用）。
 /// 排除 `node_modules` 与所有 `.` 开头的文件/目录（含 `.xhpack`、`.git`、用户数据点文件）。
 #[tauri::command]
 pub fn pack_extension_archive(

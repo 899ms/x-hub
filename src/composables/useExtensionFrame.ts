@@ -277,7 +277,7 @@ export function useExtensionFrame(
   }
 
   // ---- 开发扩展热重载：轮询开发目录内容戳，变化即重载当前 iframe ----
-  // 仅当开发者模式开启、且当前扩展确实是「开发扩展」时才重载（已装扩展不受开发目录变动影响）。
+  // 仅当当前扩展确实是「开发扩展」时才重载（已装扩展不受本机源码目录变动影响）。
   // 戳由后端对源码目录树（跳过 node_modules / 隐藏目录）的「相对路径 + mtime」算 FNV，
   // 因此改 HTML/CSS/JS 都会触发——已装扩展那套 extensions_stamp 只盯 manifest，不够用。
   const DEV_POLL_MS = 1500
@@ -288,7 +288,7 @@ export function useExtensionFrame(
     if (!isTauri()) return
     try {
       const stamp = await tauriApi.devExtensionsStamp()
-      if (!stamp) return // 0 = 开发者模式未开启或无开发目录
+      if (!stamp) return // 0 = 没有登记任何本机源码目录
       if (devStamp === null) {
         devStamp = stamp
         return

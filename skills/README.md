@@ -22,7 +22,7 @@ x-hub-extension/
 │   ├── surfaces.md       # 四种形态 + module 多形态（variant）三通道
 │   ├── service.md        # service 后端写法与铁律
 │   ├── convert-html.md   # 把已有页面改造成扩展的四步
-│   ├── debug-deploy.md   # 开发者模式调试、自检清单、打包与上架
+│   ├── debug-deploy.md   # 本机源码目录直挂调试、自检清单、打包与上架
 │   └── pitfalls.md       # 18 条实机踩坑
 └── templates/            # 可直接复制改字段的起手式骨架
     ├── manifest.web.json / manifest.service.json
@@ -44,7 +44,7 @@ x-hub-extension/
 
 它同时也是**权限的权威清单**：每个方法上方标着 `@done`（已实现，可直接用）或 `@planned`（契约已定义、宿主尚未实现，别依赖），以及"需 `data:read`"这种权限要求。判断某个 API 是否真能用，运行期以 `await window.xhub.runtime.info()` 的 `capabilities` 为准。
 
-skill 是**自包含**的：不需要额外的脚手架仓库或工具，手写 `manifest.json` + 入口 HTML 就能开发，用客户端设置里的「**开发者模式**」挂源码目录即可真机调试（改动自动重载）。整个 `x-hub-extension/` 目录可直接复制，不需要再单独挑文件。
+skill 是**自包含**的：不需要额外的脚手架仓库或工具，手写 `manifest.json` + 入口 HTML 就能开发，在扩展中心「**我的扩展**」里挂上源码目录即可真机调试（加进来就加载，改动自动重载）。整个 `x-hub-extension/` 目录可直接复制，不需要再单独挑文件。
 
 ## 怎么用
 

@@ -114,6 +114,22 @@ export interface WindowState {
   always_on_top: boolean
 }
 
+/**
+ * 应用配置（与 Rust `AppConfig` 对应的前端类型；**少数字段故意缺席**）。
+ *
+ * ⚠️ 判据：**这个类型里有没有某个字段，都不代表前端说了算**。凡是在后端
+ * `config.rs::BACKEND_MANAGED_FIELDS` 里登记的字段，一律以磁盘为准（合并实现见
+ * `config.rs::merge_disk_authoritative`，三条回归测试守着）。两种情形**都会**覆盖磁盘：
+ *   - 前端认识它（如 `chat_models`、`chat_window_*`、`floating_ball_*`、`skipped_update_version`）
+ *     → 提交时带的是**启动快照**里的旧值；
+ *   - 前端不认识它（如 `dev_extensions`、`dev_mode_enabled`、`skill_roots`）→ 序列化后整份提交，
+ *     反序列化时按 `AppConfig::default()` 的**同名字段值**补缺（容器级 `#[serde(default)]`），
+ *     照样把磁盘值冲掉（`skill_roots` 那次事故就是这么发生的）。
+ * 所以「不放进这个类型」**不是**保护手段——唯一的保护是「合并 + 登记 + 测试」这三件套。
+ *
+ * 新增「只由后端命令写盘」的字段时：连同 `merge_disk_authoritative`、`BACKEND_MANAGED_FIELDS`
+ * 一起改（清单见 `AGENTS.md` 的配置约定）；确实需要前端读写某个字段，也请连同合并逻辑一起改。
+ */
 export interface AppConfig {
   theme_mode: string // 'light' | 'dark' | 'system'
   theme_preset: string // 'indigo' | 'green' | 'morandi' | 'midnight'
@@ -279,7 +295,7 @@ export interface ExtensionEntry {
   icon: string | null
   /** 扩展目录绝对路径 */
   dir: string
-  /** 来源：installed（已装，位于扩展根）| dev（开发者模式直挂的本机源码目录） */
+  /** 来源：installed（已装，位于扩展根）| dev（「我的扩展」直挂的本机源码目录） */
   source: 'installed' | 'dev'
   /** manifest 缺失 / 解析失败时为 true */
   invalid: boolean
@@ -300,13 +316,14 @@ export interface ExtensionEntry {
   module_variants: ExtensionModuleVariant[]
 }
 
-/** 开发者模式状态（后端 extension.rs::DevModeStatus） */
+/** 「我的扩展」状态（后端 extension.rs::DevModeStatus） */
 export interface DevModeStatus {
+  /** ⚠️ 兼容字段，恒为 true：v0.6.x 起没有开发者模式开关，登记即加载 */
   enabled: boolean
   extensions: DevExtensionInfo[]
 }
 
-/** 单个开发扩展目录的解析结果 */
+/** 单个本机源码目录的解析结果 */
 export interface DevExtensionInfo {
   /** 注册的源码目录绝对路径 */
   path: string
@@ -321,6 +338,47 @@ export interface DevExtensionInfo {
   conflict: boolean
   /** 目录当前是否存在 */
   exists: boolean
+}
+
+/** 内置技能包元信息（后端 skills.rs::SkillInfo） */
+export interface SkillInfo {
+  id: string
+  name: string
+  description: string
+  /** 安装到目标 skills 根下的子目录名 */
+  dir_name: string
+  /** 文件数 */
+  file_count: number
+  /** 原始字节数 */
+  size: number
+  /** 内容哈希（sha256 前 16 位；展示与「可更新」判定） */
+  hash: string
+  /** 随客户端版本 */
+  app_version: string
+}
+
+/** 一个 skills 安装目标（= 某助手的 skills 根目录） */
+export interface SkillTarget {
+  /** 展示名（Claude Code / DSH / Codex / 自定义目录） */
+  label: string
+  /** skills 根目录绝对路径 */
+  path: string
+  /** auto = 自动探测的已知助手目录；custom = 用户添加的自定义目录 */
+  kind: 'auto' | 'custom'
+  /** 目标下已存在本技能目录 */
+  installed: boolean
+  /** 已安装且内容与内置一致（无需更新） */
+  up_to_date: boolean
+  /** 目录存在但不是本客户端装的（无标记文件）：覆盖前需二次确认 */
+  foreign: boolean
+  /** 标记里记录的安装版本（无标记时为 null） */
+  installed_version: string | null
+}
+
+/** 技能总览（get_skill_overview 返回） */
+export interface SkillOverview {
+  skill: SkillInfo
+  targets: SkillTarget[]
 }
 
 /** 发布前本地预检结果（level: ok/warn/error；clean = 无 error） */
@@ -948,14 +1006,22 @@ export const tauriApi = {
   /** 读取扩展某形态入口 URL（xhub-ext 协议，直接作为 iframe src；入口 HTML 由后端注入桥脚本） */
   readExtensionEntry: (id: string, surface?: string | null) =>
     invoke<string>('read_extension_entry', { id, surface: surface ?? null }),
-  // ---- 开发者模式（本机源码目录直挂，见 docs/adr/0005） ----
+  /** 在系统文件管理器中打开扩展所在目录（开发调试用；返回实际打开的绝对路径） */
+  openExtensionDir: (id: string) => invoke<string>('open_extension_dir', { id }),
+  // ---- 「我的扩展」（本机源码目录直挂，登记即加载；见 docs/adr/0005） ----
   getDevModeStatus: () => invoke<DevModeStatus>('get_dev_mode_status'),
-  setDevModeEnabled: (enabled: boolean) =>
-    invoke<DevModeStatus>('set_dev_mode_enabled', { enabled }),
   addDevExtension: (path: string) => invoke<DevModeStatus>('add_dev_extension', { path }),
   removeDevExtension: (path: string) => invoke<DevModeStatus>('remove_dev_extension', { path }),
-  /** 开发目录内容戳（全目录 FNV+mtime；变化即热重载对应 iframe） */
+  /** 本机源码目录内容戳（全目录 FNV+mtime；变化即热重载对应 iframe） */
   devExtensionsStamp: () => invoke<number>('dev_extensions_stamp'),
+  // ---- 扩展开发技能包（Skills：内置 x-hub-extension 一键装到本机 AI 助手 skills 目录） ----
+  getSkillOverview: () => invoke<SkillOverview>('get_skill_overview'),
+  /** 安装/更新到指定 skills 根；目标已存在且非本客户端安装时需 `force=true` 覆盖 */
+  installSkill: (path: string, force = false) =>
+    invoke<SkillOverview>('install_skill', { path, force }),
+  uninstallSkill: (path: string) => invoke<SkillOverview>('uninstall_skill', { path }),
+  /** 从列表移除自定义目录（只解除登记，不动磁盘文件） */
+  removeSkillRoot: (path: string) => invoke<SkillOverview>('remove_skill_root', { path }),
   // ---- 平台账号（登录 / 额度 / 开发者申请；服务端地址是内置常量，不可配置） ----
   accountStatus: () => invoke<AccountStatus>('account_status'),
   accountLoginGithubStart: () => invoke<GithubDeviceStart>('account_login_github_start'),

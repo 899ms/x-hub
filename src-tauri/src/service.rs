@@ -82,7 +82,7 @@ pub fn start_service(
         }
     }
 
-    // 已装扩展与开发扩展共用解析路径（开发扩展由开发者模式直挂源码目录）
+    // 已装扩展与开发扩展共用解析路径（开发扩展由「我的扩展」直挂源码目录）
     let dir = crate::ext_protocol::resolve_ext_dir(app, ext_id)?;
     let manifest: ExtensionManifest = read_manifest(&dir)?;
     let backend = manifest
