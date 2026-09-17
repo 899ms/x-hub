@@ -157,7 +157,8 @@ src-tauri/
 
 使用中遇到问题、有功能建议，或想交流效率工具心得，欢迎加入 **x-hub 交流群**：
 
-<img width="1279" height="1788" alt="微信图片_20260901004655_65_53" src="https://github.com/user-attachments/assets/a876d313-95cb-4f42-98bb-c7e0c14cc36f" />
+<img width="360" height="544" alt="群聊：x-hub交流群" src="https://github.com/user-attachments/assets/932c1a7a-efbb-4b04-aa9f-9bb5254f93bc" />
+
 
 > 二维码 7 天内有效，过期后重新进入会更新。若二维码失效，请到 [Issues](https://github.com/dckxx/x-hub/issues) 留言获取最新二维码。
 
