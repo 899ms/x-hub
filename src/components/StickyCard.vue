@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { PanelTopClose, StickyNote } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 
-const props = defineProps<{ slot: 1 | 2 }>()
+const props = defineProps<{ slot: 1 | 2; title?: string; hideTitle?: boolean }>()
 
 const store = useStore()
 const content = ref('')
@@ -59,11 +59,11 @@ async function onDetachClick() {
 </script>
 
 <template>
-  <section class="card sticky-card" :aria-label="`便签 ${slot}`">
-    <header class="sticky-header">
-      <h3 class="sticky-title">
+  <section class="card sticky-card" :aria-label="title ?? `便签 ${slot}`">
+    <header class="sticky-header" :class="{ 'no-title': hideTitle }">
+      <h3 v-if="!hideTitle" class="sticky-title">
         <StickyNote :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>便签</span>
+        <span>{{ title ?? '便签' }}</span>
       </h3>
       <button
         class="icon-btn sticky-detach"
@@ -101,6 +101,11 @@ async function onDetachClick() {
   justify-content: space-between;
   margin-bottom: 8px;
   flex-shrink: 0;
+}
+/* 关闭标题：只留右侧动作按钮，行高压到按钮本身，内容紧贴卡片上内边距 */
+.sticky-header.no-title {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .sticky-title {
   display: flex;

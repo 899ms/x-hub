@@ -3,6 +3,9 @@ import { onMounted, onUnmounted } from 'vue'
 import { Cpu, MemoryStick } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 
+// 标题可由工作台自定义布局覆盖：title = 自定义文案，hideTitle = 关闭标题行
+defineProps<{ title?: string; hideTitle?: boolean }>()
+
 const store = useStore()
 
 const POLL_INTERVAL = 2000
@@ -34,11 +37,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="card sys-monitor" aria-label="系统资源">
-    <header class="sm-header">
+  <section class="card sys-monitor" :aria-label="title ?? '系统资源'">
+    <header v-if="!hideTitle" class="sm-header">
       <h3 class="sm-title">
         <Cpu :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>系统资源</span>
+        <span>{{ title ?? '系统资源' }}</span>
         <span class="sm-live-dot" aria-hidden="true"></span>
       </h3>
     </header>

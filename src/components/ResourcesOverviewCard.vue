@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { ArrowRight, FolderOpen } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 
-const props = defineProps<{ onOpenDetail?: () => void }>()
+const props = defineProps<{ onOpenDetail?: () => void; title?: string; hideTitle?: boolean }>()
 
 const store = useStore()
 
@@ -22,11 +22,11 @@ const stats = computed(() => [
 </script>
 
 <template>
-  <section class="card resources-overview" aria-label="速达数量">
-    <header class="ro-header">
-      <h3 class="ro-title">
+  <section class="card resources-overview" :aria-label="title ?? '速达数量'">
+    <header class="ro-header" :class="{ 'no-title-row': hideTitle }">
+      <h3 v-if="!hideTitle" class="ro-title">
         <FolderOpen :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>速达</span>
+        <span>{{ title ?? '速达' }}</span>
       </h3>
       <button
         class="ro-more"
@@ -81,6 +81,11 @@ const stats = computed(() => [
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 关闭标题：只留右侧「去速达」按钮 */
+.ro-header.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .ro-title {
   display: flex;

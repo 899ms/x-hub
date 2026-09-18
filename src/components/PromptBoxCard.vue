@@ -4,7 +4,7 @@ import { Boxes, PanelTopClose, Pin, Settings2 } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 import type { Snippet } from '../api/tauri'
 
-const props = defineProps<{ onOpenManage?: () => void }>()
+const props = defineProps<{ onOpenManage?: () => void; title?: string; hideTitle?: boolean }>()
 
 const store = useStore()
 const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
@@ -53,11 +53,11 @@ async function onCopy(s: Snippet) {
 </script>
 
 <template>
-  <section class="card prompt-box" aria-label="提示词百宝箱">
-    <header class="pb-header">
-      <h3 class="pb-title">
+  <section class="card prompt-box" :aria-label="title ?? '提示词百宝箱'">
+    <header class="pb-header" :class="{ 'no-title-row': hideTitle }">
+      <h3 v-if="!hideTitle" class="pb-title">
         <Boxes :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>提示词</span>
+        <span>{{ title ?? '提示词' }}</span>
       </h3>
       <button
         class="pb-more pb-push"
@@ -128,6 +128,11 @@ async function onCopy(s: Snippet) {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 关闭标题：两个动作按钮靠右并拢（space-between 会把它们拉开） */
+.pb-header.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .pb-title {
   display: flex;

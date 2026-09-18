@@ -5,6 +5,9 @@ import { useStore } from '../stores/workbench'
 import type { Resource } from '../api/tauri'
 import { iconSrc, accentOf, useResourceIcon } from '../composables/useResourceIcon'
 
+// 标题可由工作台自定义布局覆盖：title = 自定义文案，hideTitle = 关闭标题行
+defineProps<{ title?: string; hideTitle?: boolean }>()
+
 const emit = defineEmits<{ (e: 'goSuda'): void }>()
 
 const store = useStore()
@@ -62,11 +65,11 @@ async function onOpen(r: Resource) {
 </script>
 
 <template>
-  <section class="card recent-bar" aria-label="最近使用">
-    <header class="rb-header">
-      <h3 class="rb-title">
+  <section class="card recent-bar" :aria-label="title ?? '最近使用'">
+    <header class="rb-header" :class="{ 'no-title-row': hideTitle }">
+      <h3 v-if="!hideTitle" class="rb-title">
         <Flame :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>最近使用</span>
+        <span>{{ title ?? '最近使用' }}</span>
       </h3>
       <button
         class="rb-more"
@@ -143,6 +146,11 @@ async function onOpen(r: Resource) {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 关闭标题：只留右侧「全部速达」按钮 */
+.rb-header.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .rb-title {
   display: flex;

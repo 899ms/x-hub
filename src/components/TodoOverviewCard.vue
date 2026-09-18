@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { ArrowRight, ListTodo } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 
-const props = defineProps<{ onOpenDetail?: () => void }>()
+const props = defineProps<{ onOpenDetail?: () => void; title?: string; hideTitle?: boolean }>()
 
 const store = useStore()
 
@@ -34,11 +34,11 @@ const pendingLabel = computed(() => (pendingCount.value > 0 ? `还有 ${pendingC
 </script>
 
 <template>
-  <section class="card todo-overview" aria-label="待办概览">
-    <header class="to-header">
-      <h3 class="to-title">
+  <section class="card todo-overview" :aria-label="title ?? '待办概览'">
+    <header class="to-header" :class="{ 'no-title-row': hideTitle }">
+      <h3 v-if="!hideTitle" class="to-title">
         <ListTodo :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>待办概览</span>
+        <span>{{ title ?? '待办概览' }}</span>
       </h3>
       <button
         class="to-more"
@@ -98,6 +98,11 @@ const pendingLabel = computed(() => (pendingCount.value > 0 ? `还有 ${pendingC
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 关闭标题：只留右侧「去待办」按钮 */
+.to-header.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .to-title {
   display: flex;

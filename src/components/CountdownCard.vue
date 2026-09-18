@@ -37,7 +37,7 @@ const store = useStore()
 const showToast = inject<(msg: string) => void>('showToast', () => {})
 
 // 倒计时卡片尺寸（网格单元数 w×h），由工作台布局传入；默认 5×4（推荐布局）
-const props = defineProps<{ sizeW?: number; sizeH?: number }>()
+const props = defineProps<{ sizeW?: number; sizeH?: number; title?: string; hideTitle?: boolean }>()
 
 // 上限：默认 6 个；卡片为 5×4 时最多 4 个（推荐布局的倒计时卡是 5 列 4 行，仅容得下 2×2）
 const MAX_COUNTDOWNS = computed(() =>
@@ -254,11 +254,11 @@ async function onToggleFloat(c: Countdown) {
 </script>
 
 <template>
-  <section class="card countdown-card" aria-label="倒计时">
-    <header class="cc-header">
-      <h3 class="cc-title">
+  <section class="card countdown-card" :aria-label="title ?? '倒计时'">
+    <header class="cc-header" :class="{ 'no-title-row': hideTitle }">
+      <h3 v-if="!hideTitle" class="cc-title">
         <Timer :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>倒计时</span>
+        <span>{{ title ?? '倒计时' }}</span>
       </h3>
       <button
         class="cc-add"
@@ -589,6 +589,11 @@ async function onToggleFloat(c: Countdown) {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 关闭标题：只留右侧「新建」按钮 */
+.cc-header.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .cc-title {
   display: flex;

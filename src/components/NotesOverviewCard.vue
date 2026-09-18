@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { ArrowRight, FileText } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 
-const props = defineProps<{ onOpenDetail?: () => void }>()
+const props = defineProps<{ onOpenDetail?: () => void; title?: string; hideTitle?: boolean }>()
 
 const store = useStore()
 
@@ -44,11 +44,11 @@ function summary(title: string, content: string): string {
 </script>
 
 <template>
-  <section class="card notes-overview" aria-label="速记统计">
-    <header class="no-header">
-      <h3 class="no-title">
+  <section class="card notes-overview" :aria-label="title ?? '速记统计'">
+    <header class="no-header" :class="{ 'no-title-row': hideTitle }">
+      <h3 v-if="!hideTitle" class="no-title">
         <FileText :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>速记统计</span>
+        <span>{{ title ?? '速记统计' }}</span>
       </h3>
       <button
         class="no-more"
@@ -102,6 +102,11 @@ function summary(title: string, content: string): string {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 关闭标题：只留右侧「去速记」按钮，行高压到按钮本身 */
+.no-header.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .no-title {
   display: flex;

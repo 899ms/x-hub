@@ -295,24 +295,32 @@ function dashCardProps(p: DashPlacement): Record<string, unknown> {
     case 'weather':
       return { variant: p.variant }
     case 'sticky1':
-      return { slot: 1 }
+      return { slot: 1, ...titleProps(p) }
     case 'sticky2':
-      return { slot: 2 }
+      return { slot: 2, ...titleProps(p) }
     case 'notes':
-      return { onOpenDetail: openNotes }
+      return { onOpenDetail: openNotes, ...titleProps(p) }
     case 'todo_overview':
-      return { onOpenDetail: openTodo }
+      return { onOpenDetail: openTodo, ...titleProps(p) }
     case 'resources':
-      return { onOpenDetail: openSuda }
+      return { onOpenDetail: openSuda, ...titleProps(p) }
     case 'prompts':
-      return { onOpenManage: openPromptManage }
+      return { onOpenManage: openPromptManage, ...titleProps(p) }
     case 'todo':
-      return { highlightId: highlightTodoId.value }
+      return { highlightId: highlightTodoId.value, ...titleProps(p) }
     case 'countdown':
-      return { sizeW: p.w, sizeH: p.h }
+      return { sizeW: p.w, sizeH: p.h, ...titleProps(p) }
+    case 'sysmon':
+    case 'recent':
+      return { ...titleProps(p) }
     default:
       return {}
   }
+}
+
+/** 卡片标题相关 props：title = 自定义标题（缺省由卡片回退内置文案），hideTitle = 关闭标题行 */
+function titleProps(p: DashPlacement): { title?: string; hideTitle: boolean } {
+  return { title: p.title, hideTitle: p.hideTitle === true }
 }
 
 // 主界面行高按「总行数均分可用高度」自适应（1fr），窗口缩放/分辨率变化只改每格像素值、

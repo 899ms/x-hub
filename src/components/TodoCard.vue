@@ -23,7 +23,7 @@ import {
   startOfDay,
 } from '../utils/todoSchedule'
 
-const props = defineProps<{ highlightId?: number | null }>()
+const props = defineProps<{ highlightId?: number | null; title?: string; hideTitle?: boolean }>()
 
 const store = useStore()
 const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
@@ -430,11 +430,11 @@ watch(
 </script>
 
 <template>
-  <section class="card todo-card" aria-label="待办">
-    <header class="todo-header">
-      <h3 class="todo-title">
+  <section class="card todo-card" :aria-label="title ?? '待办'">
+    <header class="todo-header" :class="{ 'no-title-row': hideTitle }">
+      <h3 v-if="!hideTitle" class="todo-title">
         <ListTodo :size="14" :stroke-width="2" aria-hidden="true" />
-        <span>待办</span>
+        <span>{{ title ?? '待办' }}</span>
       </h3>
       <div class="todo-header-actions">
         <button
@@ -648,6 +648,11 @@ watch(
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+/* 关闭标题：浮窗按钮 + 视图切换靠右并拢，行高压到按钮本身 */
+.todo-header.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 .todo-title {
   display: flex;

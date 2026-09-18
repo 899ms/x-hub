@@ -56,6 +56,10 @@ import type { Resource } from '../api/tauri'
 const props = defineProps<{
   modId: string
   variant?: string
+  /** 自定义标题（缺省 = 模块内置标题），缩印要跟真实卡片一致 */
+  title?: string
+  /** 关闭标题行：缩印里同样不渲染标题 */
+  hideTitle?: boolean
 }>()
 
 const {
@@ -250,8 +254,8 @@ const kind = computed(() => {
 
     <!-- ===== 系统资源 ===== -->
     <template v-else-if="kind === 'sysmon'">
-      <header class="hd">
-        <h3 class="hd-title"><Cpu class="ic" /><span>系统资源</span></h3>
+      <header class="hd" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><Cpu class="ic" /><span>{{ title ?? '系统资源' }}</span></h3>
         <span class="sm-live-dot"></span>
       </header>
       <div class="sm-body">
@@ -275,8 +279,8 @@ const kind = computed(() => {
 
     <!-- ===== 便签 ===== -->
     <template v-else-if="kind === 'sticky'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><StickyNote class="ic" /><span>便签</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><StickyNote class="ic" /><span>{{ title ?? '便签' }}</span></h3>
         <span class="hd-btn"><PanelTopClose class="ic" /></span>
       </header>
       <div class="sticky-input">
@@ -287,8 +291,8 @@ const kind = computed(() => {
 
     <!-- ===== 速记概览 ===== -->
     <template v-else-if="kind === 'notes'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><FileText class="ic" /><span>速记统计</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><FileText class="ic" /><span>{{ title ?? '速记统计' }}</span></h3>
         <span class="hd-btn"><ArrowRight class="ic" /></span>
       </header>
       <template v-if="notesCount > 0">
@@ -316,8 +320,8 @@ const kind = computed(() => {
 
     <!-- ===== 待办概览 ===== -->
     <template v-else-if="kind === 'todo_overview'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><ListTodo class="ic" /><span>待办概览</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><ListTodo class="ic" /><span>{{ title ?? '待办概览' }}</span></h3>
         <span class="hd-btn"><ArrowRight class="ic" /></span>
       </header>
       <template v-if="todoTotal > 0">
@@ -344,8 +348,8 @@ const kind = computed(() => {
 
     <!-- ===== 速达数量 ===== -->
     <template v-else-if="kind === 'resources'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><FolderOpen class="ic" /><span>速达</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><FolderOpen class="ic" /><span>{{ title ?? '速达' }}</span></h3>
         <span class="hd-btn"><ArrowRight class="ic" /></span>
       </header>
       <template v-if="resCount.total > 0">
@@ -372,8 +376,8 @@ const kind = computed(() => {
 
     <!-- ===== 倒计时 ===== -->
     <template v-else-if="kind === 'countdown'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><Timer class="ic" /><span>倒计时</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><Timer class="ic" /><span>{{ title ?? '倒计时' }}</span></h3>
         <span class="hd-btn"><Plus class="ic" /></span>
       </header>
       <div v-if="countdownList.length" class="cc-list">
@@ -407,8 +411,8 @@ const kind = computed(() => {
 
     <!-- ===== 提示词 ===== -->
     <template v-else-if="kind === 'prompts'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><Boxes class="ic" /><span>提示词</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><Boxes class="ic" /><span>{{ title ?? '提示词' }}</span></h3>
         <div class="hd-actions">
           <span class="hd-btn"><Settings2 class="ic" /></span>
           <span class="hd-btn"><PanelTopClose class="ic" /></span>
@@ -431,8 +435,8 @@ const kind = computed(() => {
 
     <!-- ===== 待办 ===== -->
     <template v-else-if="kind === 'todo'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><ListTodo class="ic" /><span>待办</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><ListTodo class="ic" /><span>{{ title ?? '待办' }}</span></h3>
         <div class="hd-actions">
           <span class="hd-btn"><PanelTopClose class="ic" /></span>
           <span class="seg on">待办 {{ pendingCount }}</span>
@@ -467,8 +471,8 @@ const kind = computed(() => {
 
     <!-- ===== 最近使用 ===== -->
     <template v-else-if="kind === 'recent'">
-      <header class="hd hd-split">
-        <h3 class="hd-title"><Flame class="ic" /><span>最近使用</span></h3>
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><Flame class="ic" /><span>{{ title ?? '最近使用' }}</span></h3>
         <span class="hd-btn"><ArrowRight class="ic" /></span>
       </header>
       <div v-if="recentList.length" class="rb-body">
@@ -490,7 +494,7 @@ const kind = computed(() => {
 
     <!-- ===== 扩展模块 / 未知模块：骨架示意 ===== -->
     <template v-else>
-      <header class="hd hd-split">
+      <header class="hd hd-split" :class="{ 'no-title-row': hideTitle }">
         <h3 class="hd-title"><Boxes class="ic" /><span>{{ extName }}</span></h3>
       </header>
       <div class="sk-lines">
@@ -533,6 +537,11 @@ html[data-theme='dark'] .dpv {
 }
 .hd-split {
   justify-content: space-between;
+}
+/* 关闭标题：只留右侧动作，行高压到按钮本身（缩印与真实卡片同款处理） */
+.hd.no-title-row {
+  justify-content: flex-end;
+  margin-bottom: calc(4 * var(--u));
 }
 .hd-title {
   display: flex;

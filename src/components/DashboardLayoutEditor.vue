@@ -4,10 +4,12 @@ import { Check, GripVertical, LayoutGrid, X } from 'lucide-vue-next'
 import {
   DASH_COLS,
   MIN_SIZE,
+  TITLE_MAX,
   dashFitState,
   dashModuleDef,
   dashModuleTitle,
   dashModuleVariants,
+  dashPlacementTitle,
   dashVariantDef,
   findFreeSpot,
   isLivePreview,
@@ -321,22 +323,28 @@ function remove(id: string) {
 const variantPop = ref<DashPlacement | null>(null)
 const popStyle = ref({ left: '0px', top: '0px' })
 
-async function openVariantPop(p: DashPlacement, e: PointerEvent) {
-  variantPop.value = p
-  popStyle.value = { left: '0px', top: '0px' }
+/** 浮层定位：优先贴在格子右侧，越界则翻到左侧 / 上移，两边都留 8px 边距 */
+async function positionPop(e: PointerEvent, sel: string, fallbackW = 280, fallbackH = 220) {
   await nextTick()
   const btn = (e.currentTarget as HTMLElement) ?? null
   const cellEl = btn?.closest('.le-cell') as HTMLElement | null
   if (!cellEl) return
   const r = cellEl.getBoundingClientRect()
-  const pop = document.querySelector('.le-pop') as HTMLElement | null
-  const pw = pop?.offsetWidth ?? 280
-  const ph = pop?.offsetHeight ?? 220
+  const pop = document.querySelector(sel) as HTMLElement | null
+  const pw = pop?.offsetWidth ?? fallbackW
+  const ph = pop?.offsetHeight ?? fallbackH
   let left = r.right + 8
   let top = r.top
   if (left + pw > window.innerWidth - 8) left = Math.max(8, r.left - pw - 8)
   if (top + ph > window.innerHeight - 8) top = Math.max(8, window.innerHeight - ph - 8)
   popStyle.value = { left: `${left}px`, top: `${top}px` }
+}
+
+async function openVariantPop(p: DashPlacement, e: PointerEvent) {
+  closeTitlePop()
+  variantPop.value = p
+  popStyle.value = { left: '0px', top: '0px' }
+  await positionPop(e, '.le-pop', 280, 220)
 }
 
 function closeVariantPop() {
@@ -349,16 +357,55 @@ function applyVariant(vId: string) {
   closeVariantPop()
 }
 
+// ---- 标题浮层（关闭标题行 / 自定义标题文案） ----
+const titlePop = ref<DashPlacement | null>(null)
+const titleDraft = ref('')
+const titleHideDraft = ref(false)
+
+/** 只有卡片自带表头的模块才谈得上改标题：扩展模块是 iframe 铺满、时钟/天气是纯内容卡 */
+function canTitle(id: string): boolean {
+  return !id.startsWith('ext:') && id !== 'clock' && id !== 'weather'
+}
+
+async function openTitlePop(p: DashPlacement, e: PointerEvent) {
+  closeVariantPop()
+  titlePop.value = p
+  titleDraft.value = p.title ?? ''
+  titleHideDraft.value = p.hideTitle === true
+  popStyle.value = { left: '0px', top: '0px' }
+  await positionPop(e, '.le-tpop', 260, 180)
+}
+
+function closeTitlePop() {
+  titlePop.value = null
+}
+
+/** 输入即生效（编辑器是草稿语义：取消 / 关掉编辑器会整体回滚） */
+function applyTitle() {
+  if (!titlePop.value) return
+  layout.setModuleTitle(titlePop.value.id, titleDraft.value, titleHideDraft.value)
+}
+
+function resetTitle() {
+  if (!titlePop.value) return
+  titleDraft.value = ''
+  titleHideDraft.value = false
+  applyTitle()
+}
+
 function fitsMin(p: DashPlacement, vd: DashVariantDef): boolean {
   return p.w >= vd.minW && p.h >= vd.minH
 }
 
 // 全局关闭：点击浮层外（含点击其它 ⇄ 按钮重新打开）
 function onGlobalPointerDown(e: PointerEvent) {
-  if (!variantPop.value) return
   const t = e.target as HTMLElement
-  if (t.closest('.le-pop') || t.closest('[data-variant-btn]')) return
-  closeVariantPop()
+  if (variantPop.value && !t.closest('.le-pop') && !t.closest('[data-variant-btn]')) {
+    closeVariantPop()
+  }
+  if (titlePop.value && !t.closest('.le-tpop') && !t.closest('[data-title-btn]')) {
+    closeTitlePop()
+  }
 }
 
 // ---- 提交 / 回滚 ----
@@ -490,10 +537,15 @@ function previewComponent(id: string) {
             />
             <!-- 其余模块：真实卡片结构的等比缩印（--dp-k 由画布列宽推得） -->
             <div v-else class="le-pv">
-              <DashModulePreview :mod-id="p.id" :variant="p.variant" />
+              <DashModulePreview
+                :mod-id="p.id"
+                :variant="p.variant"
+                :title="p.title"
+                :hide-title="p.hideTitle === true"
+              />
             </div>
 
-            <span class="le-cell-tag">{{ dashModuleTitle(p.id) }}<template v-if="variantName(p)"> · {{ variantName(p) }}</template></span>
+            <span class="le-cell-tag">{{ dashPlacementTitle(p) }}<template v-if="variantName(p)"> · {{ variantName(p) }}</template></span>
             <div class="le-cell-ctrl">
               <button
                 v-if="hasVariants(p.id)"
@@ -503,6 +555,16 @@ function previewComponent(id: string) {
                 :title="`切换${dashModuleTitle(p.id)}形态`"
                 @pointerdown.stop="openVariantPop(p, $event)"
               >⇄</button>
+              <button
+                v-if="canTitle(p.id)"
+                type="button"
+                class="le-cell-btn"
+                :class="{ on: p.hideTitle }"
+                data-title-btn
+                :title="`设置${dashModuleTitle(p.id)}标题`"
+                :aria-label="`设置${dashModuleTitle(p.id)}标题`"
+                @pointerdown.stop="openTitlePop(p, $event)"
+              >Aa</button>
               <button
                 type="button"
                 class="le-cell-btn le-cell-remove"
@@ -579,6 +641,35 @@ function previewComponent(id: string) {
           </div>
         </div>
         <p class="le-pop-foot">切换形态后，若格子小于新形态的最小尺寸将自动补足并就近让位。</p>
+      </div>
+    </Teleport>
+
+    <!-- 标题浮层：关闭标题行 / 自定义标题文案 -->
+    <Teleport to="body">
+      <div v-if="titlePop" class="le-pop le-tpop" :style="popStyle">
+        <p class="le-pop-title">
+          {{ dashModuleTitle(titlePop.id) }} · 标题
+        </p>
+        <input
+          v-model="titleDraft"
+          class="le-tinput"
+          type="text"
+          :maxlength="TITLE_MAX"
+          :placeholder="dashModuleTitle(titlePop.id)"
+          :aria-label="`${dashModuleTitle(titlePop.id)}自定义标题`"
+          @input="applyTitle"
+        />
+        <label class="le-tcheck">
+          <input v-model="titleHideDraft" type="checkbox" @change="applyTitle" />
+          <span>不显示标题行</span>
+        </label>
+        <p class="le-t-hint">
+          留空 = 用默认标题「{{ dashModuleTitle(titlePop.id) }}」；关掉标题行后卡片内容顶到上内边距，不再留标题行的空档。
+        </p>
+        <div class="le-t-foot">
+          <button class="le-pop-btn" type="button" @click="resetTitle">恢复默认</button>
+          <button class="le-pop-btn primary" type="button" @click="closeTitlePop">完成</button>
+        </div>
       </div>
     </Teleport>
   </div>
@@ -891,6 +982,10 @@ function previewComponent(id: string) {
 .le-cell-btn:hover {
   background: var(--brand-500);
 }
+/* 已关闭标题行的模块：按钮常亮，一眼看出哪些卡没标题 */
+.le-cell-btn.on {
+  background: var(--brand-500);
+}
 .le-cell-remove {
   width: 18px;
   height: 18px;
@@ -1124,5 +1219,75 @@ function previewComponent(id: string) {
   line-height: 1.5;
   border-top: 1px solid var(--border-soft);
   padding-top: 6px;
+}
+
+/* ---- 标题浮层 ---- */
+.le-tpop {
+  width: 268px;
+}
+.le-tinput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  font-size: 0.78rem;
+  color: var(--text-1);
+  background: var(--bg-inset, var(--bg-card));
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+.le-tinput:focus {
+  border-color: var(--brand-500);
+}
+.le-tcheck {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.74rem;
+  color: var(--text-2);
+  cursor: pointer;
+  padding: 2px 1px;
+}
+.le-tcheck input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--brand-500);
+  cursor: pointer;
+}
+.le-t-hint {
+  margin: 0;
+  font-size: 0.64rem;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+.le-t-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 8px;
+  margin-top: 2px;
+}
+.le-pop-btn {
+  padding: 5px 10px;
+  font-size: 0.72rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.le-pop-btn:hover {
+  border-color: var(--brand-500);
+  color: var(--brand-600, var(--brand-500));
+}
+.le-pop-btn.primary {
+  background: var(--brand-500);
+  border-color: var(--brand-500);
+  color: #fff;
+}
+.le-pop-btn.primary:hover {
+  color: #fff;
+  filter: brightness(1.05);
 }
 </style>
