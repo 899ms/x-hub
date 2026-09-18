@@ -60,7 +60,7 @@ async function onDetachClick() {
 
 <template>
   <section class="card sticky-card" :aria-label="title ?? `便签 ${slot}`">
-    <header class="sticky-header" :class="{ 'no-title': hideTitle }">
+    <header class="sticky-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="sticky-title">
         <StickyNote :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '便签' }}</span>
@@ -102,11 +102,7 @@ async function onDetachClick() {
   margin-bottom: 8px;
   flex-shrink: 0;
 }
-/* 关闭标题：只留右侧动作按钮，行高压到按钮本身，内容紧贴卡片上内边距 */
-.sticky-header.no-title {
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
+/* 关闭标题：表头整条不占位，动作按钮由全局 .hd-float 悬浮在卡片右上角（见 style.css） */
 .sticky-title {
   display: flex;
   align-items: center;

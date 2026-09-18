@@ -54,7 +54,7 @@ async function onCopy(s: Snippet) {
 
 <template>
   <section class="card prompt-box" :aria-label="title ?? '提示词百宝箱'">
-    <header class="pb-header" :class="{ 'no-title-row': hideTitle }">
+    <header class="pb-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="pb-title">
         <Boxes :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '提示词' }}</span>
@@ -129,11 +129,7 @@ async function onCopy(s: Snippet) {
   gap: 8px;
   margin-bottom: 8px;
 }
-/* 关闭标题：两个动作按钮靠右并拢（space-between 会把它们拉开） */
-.pb-header.no-title-row {
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
+/* 关闭标题：表头整条不占位，动作按钮由全局 .hd-float 悬浮在卡片右上角（见 style.css） */
 .pb-title {
   display: flex;
   align-items: center;

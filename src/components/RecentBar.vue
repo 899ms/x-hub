@@ -75,7 +75,7 @@ async function onOpen(r: Resource) {
 
 <template>
   <section class="card recent-bar" :aria-label="title ?? '最近使用'">
-    <header class="rb-header" :class="{ 'no-title-row': hideTitle }">
+    <header class="rb-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="rb-title">
         <Flame :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '最近使用' }}</span>
@@ -156,11 +156,7 @@ async function onOpen(r: Resource) {
   gap: 8px;
   margin-bottom: 8px;
 }
-/* 关闭标题：只留右侧「全部速达」按钮 */
-.rb-header.no-title-row {
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
+/* 关闭标题：表头整条不占位，动作按钮由全局 .hd-float 悬浮在卡片右上角（见 style.css） */
 .rb-title {
   display: flex;
   align-items: center;
@@ -198,7 +194,9 @@ async function onOpen(r: Resource) {
   flex-wrap: wrap;
   align-content: flex-start;
   gap: 10px;
-  overflow: hidden;
+  /* 格子放不下时滚动兜底，而不是把换行后的图标静默裁掉 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding-bottom: 2px;
 }
 .rb-card {

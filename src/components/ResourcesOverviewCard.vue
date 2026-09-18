@@ -23,7 +23,7 @@ const stats = computed(() => [
 
 <template>
   <section class="card resources-overview" :aria-label="title ?? '速达数量'">
-    <header class="ro-header" :class="{ 'no-title-row': hideTitle }">
+    <header class="ro-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="ro-title">
         <FolderOpen :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '速达' }}</span>
@@ -82,11 +82,7 @@ const stats = computed(() => [
   gap: 8px;
   margin-bottom: 8px;
 }
-/* 关闭标题：只留右侧「去速达」按钮 */
-.ro-header.no-title-row {
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
+/* 关闭标题：表头整条不占位，动作按钮由全局 .hd-float 悬浮在卡片右上角（见 style.css） */
 .ro-title {
   display: flex;
   align-items: center;

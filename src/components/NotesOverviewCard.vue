@@ -45,7 +45,7 @@ function summary(title: string, content: string): string {
 
 <template>
   <section class="card notes-overview" :aria-label="title ?? '速记统计'">
-    <header class="no-header" :class="{ 'no-title-row': hideTitle }">
+    <header class="no-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="no-title">
         <FileText :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '速记统计' }}</span>
@@ -103,11 +103,7 @@ function summary(title: string, content: string): string {
   gap: 8px;
   margin-bottom: 8px;
 }
-/* 关闭标题：只留右侧「去速记」按钮，行高压到按钮本身 */
-.no-header.no-title-row {
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
+/* 关闭标题：表头整条不占位，动作按钮由全局 .hd-float 悬浮在卡片右上角（见 style.css） */
 .no-title {
   display: flex;
   align-items: center;

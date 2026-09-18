@@ -431,7 +431,7 @@ watch(
 
 <template>
   <section class="card todo-card" :aria-label="title ?? '待办'">
-    <header class="todo-header" :class="{ 'no-title-row': hideTitle }">
+    <header class="todo-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="todo-title">
         <ListTodo :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '待办' }}</span>
@@ -649,11 +649,7 @@ watch(
   gap: 8px;
   margin-bottom: 8px;
 }
-/* 关闭标题：浮窗按钮 + 视图切换靠右并拢，行高压到按钮本身 */
-.todo-header.no-title-row {
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
+/* 关闭标题：表头整条不占位，动作按钮由全局 .hd-float 悬浮在卡片右上角（见 style.css） */
 .todo-title {
   display: flex;
   align-items: center;

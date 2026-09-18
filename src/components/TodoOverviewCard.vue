@@ -35,7 +35,7 @@ const pendingLabel = computed(() => (pendingCount.value > 0 ? `还有 ${pendingC
 
 <template>
   <section class="card todo-overview" :aria-label="title ?? '待办概览'">
-    <header class="to-header" :class="{ 'no-title-row': hideTitle }">
+    <header class="to-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="to-title">
         <ListTodo :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '待办概览' }}</span>
@@ -99,11 +99,7 @@ const pendingLabel = computed(() => (pendingCount.value > 0 ? `还有 ${pendingC
   gap: 8px;
   margin-bottom: 8px;
 }
-/* 关闭标题：只留右侧「去待办」按钮 */
-.to-header.no-title-row {
-  justify-content: flex-end;
-  margin-bottom: 4px;
-}
+/* 关闭标题：表头整条不占位，动作按钮由全局 .hd-float 悬浮在卡片右上角（见 style.css） */
 .to-title {
   display: flex;
   align-items: center;

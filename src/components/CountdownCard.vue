@@ -255,7 +255,7 @@ async function onToggleFloat(c: Countdown) {
 
 <template>
   <section class="card countdown-card" :aria-label="title ?? '倒计时'">
-    <header class="cc-header" :class="{ 'no-title-row': hideTitle }">
+    <header class="cc-header" :class="{ 'hd-float': hideTitle }">
       <h3 v-if="!hideTitle" class="cc-title">
         <Timer :size="14" :stroke-width="2" aria-hidden="true" />
         <span>{{ title ?? '倒计时' }}</span>
@@ -575,9 +575,9 @@ async function onToggleFloat(c: Countdown) {
 
 <style scoped>
 .countdown-card {
-  /* 最小高度 = header 36 + 3 行列表(每行 ~56px×3 + gap 8×2=16) + padding 12×2 ≈ 244px，
-     内容不足时保持 248px 稳定布局；存在已结束条目时按需增高，避免行高被压缩导致内容裁切 */
-  min-height: 248px;
+  /* 不再写死 min-height：卡片始终等于所在格子高度（.dash-cell > * 会接管 flex/min-height），
+     内容放不下时由 .cc-list 内部滚动 + 紧凑档兜底，而不是把底部条目裁掉。
+     格子本身有行高下限（.dash-grid 的 --dash-row-min），所以不会再被压到无法阅读。 */
   display: flex;
   flex-direction: column;
   padding: 12px;
@@ -589,11 +589,6 @@ async function onToggleFloat(c: Countdown) {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
-}
-/* 关闭标题：只留右侧「新建」按钮 */
-.cc-header.no-title-row {
-  justify-content: flex-end;
-  margin-bottom: 4px;
 }
 .cc-title {
   display: flex;
@@ -742,13 +737,20 @@ async function onToggleFloat(c: Countdown) {
    列表高度随内容自适应（不撑满剩余空间），使紧邻的已结束区块跟随在下方，
    多余高度留在卡片底部，避免「进行中」与「已结束」两行之间被拉开一大段空白。 */
 .cc-list {
-  flex: 0 0 auto;
+  /* flex: 0 1 auto = 内容自适应（不撑满剩余空间，多余高度留在卡片底部），但允许被压缩：
+     格子太矮时收缩并出滚动条（滚动兜底），而不是溢出后被卡片 overflow:hidden 裁掉。 */
+  flex: 0 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-auto-rows: auto;
   gap: 8px;
   align-content: start;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 滚动条（12px，透明轨道）叠在 6px 内缩上，不抢条目宽度 */
+  padding-right: 6px;
+  margin-right: -6px;
 }
 .cc-item {
   display: flex;
@@ -930,6 +932,21 @@ async function onToggleFloat(c: Countdown) {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-auto-rows: minmax(48px, auto);
   gap: 8px;
+}
+
+/* 矮格子紧凑档（容器查询，基准是 .dash-cell / 编辑器的 .le-cell）：
+   行高、图标、间距收紧并隐藏「到点时刻」这类次要信息，同样高度多放一条；
+   再放不下就由 .cc-list 滚动兜底 —— 任何格子尺寸下都不会静默裁掉内容。 */
+@container (max-height: 280px) {
+  .cc-list { gap: 6px; }
+  .cc-item { min-height: 40px; padding: 6px 8px; gap: 8px; }
+  .cc-mode-icon { width: 26px; height: 26px; }
+  .cc-item-name { font-size: 0.75rem; }
+  .cc-due { display: none; }
+  .cc-finished { grid-auto-rows: minmax(40px, auto); gap: 6px; }
+  /* 空态在极矮格子里只留主文案，副说明与图标让位（否则会把格子撑破） */
+  .cc-empty { gap: 4px; }
+  .cc-empty-sub { display: none; }
 }
 
 .cc-empty {
