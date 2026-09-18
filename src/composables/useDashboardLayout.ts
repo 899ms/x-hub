@@ -21,6 +21,9 @@ import { useStore } from '../stores/workbench'
 export const DASH_COLS = 12
 export const MIN_SIZE = 2
 
+/** 自定义标题最大长度（编辑器输入框与解析共用一个口径） */
+export const TITLE_MAX = 24
+
 /** 旧版 localStorage 存储 key（仅用于迁移到应用配置，迁移后清除） */
 const STORAGE_KEY = 'xhub.dashboard.layout.v2'
 
@@ -50,6 +53,10 @@ export interface DashPlacement {
   h: number
   /** 用户选的形态 id（缺省 = 模块 defaultVariant，老数据自动回退） */
   variant?: string
+  /** 用户自定义的卡片标题（缺省 = 模块内置标题 dashModuleTitle） */
+  title?: string
+  /** 关闭标题行（true = 不渲染表头，卡片自行补偿上边距） */
+  hideTitle?: boolean
 }
 
 function v(
@@ -175,6 +182,11 @@ export function dashModuleTitle(id: string): string {
   return dashModuleDef(id)?.title ?? id
 }
 
+/** 卡片实际显示的标题：用户自定义优先，其次模块内置标题 */
+export function dashPlacementTitle(p: DashPlacement): string {
+  return p.title ?? dashModuleTitle(p.id)
+}
+
 /** 取模块指定形态；未指定 / 不存在时回退 defaultVariant / 第一个形态 */
 export function dashVariantDef(id: string, variant?: string): DashVariantDef | undefined {
   const def = dashModuleDef(id)
@@ -251,8 +263,12 @@ function parsePlacements(raw: string): DashPlacement[] | null {
           : vd.idealH
         const x = Math.min(Math.max(s.x!, 0), DASH_COLS - w)
         const y = Math.max(s.y!, 0)
+        // 标题：trim 后为空视为「用默认标题」；超长截断，避免手改 JSON 撑破卡片
+        const title =
+          typeof s.title === 'string' && s.title.trim() ? s.title.trim().slice(0, TITLE_MAX) : undefined
+        const hideTitle = s.hideTitle === true ? true : undefined
         // 用回退后的生效形态 id 归一：无效/过期 variant（JSON 手改、扩展升级改名）不透传
-        return { id: s.id!, x, y, w, h, variant: vd.id }
+        return { id: s.id!, x, y, w, h, variant: vd.id, title, hideTitle }
       })
       .filter((p): p is DashPlacement => p !== null)
     if (valid.length) {
@@ -290,14 +306,20 @@ function loadFromLocalStorage(): DashPlacement[] | null {
 // ---- 持久化：写应用配置（Tauri）/ 回退 localStorage（浏览器预览） ----
 function persist() {
   const data = JSON.stringify(
-    placements.value.map((p) => ({
-      id: p.id,
-      x: p.x,
-      y: p.y,
-      w: p.w,
-      h: p.h,
-      variant: p.variant,
-    })),
+    placements.value.map((p) => {
+      const o: DashPlacement = {
+        id: p.id,
+        x: p.x,
+        y: p.y,
+        w: p.w,
+        h: p.h,
+        variant: p.variant,
+      }
+      // 标题相关字段只在设置过时写入，老数据保持原样（少字段 = 默认标题 + 显示标题行）
+      if (p.title) o.title = p.title
+      if (p.hideTitle) o.hideTitle = true
+      return o
+    }),
   )
   if (isTauri()) {
     void store.setDashboardLayout(data)
@@ -553,6 +575,17 @@ function setModuleVariant(id: string, variant: string): boolean {
   return true
 }
 
+/** 设置卡片标题：title 传空 = 用模块内置标题；hideTitle = 是否隐藏标题行 */
+function setModuleTitle(id: string, title?: string | null, hideTitle?: boolean): boolean {
+  const p = placements.value.find((q) => q.id === id)
+  if (!p) return false
+  const t = typeof title === 'string' ? title.trim().slice(0, TITLE_MAX) : ''
+  p.title = t || undefined
+  if (typeof hideTitle === 'boolean') p.hideTitle = hideTitle || undefined
+  persistIfIdle()
+  return true
+}
+
 function applyPreset() {
   placements.value = defaultPlacements()
   persistIfIdle()
@@ -572,6 +605,7 @@ export function useDashboardLayout() {
     moveModule,
     resizeModule,
     setModuleVariant,
+    setModuleTitle,
     applyPreset,
     clear,
     beginEdit,
