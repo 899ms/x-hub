@@ -10,6 +10,7 @@ export type SettingsIndexEntry = { section: string; title: string }
 
 export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   { section: 'account', title: '用 GitHub 登录' },
+  { section: 'account', title: '用邮箱验证码登录' },
   { section: 'account', title: 'AI 额度' },
   { section: 'account', title: '兑换邀请码' },
   { section: 'account', title: '扩展开发者' },

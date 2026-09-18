@@ -23,16 +23,16 @@ const ghDevice = ref<GithubDeviceStart | null>(null)
 const ghStarting = ref(false)
 
 /**
- * 邮箱验证码登录入口：**暂时隐藏**（实现完整保留，改回 true 即可恢复）。
+ * 邮箱验证码登录入口**已开启**（2026-09-18）：服务端 SMTP 就绪，`POST /api/v1/auth/email/send`
+ * 正常发码（6 位数字、10 分钟有效、同一邮箱每小时最多 5 封）。
  *
- * 为什么隐藏：服务端还没配置发信，`POST /api/v1/auth/email/send` 固定回 503 `email_not_configured`，
- * 入口留在界面上只会让用户点一次撞一次报错。恢复前先确认服务端已配好发信。
+ * 它是国内网络下的**兜底登录方式**：GitHub 链路要服务端出网到 github.com / api.github.com，
+ * 国内机房会间歇性失败，邮箱收码不依赖任何境外链路。
  *
- * ⚠️ 类型必须标注成 boolean，不能写成字面量 `false`：字面量会被 Vue 编译器当作常量把整个
- * `v-if` 分支折掉，模板里的 emailInput / emailCode / sendEmailCode 随之「无人引用」，
- * 直接撞上 tsconfig 的 noUnusedLocals（构建失败）。
+ * 曾以 `EMAIL_LOGIN_ENABLED: boolean = false` + 模板里的 settings-index skip 标记
+ * 临时隐藏（服务端没配发信时，入口只会让用户点一次撞一次 503）；现在两者一并移除 ——
+ * 若哪天服务端又没有发信，界面上会就地显示「服务器尚未配置发信」，不再是静默失效。
  */
-const EMAIL_LOGIN_ENABLED: boolean = false
 
 /**
  * 登录区的就地反馈（busy = 正在联系服务端；warn = 需要用户自己动手；error = 失败原因）。
@@ -71,9 +71,53 @@ function authErrorText(e: unknown): { text: string; raw: string } {
   return { text: body || raw, raw }
 }
 
+/**
+ * 邮箱链路的错误文案：服务端已经把 message 写成可读句子（`ERROR_CODE: 说明`），
+ * 这里只补几条「该怎么办」，否则用户对同一句话只会反复点重试。
+ *
+ * ⚠️ `RATE_LIMITED`（同一邮箱每小时 5 封）是最容易踩的一条：文案只说「发送过于频繁」时，
+ * 用户的本能是立刻再点一次 —— 越点越久，而且这一小时内都没法登录。
+ */
+function emailErrorText(e: unknown): { text: string; raw: string } {
+  const raw = String(e)
+  if (raw.startsWith('RATE_LIMITED')) {
+    return { text: '这个邮箱一小时内发得太多了（上限 5 封），请稍后再试，或换一个邮箱', raw }
+  }
+  if (raw.startsWith('EMAIL_SEND_FAILED')) {
+    return { text: '邮件发送失败，请稍后再试（服务端发信出错，与你的邮箱无关）', raw }
+  }
+  if (raw.startsWith('EMAIL_NOT_CONFIGURED')) {
+    return { text: '服务器尚未配置发信，暂时无法用邮箱登录', raw }
+  }
+  return authErrorText(e)
+}
+
+/** 发送成功后的重发冷却：连点不但会撞服务端限流，还会把「最新一封」的验证码换掉 */
+function startEmailCooldown(sec: number) {
+  emailCooldown.value = sec
+  if (emailTimer !== null) clearInterval(emailTimer)
+  emailTimer = window.setInterval(() => {
+    emailCooldown.value -= 1
+    if (emailCooldown.value <= 0) {
+      emailCooldown.value = 0
+      if (emailTimer !== null) {
+        clearInterval(emailTimer)
+        emailTimer = null
+      }
+    }
+  }, 1000)
+}
+
 const emailInput = ref('')
 const emailCode = ref('')
 const emailSent = ref(false)
+/** 发信请求在途（accountBusy 与 GitHub 链路共用，按钮文案要更精确的这一个） */
+const emailSending = ref(false)
+/** 重发冷却秒数：服务端按邮箱限流（每小时 5 封），连点会把配额一次耗光 */
+const emailCooldown = ref(0)
+let emailTimer: number | null = null
+/** 邮箱链路的就地反馈（同 loginNotice：发信要走 SMTP，可能等数秒，只挂 toast 等于没有反馈） */
+const emailNotice = ref<{ kind: 'busy' | 'warn' | 'error'; text: string; raw: string } | null>(null)
 const redeemInput = ref('')
 const showApply = ref(false)
 const applyReason = ref('')
@@ -264,35 +308,59 @@ function cancelGithubLogin() {
 }
 
 async function sendEmailCode() {
-  if (!emailInput.value.trim()) {
-    showToast('请先填写邮箱')
+  const email = emailInput.value.trim()
+  if (!email) {
+    emailNotice.value = { kind: 'warn', text: '请先填写邮箱', raw: '' }
     return
   }
+  if (emailSending.value || emailCooldown.value > 0) return
+  emailSending.value = true
   accountBusy.value = true
+  // 先落一条「正在发送」：发信要过 SMTP，弱网/对方服务器慢时要数秒，期间界面必须有变化
+  emailNotice.value = { kind: 'busy', text: '正在发送验证码…', raw: '' }
+  const startedAt = Date.now()
   try {
-    const r = await tauriApi.accountLoginEmailSend(emailInput.value.trim())
+    const r = await tauriApi.accountLoginEmailSend(email)
     if (!r.ok) {
-      showToast(r.message ?? '发送失败')
+      // 服务端未配置发信（Rust 侧把 503 转成 ok=false + 说明）：显示出来而不是假装成功
+      emailNotice.value = { kind: 'error', text: r.message ?? '发送失败', raw: '' }
       return
     }
     emailSent.value = true
+    emailNotice.value = null
     showToast('验证码已发送，请查收邮件')
+    startEmailCooldown(60)
   } catch (e) {
-    showToast(`发送失败：${e}`)
+    const { text, raw } = emailErrorText(e)
+    emailNotice.value = { kind: 'error', text, raw }
+    showToast(`发送失败：${text}`)
+    // 与 GitHub 链路同款留痕：发信失败横跨客户端 / 服务端 / 邮件服务商三方，客户端不留痕就无从排查
+    void reportClientError('邮箱验证码发送失败', { error: raw, elapsedMs: Date.now() - startedAt })
   } finally {
+    emailSending.value = false
     accountBusy.value = false
   }
 }
 
 async function verifyEmailCode() {
+  const email = emailInput.value.trim()
+  const code = emailCode.value.trim()
+  if (!code) {
+    emailNotice.value = { kind: 'warn', text: '请填写邮件里的 6 位验证码', raw: '' }
+    return
+  }
   accountBusy.value = true
+  emailNotice.value = { kind: 'busy', text: '正在校验验证码…', raw: '' }
   try {
-    account.value = await tauriApi.accountLoginEmailVerify(emailInput.value.trim(), emailCode.value.trim())
+    account.value = await tauriApi.accountLoginEmailVerify(email, code)
     emailSent.value = false
     emailCode.value = ''
+    emailNotice.value = null
     showToast('登录成功')
   } catch (e) {
-    showToast(`登录失败：${e}`)
+    const { text, raw } = emailErrorText(e)
+    emailNotice.value = { kind: 'error', text, raw }
+    showToast(`登录失败：${text}`)
   } finally {
     accountBusy.value = false
   }
@@ -360,7 +428,10 @@ function accountSummary(a: AccountStatus): string {
 onMounted(() => {
   void loadAccount()
 })
-onBeforeUnmount(stopGithubPolling)
+onBeforeUnmount(() => {
+  stopGithubPolling()
+  if (emailTimer !== null) clearInterval(emailTimer)
+})
 </script>
 
 <template>
@@ -426,36 +497,46 @@ onBeforeUnmount(stopGithubPolling)
               </span>
             </div>
 
-            <!-- 邮箱验证码登录：**暂时隐藏**（服务端尚未配置发信，入口留着只会让用户点一次撞一次 503）。
-                 实现完整保留 —— 服务端配好 SMTP 后把 EMAIL_LOGIN_ENABLED 改回 true 即恢复。
-                 skip 标记同步把「用邮箱验证码登录」从设置项搜索索引里剔除，否则搜得到、点进去没有。 -->
-            <!-- settings-index:skip-start -->
-            <template v-if="EMAIL_LOGIN_ENABLED">
-              <div class="setting-row">
-                <div class="setting-info">
-                  <span class="setting-name">用邮箱验证码登录</span>
-                  <span class="setting-desc">收不到时先看看垃圾邮件</span>
-                </div>
-                <div class="account-inline">
-                  <input v-model="emailInput" class="account-input" placeholder="you@example.com" />
-                  <button class="ghost-btn data-btn" type="button" :disabled="accountBusy" @click="sendEmailCode">
-                    发验证码
-                  </button>
-                </div>
+            <!-- 邮箱验证码登录：国内网络下的兜底方式（GitHub 链路要服务端出网到境外，会间歇性失败）。
+                 服务端发信已就绪；万一哪天又没配，Rust 侧会把 503 转成下面那条就地提示，不静默失败。 -->
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">用邮箱验证码登录</span>
+                <span class="setting-desc">验证码 10 分钟内有效，收不到时先看看垃圾邮件</span>
               </div>
-              <div v-if="emailSent" class="account-inline account-inline-end">
-                <input
-                  v-model="emailCode"
-                  class="account-input account-input-sm"
-                  placeholder="6 位验证码"
-                  maxlength="6"
-                />
-                <button class="ghost-btn data-btn" type="button" :disabled="accountBusy" @click="verifyEmailCode">
-                  登录
+              <div class="account-inline">
+                <input v-model="emailInput" class="account-input" placeholder="you@example.com" />
+                <button
+                  class="ghost-btn data-btn"
+                  type="button"
+                  :disabled="accountBusy || emailCooldown > 0"
+                  @click="sendEmailCode"
+                >
+                  {{ emailCooldown > 0 ? `${emailCooldown}s 后可重发` : emailSending ? '正在发送…' : '发验证码' }}
                 </button>
               </div>
-            </template>
-            <!-- settings-index:skip-end -->
+            </div>
+            <div v-if="emailSent" class="account-inline account-inline-end">
+              <input
+                v-model="emailCode"
+                class="account-input account-input-sm"
+                placeholder="6 位验证码"
+                maxlength="6"
+              />
+              <button class="ghost-btn data-btn" type="button" :disabled="accountBusy" @click="verifyEmailCode">
+                登录
+              </button>
+            </div>
+            <!-- 邮箱链路的结果就地常驻（发信要过 SMTP，且服务端按邮箱限流每小时 5 封，只靠 toast 会「点了没反应」） -->
+            <p
+              v-if="emailNotice"
+              class="account-notice"
+              :class="emailNotice.kind"
+              :title="emailNotice.raw"
+              role="status"
+            >
+              {{ emailNotice.text }}
+            </p>
           </template>
 
           <template v-else-if="account?.loggedIn">
