@@ -16,16 +16,25 @@ const showToast = inject<(msg: string, action?: { label: string; onClick: () => 
   () => {},
 )
 
-// ---- 宽度自适应：卡片固定 72px、间距 10px，按容器实际宽度算能放下几张就显示几张 ----
+// ---- 尺寸自适应：卡片固定 72px、间距 10px，按容器实际宽×高算能放几张就显示几张 ----
+// 窄格（如 3×1）只显示一行几个；格子加高变宽后自动换行、按行数多显示（3×3 = 3 列 × 3 行）
 const CHIP_W = 72
+const CHIP_H = 80
 const GAP = 10
 const bodyRef = ref<HTMLElement | null>(null)
 const visibleCount = ref(10)
 let resizeObserver: ResizeObserver | null = null
 
 function recomputeVisible() {
-  const w = bodyRef.value?.clientWidth ?? 0
-  if (w > 0) visibleCount.value = Math.max(1, Math.floor((w + GAP) / (CHIP_W + GAP)))
+  const el = bodyRef.value
+  if (!el) return
+  const w = el.clientWidth
+  const h = el.clientHeight
+  if (w <= 0) return
+  const cols = Math.max(1, Math.floor((w + GAP) / (CHIP_W + GAP)))
+  // 高度还没量到（首帧）时先按一行算，下一帧 ResizeObserver 会纠正
+  const rows = h > 0 ? Math.max(1, Math.floor((h + GAP) / (CHIP_H + GAP))) : 1
+  visibleCount.value = cols * rows
 }
 
 watch(bodyRef, (el) => {
@@ -186,8 +195,10 @@ async function onOpen(r: Resource) {
   flex: 1;
   min-height: 0;
   display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
   gap: 10px;
-  overflow-x: auto;
+  overflow: hidden;
   padding-bottom: 2px;
 }
 .rb-card {

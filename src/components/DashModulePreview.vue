@@ -1452,6 +1452,8 @@ html[data-theme='dark'] .dpv {
   flex: 1;
   min-height: 0;
   display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
   gap: calc(10 * var(--u));
   overflow: hidden;
   align-items: flex-start;

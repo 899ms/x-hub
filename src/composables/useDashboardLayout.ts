@@ -151,7 +151,7 @@ export const DASH_MODULES: DashModuleDef[] = [
     id: 'recent',
     title: '最近使用',
     defaultVariant: 'bar',
-    variants: [v('bar', '通栏', 4, 1, 12, 3, '最近启动的应用')],
+    variants: [v('bar', '通栏', 3, 1, 12, 3, '最近启动的应用，窄格换行、格子越大显示越多')],
   },
 ]
 
