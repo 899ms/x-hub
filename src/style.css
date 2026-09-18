@@ -855,6 +855,32 @@ html, body, * {
   scrollbar-color: transparent transparent;
 }
 .card { background: var(--frost-surface); border: 1px solid var(--border-soft); border-radius: var(--radius-lg); box-shadow: var(--frost-edge), var(--shadow-card); }
+
+/* 模块标题隐藏态（.hd-float）：表头整条不再占布局高度，只把右侧动作按钮悬浮在卡片右上角。
+   默认透明且不可点，hover / 键盘聚焦（focus-within）/ 触屏点击时才显形 —— 内容因此真正顶上，
+   而「新建 / 打开 / 脱离」等功能按钮一个不少。定位基准是 .dash-cell / .le-cell（二者 position: relative）。 */
+.hd-float {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  opacity: 0;
+  pointer-events: none;
+  /* 悬浮在内容之上时给一层实心胶囊底，避免按钮与下方文字叠在一起看不清 */
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-card-solid);
+  box-shadow: var(--shadow-item);
+  transition: opacity 0.15s ease-out;
+}
+.dash-cell:hover .hd-float,
+.dash-cell:focus-within .hd-float,
+.le-cell:hover .hd-float,
+.le-cell:focus-within .hd-float,
+.hd-float:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
 /* 沉浸模式（ADR 0003 受控例外）：卡片基底大幅降 alpha 并启用 backdrop-filter 局部取景模糊，
    壁纸在卡片间隙完整清晰展示。仅作用于静态 .card 表面，动画/滚动密集元素仍然禁用 backdrop-filter */
 html[data-immersive='1'] .card {

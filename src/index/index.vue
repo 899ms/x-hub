@@ -765,7 +765,10 @@ provide('showToast', showToast)
           <div
             v-if="layout.placements.value.length"
             class="dash-grid"
-            :style="{ gridTemplateRows: `repeat(${dashGridRows}, minmax(0, 1fr))` }"
+            :style="{
+              gridTemplateRows: `repeat(${dashGridRows}, minmax(var(--dash-row-min), 1fr))`,
+              '--dash-rows': dashGridRows,
+            }"
           >
             <div
               v-for="p in layout.placements.value"
@@ -1259,12 +1262,15 @@ html[data-wallpaper='1'] .title-bar [data-tip]::after {
   transform: translateY(100%);
 }
 
-/* 工作台布局：12 列 fr 比例网格 + 行高 1fr 均分填满（缩放/分辨率只改每格像素值，布局结构不变） */
+/* 工作台布局：12 列 fr 比例网格 + 行高 1fr 均分填满（缩放/分辨率只改每格像素值，布局结构不变）。
+   行高带下限（--dash-row-min）：窗口够高时仍是 1fr 撑满、不滚动、不留白；窗口过矮时不再把每格
+   压到几十像素后裁掉卡片内容，而是让 .dash-wrap 出现纵向滚动条兜底。 */
 .dash-wrap {
   position: relative;
   height: 100%;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .dash-grid {
   display: grid;
@@ -1272,6 +1278,8 @@ html[data-wallpaper='1'] .title-bar [data-tip]::after {
   gap: var(--space-4);
   padding: 0 20px 20px 0;
   height: 100%;
+  --dash-row-min: 36px;
+  min-height: calc(var(--dash-row-min) * var(--dash-rows) + var(--space-4) * (var(--dash-rows) - 1) + 20px);
 }
 .dash-cell {
   min-width: 0;
