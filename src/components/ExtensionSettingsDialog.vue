@@ -325,6 +325,9 @@ async function confirmUninstall() {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  /* 卡片 padding 清零后头/体/脚各自排 18px 内边距；这一条原先漏了，导致图标与关闭按钮
+     贴死在卡片左上/右上角（体/脚都有 18px，表头没有） */
+  padding: 18px 18px 0;
 }
 .es-head-left {
   display: flex;
@@ -568,7 +571,7 @@ async function confirmUninstall() {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 4px 18px 16px;
+  padding: 4px 18px 18px;
 }
 .es-confirm-tip {
   margin: 0;

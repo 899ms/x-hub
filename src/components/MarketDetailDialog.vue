@@ -355,7 +355,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 16px 18px 0;
+  padding: 18px 18px 0;
   flex-shrink: 0;
 }
 .md-title {
@@ -735,7 +735,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  padding: 12px 18px;
+  padding: 12px 18px 18px;
   border-top: 1px solid var(--border-soft);
   flex-shrink: 0;
 }
