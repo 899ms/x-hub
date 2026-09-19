@@ -26,7 +26,7 @@ description: "Generate an x-hub extension (扩展 / 插件): manifest.json + ent
 | `references/service.md` | 扩展带 Node 后端时 |
 | `references/convert-html.md` | 改造现成网页时——去 CDN / 主题映射 / 存储迁移 |
 | `references/debug-deploy.md` | 代码写完要跑起来、报交付清单、用户提到发布上架时 |
-| `references/pitfalls.md` | 写代码前扫一眼、交付前逐条对一遍（18 条实机踩坑） |
+| `references/pitfalls.md` | 写代码前扫一眼、交付前逐条对一遍（21 条实机踩坑） |
 | `templates/` | 生成骨架时**直接复制**（都在 `templates/` 目录下）：`entry.view.html`、`entry.module.html`、`service.index.js`、`manifest.web.json`、`manifest.service.json` |
 | `xhub.d.ts` | 复制进用户项目换编辑器补全（扩展本身不 import 它） |
 
@@ -191,7 +191,7 @@ skill 的使用者手里通常只有**装好的 x-hub 应用** + 这个 skill �
 
 ### Step 6 · 校验 + 交给用户真机跑
 
-生成后自己过一遍 `references/pitfalls.md`（18 条）与 `references/debug-deploy.md` 的自检清单，然后**必须**把这段操作指引给用户（这是唯一能看到真实效果的路）：
+生成后自己过一遍 `references/pitfalls.md`（21 条）与 `references/debug-deploy.md` 的自检清单，然后**必须**把这段操作指引给用户（这是唯一能看到真实效果的路）：
 
 > 1. 扩展中心 →「**我的扩展**」标签页 → 添加这个源码目录（须含 `manifest.json`）
 > 2. **添加即加载**（不需要任何开关）：打开扩展就能跑真机——**改代码约 1.5 秒自动重载**，可用真实数据；移除目录即撤销

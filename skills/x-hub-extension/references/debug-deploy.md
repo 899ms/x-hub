@@ -23,6 +23,8 @@
 
 日常调试**一律走这条**，比反复 deploy 快得多。扩展跑起来后，`await window.xhub.runtime.info()` 返回的能力表就是判断「这个 API 到底能不能用」的最终权威。
 
+> **service 扩展的后端没起来时**：先看 `<数据根>\logs\service\<扩展 id>.log`（宿主落盘的后端 stdout/stderr，含退出码与报错原文），再看 `logs\x-hub.log` 里的 `service 后端未就绪: … exit=…`。`serviceReady=false` 不等于「在下载 Node」，别猜——详见 `service.md` 的「排错」与「数据与日志写在哪」两节。
+
 ## 提交前自检清单
 
 - [ ] `manifest.json` 是合法 JSON、必填字段齐全、`entry` 指向的 HTML 文件都存在；

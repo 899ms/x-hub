@@ -23,7 +23,7 @@ x-hub-extension/
 │   ├── service.md        # service 后端写法与铁律
 │   ├── convert-html.md   # 把已有页面改造成扩展的四步
 │   ├── debug-deploy.md   # 本机源码目录直挂调试、自检清单、打包与上架
-│   └── pitfalls.md       # 18 条实机踩坑
+│   └── pitfalls.md       # 21 条实机踩坑
 └── templates/            # 可直接复制改字段的起手式骨架
     ├── manifest.web.json / manifest.service.json
     ├── entry.view.html / entry.module.html
