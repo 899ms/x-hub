@@ -251,7 +251,7 @@ function devInitial(d: DevExtensionInfo): string {
 function devDesc(d: DevExtensionInfo): string {
   if (!d.exists) return '目录不存在（可能已被移动或删除）'
   if (!d.valid) return d.error ?? 'manifest.json 无法解析'
-  if (d.conflict) return '与已装扩展同 id：已装优先，此目录不会被加载（请先卸载已装版本）'
+  if (d.conflict) return '与已装扩展同 id：已装优先，此目录不会被加载（点右侧「卸载已装版」即可生效）'
   return d.path
 }
 
@@ -300,6 +300,29 @@ async function removeDevDir(path: string) {
   }
 }
 
+/**
+ * 卸载与直挂目录同 id 的已装扩展，好让直挂目录生效。
+ *
+ * 背景：同 id 冲突时**已装优先**、开发目录被静默跳过（见 extension.rs 的说明与
+ * docs/adr/0005）。宿主选择这个优先级是为了避免「打开的到底是哪一份」——
+ * 存储、权限、发布提交都以扩展 id 为键，同 id 两份会互相串味。
+ * 但对「自己发布、自己又装」的作者来说，这一步很常做，所以在这里给一键入口，
+ * 省得去「已安装」页找。**只卸载已装版本，磁盘上的源码目录不动。**
+ */
+async function uninstallConflicting(d: DevExtensionInfo) {
+  devBusy.value = true
+  try {
+    await tauriApi.uninstallExtension(d.id)
+    showToast(`已卸载已装版本「${d.name || d.id}」，源码目录现在生效`)
+    await load()
+    devMode.value = await tauriApi.getDevModeStatus()
+  } catch (e) {
+    showToast(`卸载失败：${String(e)}`)
+  } finally {
+    devBusy.value = false
+  }
+}
+
 function onDevRowClick(d: DevExtensionInfo) {
   if (!devReady(d)) {
     showToast(devDesc(d))
@@ -322,8 +345,16 @@ const marketFailedIcons = ref(new Set<string>())
 /** 市场列表（来自市场状态，远端清单；失败时 Rust 端回退缓存仍能列出） */
 const market = computed<MarketExtension[]>(() => marketStatus.value?.extensions ?? [])
 
-/** 已安装列表 → id 索引 / 市场列表 → id 索引（用于版本对比判断更新） */
-const installedById = computed(() => new Map(extensions.value.map((e) => [e.id, e])))
+/**
+ * 已安装列表 → id 索引 / 市场列表 → id 索引（用于版本对比判断更新）。
+ *
+ * ⚠️ 必须与「已安装」标签页同口径，只收 `source !== 'dev'`：
+ * 全量 `extensions` 里也含「我的扩展」直挂的本机源码目录（source='dev'），
+ * 而这类扩展**不复制进已安装、也不参与市场更新与卸载**（见 dev 标签页的说明）。
+ * 用全量建索引会让市场卡片把直挂扩展误判成「已安装」——实机表现是
+ * 「已卸载已装版本、只留直挂目录，市场仍显示『已安装』且版本停在旧号」。
+ */
+const installedById = computed(() => new Map(installedExtensions.value.map((e) => [e.id, e])))
 const marketById = computed(() => new Map(market.value.map((m) => [m.id, m])))
 
 /** 更新进行中的状态（复用 market-download-progress 事件） */
@@ -816,6 +847,17 @@ function onMore(e: ExtensionEntry) {
               @click.stop="onMore(devEntryFor(d)!)"
             >
               <MoreHorizontal :size="16" :stroke-width="2" aria-hidden="true" />
+            </button>
+            <button
+              v-if="d.conflict"
+              class="ec-remove-btn"
+              type="button"
+              :disabled="devBusy"
+              :title="`卸载已装版本「${d.name || d.id}」，让本机源码目录生效（不动磁盘上的源码）`"
+              @click.stop="uninstallConflicting(d)"
+            >
+              <Trash2 :size="13" :stroke-width="2" aria-hidden="true" />
+              卸载已装版
             </button>
             <button
               class="ec-remove-btn"

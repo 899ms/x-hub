@@ -118,6 +118,7 @@ export function useExtensionFrame(
           method?: string
           args?: unknown
           surface?: unknown
+          url?: unknown
           event?: string
           payload?: unknown
           from?: string
@@ -149,6 +150,20 @@ export function useExtensionFrame(
     // 扩展 module 请求打开自身某个形态（view/window/drawer）：通用能力，任何扩展 module 均可使用
     if (m.type === 'open') {
       onOpenSurface?.(String(m.surface || 'view'))
+      return
+    }
+
+    // 扩展请求用系统默认浏览器打开外链（桥 API `xhub.openExternal`）。
+    // 打开动作必须由宿主执行：扩展 iframe 自己开不了新窗口（wry 拒绝 NewWindowRequested，
+    // 见 extension.rs 桥脚本里的说明）。只放行 http/https，挡掉 javascript: 等危险协议。
+    if (m.type === 'open-external') {
+      const url = String(m.url ?? '')
+      if (/^https?:\/\//i.test(url) && isTauri()) {
+        tauriApi.openExternal(url).catch((err) => {
+          const { message } = parseXHubError(err)
+          void tauriApi.logClientError({ message: '扩展外链打开失败', detail: `extId=${getExtId()} url=${url} | ${message}` })
+        })
+      }
       return
     }
 

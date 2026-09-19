@@ -481,6 +481,14 @@ interface XHub {
   system: XHubSystem
   events: XHubEvents
   /**
+   * @done 用系统默认浏览器打开外链（无需权限）。只放行 `http(s)://`。
+   *
+   * 为什么必须用它而不是 `target="_blank"`：宿主用 Tauri/wry 承载扩展 iframe，wry 在宿主
+   * 未注册新窗口处理器时对 WebView2 的 NewWindowRequested 直接 SetHandled(true) 拒绝，
+   * 于是 `target="_blank"` 与 `window.open()` 在宿主里**静默失效**（点了没反应）。
+   */
+  openExternal(url: string): Promise<void>
+  /**
    * @done 暴露一个方法供其它扩展调用（配合 manifest `expose` 声明）。
    * handler 返回 Promise 或值；返回值需可结构化克隆。
    */

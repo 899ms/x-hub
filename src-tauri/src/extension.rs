@@ -919,6 +919,14 @@ pub(crate) const XHUB_BRIDGE_SCRIPT: &str = r#"
     theme:{
       get:function(){return call('theme','get',{});}
     },
+    // 用系统默认浏览器打开外链。**不走 postMessage 的 call 通道**：
+    // 打开动作由宿主主窗口执行（opener::open），扩展 iframe 自己既拿不到 Tauri 命令，
+    // 也开不了新窗口——wry 在宿主未注册 new_window_req_handler 时对 WebView2 的
+    // NewWindowRequested 直接 SetHandled(true) 拒绝，target="_blank" / window.open 全静默失效。
+    openExternal:function(url){
+      window.parent.postMessage({__xhub:true,type:'open-external',url:String(url||'')},'*');
+      return Promise.resolve();
+    },
     events:{
       on:function(event,handler){
         (listeners[event]=listeners[event]||[]).push(handler);
