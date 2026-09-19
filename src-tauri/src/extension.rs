@@ -338,6 +338,10 @@ pub fn read_manifest(dir: &Path) -> Result<ExtensionManifest, String> {
 /// 加载单个扩展目录为注册表项（永不 panic，损坏时返回 invalid 项）。
 /// `source` 区分「已装扩展」（扩展根）与「开发扩展」（「我的扩展」直挂的源码目录）。
 fn load_extension(dir: &Path, source: &str) -> ExtensionEntry {
+    // 目录一律归一（剥 Windows 的 `\\?\` verbatim 前缀）：`entry.dir` 会回传前端，与
+    // `dev_mode_status().path` 逐字符比对（「我的扩展」的发布按钮 `canPublish` 靠它匹配），
+    // 也与喂给 Node 的脚本路径同源——两处口径不一致就会出现「扩展在跑但发布按钮不见了」。
+    let dir = &crate::paths::simplify_existing(dir);
     let dir_str = dir.to_string_lossy().into_owned();
     let fallback_name = dir
         .file_name()
@@ -432,7 +436,7 @@ pub fn list_extensions(app: tauri::AppHandle) -> Result<Vec<ExtensionEntry>, Str
 /// 单个开发扩展目录的解析结果（扩展中心「我的扩展」展示用）
 #[derive(Debug, Clone, Serialize)]
 pub struct DevExtensionInfo {
-    /// 注册的源码目录（配置中原样保存的路径）
+    /// 注册的源码目录（**归一后的普通路径**，前端按它调 remove_dev_extension）
     pub path: String,
     pub id: String,
     pub name: String,
@@ -463,7 +467,10 @@ pub fn apply_dev_extensions(app: &tauri::AppHandle) {
     }
     let cfg = crate::config::load();
     for dir in &cfg.dev_extensions {
-        let path = std::path::PathBuf::from(dir);
+        // 历史配置里可能存着 canonicalize 留下的 verbatim（`\\?\…`）前缀：一律归一成
+        // 普通路径后再放行/注册，否则 service 后端会因 Node 读不了带前缀的脚本路径而
+        // 静默退出（见 paths::simplify_path）。这里归一即可自愈，用户无需手改 app.json
+        let path = crate::paths::simplify_existing(&std::path::PathBuf::from(dir));
         if !path.is_dir() {
             log::warn!("开发扩展目录不存在，跳过放行: {dir}");
             continue;
@@ -515,7 +522,9 @@ fn dev_mode_status(app: &tauri::AppHandle) -> DevModeStatus {
 
     let mut extensions = Vec::new();
     for dir in &cfg.dev_extensions {
-        let path = std::path::PathBuf::from(dir);
+        // 归一后再展示与回传：前端拿这个 path 调 remove_dev_extension，
+        // 两边口径必须一致（历史配置的 `\\?\…` 不该显示给用户，也不该导致移除失灵）
+        let path = crate::paths::simplify_existing(&std::path::PathBuf::from(dir));
         let exists = path.is_dir();
         let fallback = path
             .file_name()
@@ -527,7 +536,7 @@ fn dev_mode_status(app: &tauri::AppHandle) -> DevModeStatus {
         };
         let conflict = valid && installed_ids.contains(&id);
         extensions.push(DevExtensionInfo {
-            path: dir.clone(),
+            path: path.to_string_lossy().into_owned(),
             id,
             name,
             version,
@@ -574,16 +583,23 @@ pub fn add_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeS
     let canonical = p
         .canonicalize()
         .map_err(|e| format!("IO_ERROR: 解析目录失败：{e}"))?;
+    // ⚠️ 落盘前必须剥掉 verbatim 前缀：Windows 的 `canonicalize` 返回 `\\?\A:\…` 形式，
+    // 它会一路带到 service 后端启动（Node 的 CJS 加载器读不了带前缀的脚本路径 → 后端
+    // 静默 `exit 1`，「开发目录挂的 service 扩展后端永远起不来」的根因）、`explorer` 打开
+    // 目录、以及 asset 作用域匹配。存进配置的路径一律是普通 Win32 形式（见 paths::simplify_path）
+    let canonical = crate::paths::simplify_existing(&canonical);
     let dir_str = canonical.to_string_lossy().into_owned();
 
     // 读-改-写必须持配置写锁（见 config::lock 的约定）：否则会与并发的 save_config
     // 互相覆盖（前端整份配置落盘），刚登记的目录在下次读盘时凭空消失
     let _guard = crate::config::lock();
     let mut cfg = crate::config::load();
+    // 与历史配置比较也要归一：老版本存下的 `\\?\…` 与新存的普通路径是同一个目录，
+    // 不归一会重复登记（同一目录在「我的扩展」里出现两行）
     let already = cfg
         .dev_extensions
         .iter()
-        .any(|d| std::path::PathBuf::from(d) == canonical);
+        .any(|d| crate::paths::simplify_path(std::path::Path::new(d)) == canonical);
     if !already {
         cfg.dev_extensions.push(dir_str.clone());
         crate::config::save(&cfg)?;
@@ -602,17 +618,21 @@ pub fn add_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeS
 /// 移除一个本机扩展源码目录（源码目录本身不动）
 #[tauri::command]
 pub fn remove_dev_extension(app: tauri::AppHandle, path: String) -> Result<DevModeStatus, String> {
-    let target = std::path::PathBuf::from(path.trim());
+    let raw = std::path::PathBuf::from(path.trim());
+    // 与配置里的值都归一后再比较：历史配置可能存着 `\\?\…` 前缀，而前端回传的是
+    // dev_mode_status 归一后的路径——不归一会「点移除没反应」（见 paths::simplify_path）
+    let target = crate::paths::simplify_path(&raw);
     // 同 add_dev_extension：读-改-写持配置写锁，避免与并发的整份 save_config 互相覆盖
     let _guard = crate::config::lock();
     let mut cfg = crate::config::load();
     let before = cfg.dev_extensions.len();
     cfg.dev_extensions
-        .retain(|d| std::path::PathBuf::from(d) != target);
+        .retain(|d| crate::paths::simplify_path(std::path::Path::new(d)) != target);
     if cfg.dev_extensions.len() != before {
         crate::config::save(&cfg)?;
     }
-    revoke_dev_dir(&app, &target.to_string_lossy());
+    // 撤销放行用「可访问形式」：注册表里存的是 simplify_existing 的结果
+    revoke_dev_dir(&app, &crate::paths::simplify_existing(&raw).to_string_lossy());
     log::info!("本机扩展目录已移除: {}", target.display());
     Ok(dev_mode_status(&app))
 }
@@ -631,7 +651,7 @@ pub fn dev_extensions_stamp(app: tauri::AppHandle) -> Result<u64, String> {
     dirs.sort();
     let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
     for dir in &dirs {
-        let root = std::path::PathBuf::from(dir);
+        let root = crate::paths::simplify_existing(&std::path::PathBuf::from(dir));
         if root.is_dir() {
             hash_path_tree(&root, &root, &mut hash, 0);
         }
@@ -1284,6 +1304,43 @@ mod tests {
         assert_eq!(entry.surfaces, vec!["module", "view"]);
         assert_eq!(entry.open_in, vec!["view", "window"]);
         assert_eq!(entry.permissions, vec!["clipboard"]);
+    }
+
+    /// 回归（v0.6.2）：`entry.dir` 与 `dev_mode_status().path` 必须同口径**归一**——
+    /// 前端「我的扩展」靠这两个字符串匹配「哪条直挂目录对应哪个已加载扩展」
+    /// （`devEntryFor` → `canPublish`），一边带 `\\?\` 一边不带就会出现
+    /// 「扩展明明在跑、发布按钮却不见了」。同时也锁住喂给 Node 的脚本路径不带前缀。
+    #[test]
+    fn dev_entry_dir_matches_normalized_config_path() {
+        let root = tempdir().unwrap();
+        write_manifest(
+            root.path(),
+            "com.x-hub.devprobe",
+            serde_json::json!({
+                "id": "com.x-hub.devprobe",
+                "name": "直挂探针",
+                "version": "1.0.0",
+                "runtime": "web",
+                "kind": "view",
+                "surfaces": ["view"],
+                "entry": { "view": "./index.html" }
+            }),
+        );
+        // 模拟「添加源码目录」的落盘形态：目录经 canonicalize（Windows 上带 verbatim 前缀）
+        let canon = root.path().join("com.x-hub.devprobe").canonicalize().unwrap();
+        if cfg!(windows) {
+            assert!(
+                canon.to_string_lossy().starts_with(r"\\?\"),
+                "前提不成立：Windows 的 canonicalize 应当返回 verbatim 形式"
+            );
+        }
+        let entry = load_extension(&canon, SOURCE_DEV);
+        assert!(!entry.invalid);
+        assert_eq!(
+            entry.dir,
+            crate::paths::simplify_existing(&canon).to_string_lossy()
+        );
+        assert!(!entry.dir.contains(r"\\?\"));
     }
 
     #[test]

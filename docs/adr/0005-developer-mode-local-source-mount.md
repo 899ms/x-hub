@@ -20,3 +20,9 @@
 
 因此：**开关删除**（命令 `set_dev_mode_enabled` 一并移除，`DevModeStatus.enabled` 恒为 `true` 仅作旧前端兼容字段保留；`AppConfig.dev_mode_enabled` 标为废弃、读到即忽略）。安全边界不变——作用域只放行**用户显式添加**的目录，其余仍按上文「代价（接受）」那条处理。若将来确需「临时关掉全部本机源码目录」，再以新决策加回（不要复活这个开关）。
 
+## 修订：落盘与交付的目录路径必须归一（v0.6.2）
+
+`add_dev_extension` 原先把 `canonicalize()` 的结果**直接写进** `dev_extensions`，而 Windows 的 `canonicalize` 返回 verbatim（命名空间）形式 `\\?\A:\…`。这个前缀对宿主自己的 `fs` 调用无害，**一交给外部程序就出事**：service 扩展的后端由宿主起 Node 执行（`service.rs::start_service`），Node 的 CJS 加载器读不了带前缀的**脚本路径**——它把 `\\?\A:\…\backend\server.js` 拆错，跑去 `lstat` 盘符 `A:` 得 `EISDIR` 后 `exit 1`，后端在模块初始化阶段就死（已装扩展走 `extensions_root().join(id)`，天然无前缀，所以只有直挂的开发目录中招）。而当时后端 stdout/stderr 是 `Stdio::null()`，宿主侧只剩一个 `serviceReady=false`，界面上表现为「像在下载 Node」——**静默才是这次真正的放大器**。
+
+因此定口径：**凡是要落盘、要展示、要交给外部进程的路径，一律经 `paths::simplify_path`（剥 `\\?\` / `\\?\UNC\`；含 `.`/`..` 组件与 `Volume{…}` 设备路径不剥）或 `paths::simplify_existing`（简化后仍可访问才采用，兜超长路径）**。落点五处：登记时落盘归一、`apply_dev_extensions` / `dev_mode_status` / `dev_extensions_stamp` 读取时归一（历史配置自愈，用户不必再手改 `app.json`）、`ext_protocol::resolve_ext_dir` 出口统一归一（一处覆盖 service / 打开目录 / storage / 打包 / 预检）、`load_extension` 的 `entry.dir` 与 `dev_mode_status().path` 口径一致（前端靠这两个字符串匹配「哪条直挂目录对应哪个已加载扩展」＝发布按钮的出现条件）、`service::backend_paths` 再兜一道（`argv[1]` 带前缀必死，`current_dir` 带前缀无害但统一口径）。同时给 service 后端补上 stdout/stderr 落盘（`<数据根>/logs/service/<扩展 id>.log`，单份 1MB 上限）与探活失败时的**退出码 + 日志尾部 20 行**。
+

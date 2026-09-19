@@ -113,17 +113,23 @@ fn encode_rel_path(rel: &str) -> String {
 }
 
 /// 解析某扩展的内容目录：优先「我的扩展」登记的源码目录，其次已装扩展根。
+///
+/// 返回前一律归一成普通路径（剥掉 Windows 的 `\\?\` verbatim 前缀）：调用方会把这个目录
+/// 交给**外部程序**——`service.rs` 拿它拼后端脚本路径喂给 Node、`open_extension_dir` 交给
+/// explorer——而 Node 的 CJS 加载器读不了带前缀的脚本路径（会 `EISDIR lstat 'A:'` 后
+/// `exit 1`，即「开发目录挂的 service 扩展后端静默起不来」的根因，见 `paths::simplify_path`）。
+/// 宿主内部的 fs 调用两种形式都能用，所以统一在这一个出口归一，覆盖全部调用方。
 pub fn resolve_ext_dir(app: &tauri::AppHandle, id: &str) -> Result<PathBuf, String> {
     if let Some(state) = app.try_state::<DevExtensionDirs>() {
         if let Some(dir) = state.get(id) {
             if dir.is_dir() {
-                return Ok(dir);
+                return Ok(crate::paths::simplify_existing(&dir));
             }
         }
     }
     let dir = crate::extension::extensions_root(app)?.join(id);
     if dir.is_dir() {
-        Ok(dir)
+        Ok(crate::paths::simplify_existing(&dir))
     } else {
         Err(format!("NOT_FOUND: 扩展 {id} 不存在"))
     }

@@ -9,9 +9,11 @@
 //!   反向代理与 WebSocket 流式后续实现；
 //! - 停止：卸载时调用 `stop_service`（卸载 UI 在 §12.7 接入）。
 
-use crate::extension::{read_manifest, ExtensionManifest};
+use crate::extension::{read_manifest, BackendSpec, ExtensionManifest};
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -50,6 +52,85 @@ fn alloc_port(host: &str, fixed: Option<u16>) -> Result<u16, String> {
 }
 
 // 运行时解析（系统 Node 优先 + 内置兜底下载）见 runtime.rs
+
+/// 后端启动路径：`(entry 脚本, cwd)`。
+///
+/// **一律归一成普通路径**（剥掉 Windows 的 `\\?\` verbatim 前缀）：Node 的 CJS 加载器读不了
+/// verbatim 形式的**脚本路径**（argv[1] 带前缀即 `Error: EISDIR: ... lstat 'A:'` 后 `exit 1`），
+/// 于是后端在模块初始化阶段就死；`current_dir` 带前缀本身无害，但两者统一口径，
+/// 避免以后只改一处。`ext_protocol::resolve_ext_dir` 出口已归一，这里是第二道保险。
+fn backend_paths(dir: &std::path::Path, backend: &BackendSpec) -> (PathBuf, PathBuf) {
+    let dir = crate::paths::simplify_path(dir);
+    let entry = crate::paths::simplify_path(&dir.join(&backend.entry));
+    let cwd = match backend.cwd.as_ref() {
+        Some(c) => crate::paths::simplify_path(&dir.join(c)),
+        None => dir.clone(),
+    };
+    (entry, cwd)
+}
+
+/// 后端日志文件名：扩展 id 形状白名单是 `[A-Za-z0-9._-]`（manifest 校验），
+/// 这里再兜一次，防任何来源的 id 拼出路径穿越。
+fn service_log_file_name(ext_id: &str) -> String {
+    let safe: String = ext_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{safe}.log")
+}
+
+/// service 后端 stdout/stderr 的落盘路径：`<数据根>/logs/service/<扩展 id>.log`。
+///
+/// 为什么必须落盘：这两个流原本是 `Stdio::null()`，后端启动期崩溃（脚本路径 Node 读不了、
+/// 端口占用、依赖缺失……）时宿主侧只剩一个 `ready=false` 布尔值——前端只能提示
+/// 「首次使用会自动下载 Node」，与实际原因（Node 早已就绪、后端一启动就退出）完全错位，
+/// 排查成本几乎全部来自「错误被静默丢弃」。
+fn service_log_path(ext_id: &str) -> Option<PathBuf> {
+    let dir = crate::paths::data_root().join("logs").join("service");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(service_log_file_name(ext_id)))
+}
+
+/// 单份后端日志上限：超限就删档重来（后端崩溃重启循环不该把磁盘写满）
+const SERVICE_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// 打开后端日志（追加写）。超限先删档，避免无限增长。
+fn open_service_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if std::fs::metadata(path)
+        .map(|m| m.len() > SERVICE_LOG_MAX_BYTES)
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_file(path);
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // 每次启动留一条分隔标记：日志是追加式的，排查时要能分清哪几行属于哪一次启动
+    let _ = writeln!(
+        file,
+        "----- service 启动 {} -----",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    Ok(file)
+}
+
+/// 读日志尾部若干行（探活失败时打进宿主日志，让 `x-hub.log` 里直接有线索）
+fn tail_text(path: &std::path::Path, max_lines: usize) -> String {
+    let Ok(bytes) = std::fs::read(path) else {
+        return String::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
 
 /// 探活：轮询 connect 端口直到成功或超时。
 /// host 为通配地址（0.0.0.0/::）时探回环；为具体地址（如局域网 IP）时探该地址——
@@ -105,11 +186,10 @@ pub fn start_service(
     let strategy = crate::config::load().runtime_strategy;
     let node_exe = crate::runtime::resolve_node(app, min_version, &strategy)?;
 
-    let entry = dir.join(&backend.entry);
+    let (entry, cwd) = backend_paths(&dir, backend);
     if !entry.is_file() {
         return Err(format!("后端入口不存在: {}", backend.entry));
     }
-    let cwd = backend.cwd.as_ref().map(|c| dir.join(c)).unwrap_or_else(|| dir.clone());
 
     // 监听主机解析 + 对外监听的安全门控：
     // - 默认/127.0.0.1 = 本机回环，任何 service 扩展可用（现状不变）
@@ -139,6 +219,24 @@ pub fn start_service(
         .env("XHUB_EXT_ID", ext_id)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // 后端输出落盘（`<数据根>/logs/service/<扩展 id>.log`）：后端启动期崩溃时这是唯一能
+    // 自证的线索。打不开就退回 null（只记录日志，不阻断启动）
+    let log_path = service_log_path(ext_id);
+    if let Some(path) = log_path.as_ref() {
+        match open_service_log(path) {
+            Ok(file) => {
+                let cloned = file.try_clone();
+                cmd.stdout(std::process::Stdio::from(file));
+                match cloned {
+                    Ok(f) => {
+                        cmd.stderr(std::process::Stdio::from(f));
+                    }
+                    Err(e) => log::warn!("后端 stderr 落盘失败（{ext_id}）：{e}"),
+                }
+            }
+            Err(e) => log::warn!("后端日志文件打开失败（{ext_id}）：{e}（后端输出将被丢弃）"),
+        }
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -170,18 +268,47 @@ pub fn start_service(
     let bg_ext = ext_id.to_string();
     let bg_host = listen_host.clone();
     let bg_program = node_exe.to_string_lossy().to_string();
+    let bg_log = log_path.clone();
     std::thread::spawn(move || {
         // 对外监听时放行 Windows 防火墙（非对外不触碰，避免无谓 UAC 提示）
         if external {
             ensure_firewall_rule(&bg_ext, port, &bg_program);
         }
         let ready = probe_ready(port, &bg_host, Duration::from_secs(10));
+        // 探活失败时顺手取子进程退出码：后端在模块初始化阶段就崩时这是最快的判据
+        let mut exit_code = None;
         if let Ok(mut map) = bg_app.state::<ServiceState>().0.lock() {
             if let Some(rt) = map.get_mut(&bg_ext) {
+                if !ready {
+                    exit_code = rt
+                        .child
+                        .as_mut()
+                        .and_then(|c| c.try_wait().ok().flatten())
+                        .map(|s| s.code());
+                }
                 rt.ready = ready;
             }
         }
         log::info!("service 探活完成: {bg_ext} port={port} ready={ready}");
+        // 未就绪时把「后端自己说了什么」带进宿主日志：本类故障的自证线索全在这里
+        if !ready {
+            let log_desc = bg_log
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "（未落盘）".to_string());
+            let tail = bg_log
+                .as_ref()
+                .map(|p| tail_text(p, 20))
+                .unwrap_or_default();
+            let tail = tail.trim();
+            if tail.is_empty() {
+                log::warn!("service 后端未就绪: {bg_ext} port={port} exit={exit_code:?} 日志={log_desc}");
+            } else {
+                log::warn!(
+                    "service 后端未就绪: {bg_ext} port={port} exit={exit_code:?} 日志={log_desc}\n{tail}"
+                );
+            }
+        }
     });
 
     log::info!("service 扩展已启动: {ext_id} port={port}（防火墙/探活后台进行中）");
@@ -349,6 +476,102 @@ pub fn service_ready(app: &tauri::AppHandle, ext_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn backend(entry: &str, cwd: Option<&str>) -> BackendSpec {
+        BackendSpec {
+            entry: entry.to_string(),
+            engine: None,
+            cwd: cwd.map(|c| c.to_string()),
+            port: None,
+            host: None,
+            health: None,
+        }
+    }
+
+    /// 回归：Node 的 CJS 加载器读不了 `\\?\` 前缀的脚本路径（后端静默 exit 1 的根因），
+    /// 所以喂给 Node 的 entry 必须是普通路径——哪怕目录来自 canonicalize。
+    #[test]
+    fn backend_paths_strip_verbatim_prefix() {
+        if !cfg!(windows) {
+            let (entry, cwd) = backend_paths(std::path::Path::new("/tmp/ext"), &backend("backend/server.js", None));
+            assert_eq!(entry, PathBuf::from("/tmp/ext/backend/server.js"));
+            assert_eq!(cwd, PathBuf::from("/tmp/ext"));
+            return;
+        }
+        let dev_dir = std::path::Path::new(r"\\?\A:\x-hub\publish-src\1.3.0\lan-share");
+        let (entry, cwd) = backend_paths(dev_dir, &backend("backend/server.js", None));
+        assert_eq!(
+            entry,
+            PathBuf::from(r"A:\x-hub\publish-src\1.3.0\lan-share\backend\server.js")
+        );
+        assert_eq!(cwd, PathBuf::from(r"A:\x-hub\publish-src\1.3.0\lan-share"));
+        assert!(!entry.to_string_lossy().contains(r"\\?\"));
+
+        // manifest 显式声明 cwd 时同样归一
+        let (_, cwd) = backend_paths(
+            std::path::Path::new(r"\\?\A:\ext"),
+            &backend("server.js", Some("backend")),
+        );
+        assert_eq!(cwd, PathBuf::from(r"A:\ext\backend"));
+    }
+
+    #[test]
+    fn service_log_file_name_is_path_safe() {
+        assert_eq!(
+            service_log_file_name("com.dept.lan-share"),
+            "com.dept.lan-share.log"
+        );
+        // 任何越界字符都被替换：日志文件名绝不能拼出路径穿越
+        let evil = service_log_file_name("..\\..\\evil");
+        assert!(!evil.contains('/') && !evil.contains('\\'));
+        assert!(evil.ends_with(".log"));
+    }
+
+    #[test]
+    fn tail_text_keeps_last_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("svc.log");
+        std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
+        assert_eq!(tail_text(&path, 2), "l3\nl4");
+        assert_eq!(tail_text(&path, 99), "l1\nl2\nl3\nl4");
+        // 文件不存在时静默返回空串（探活失败路径不该因日志读取再报错）
+        assert_eq!(tail_text(&dir.path().join("nope.log"), 5), "");
+    }
+
+    /// 端到端回归（模拟「我的扩展 → 添加源码目录」的真实链路）：目录 canonicalize 得到
+    /// verbatim 形式，经 `backend_paths` 归一后交给**真实 Node** 执行——脚本必须跑得起来。
+    /// 这正是本 bug 的现场：修复前喂给 Node 的是 `\\?\A:\…\server.js`，Node 把路径拆错
+    /// （`EISDIR: lstat 'A:'`）后 exit 1，后端在模块初始化阶段就死，宿主侧只见 `ready=false`。
+    /// 机器上没有 Node 时跳过（本测试依赖真实运行时）。
+    #[test]
+    fn backend_entry_runs_under_real_node() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("probe.js"), "console.log('XHUB_PROBE_OK');").unwrap();
+        let canon = dir.path().canonicalize().unwrap();
+        let (entry, cwd) = backend_paths(&canon, &backend("probe.js", None));
+        if cfg!(windows) {
+            assert!(
+                canon.to_string_lossy().starts_with(r"\\?\"),
+                "前提不成立：Windows 的 canonicalize 应当返回 verbatim 形式"
+            );
+            assert!(!entry.to_string_lossy().starts_with(r"\\?\"));
+        }
+        let out = match std::process::Command::new("node")
+            .arg(&entry)
+            .current_dir(&cwd)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return, // 无 Node：跳过
+        };
+        assert!(
+            out.status.success(),
+            "Node 应能执行归一后的脚本路径 {}：{}",
+            entry.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("XHUB_PROBE_OK"));
+    }
 
     #[test]
     fn alloc_port_binds_loopback_and_external() {

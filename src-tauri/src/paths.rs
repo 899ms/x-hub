@@ -113,6 +113,59 @@ pub fn data_path_info() -> (String, &'static str) {
     (root.to_string_lossy().into_owned(), "default")
 }
 
+/// 剥掉 Windows verbatim（`\\?\`）前缀，返回等价的可交付路径。
+///
+/// **为什么必须有这个函数**：`std::fs::canonicalize` 在 Windows 上返回 verbatim 形式
+/// （`\\?\A:\x-hub\publish-src\lan-share`）。Rust 自己的 fs 调用接受它，但**一交给外部程序就出事**：
+/// Node 的 CJS 加载器处理不了这个前缀，会把 `\\?\A:\…\backend\server.js` 拆错，
+/// 跑去 `lstat` 盘符 `A:` 得 `EISDIR` 直接 `exit 1`（service 扩展后端「静默起不来」的根因）；
+/// `ShellExecute`（`opener::open` / `explorer`）同样不认。所以凡是**要落盘、要展示、
+/// 要交给外部进程**的路径都必须先过这里。
+///
+/// 保守策略（与 `dunce::simplified` 同口径，只有确知语义不变才剥）：
+///   - `\\?\C:\...`（盘符形式）→ `C:\...`；
+///   - `\\?\UNC\server\share\...` → `\\server\share\...`；
+///   - 剥完含 `.` / `..` 组件的不剥（Win32 会规范化这些组件，剥了语义就变了）；
+///   - `\\?\Volume{...}` / `\\?\GLOBALROOT` 等设备路径不剥。
+/// 非 Windows 平台原样返回。
+pub fn simplify_path(p: &Path) -> PathBuf {
+    if !cfg!(windows) {
+        return p.to_path_buf();
+    }
+    let s = p.to_string_lossy();
+    let stripped = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        // 仅盘符形式（`X:` 开头）可剥；`Volume{...}` 等设备路径保持原样
+        let mut chars = rest.chars();
+        match (chars.next(), chars.next()) {
+            (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => rest.to_string(),
+            _ => return p.to_path_buf(),
+        }
+    } else {
+        return p.to_path_buf();
+    };
+    let out = PathBuf::from(&stripped);
+    if out
+        .components()
+        .any(|c| matches!(c, std::path::Component::CurDir | std::path::Component::ParentDir))
+    {
+        return p.to_path_buf();
+    }
+    out
+}
+
+/// [`simplify_path`] 的存在性安全网：简化后的路径**确实可访问**才采用，否则原样返回。
+/// 兜住极端情形——总长超过 260 且系统未开启长路径支持时，verbatim 是唯一能访问的形式。
+pub fn simplify_existing(p: &Path) -> PathBuf {
+    let s = simplify_path(p);
+    if s.as_path() != p && s.exists() {
+        s
+    } else {
+        p.to_path_buf()
+    }
+}
+
 /// 更新引导文件指向新的数据根（仅标准版改路径时调用，重启后生效）
 pub fn set_data_root(path: &Path) -> Result<(), String> {
     write_bootstrap_at(&bootstrap_file(), path)
@@ -142,5 +195,61 @@ mod tests {
     fn portable_detection_returns_bool() {
         // 仅验证函数可调用且返回布尔值（测试二进制目录下通常无 portable 标记）
         let _ = is_portable();
+    }
+
+    #[test]
+    fn simplify_strips_verbatim_prefix() {
+        if !cfg!(windows) {
+            // 非 Windows 平台一律原样返回
+            assert_eq!(
+                simplify_path(Path::new("/tmp/x-hub/ext")),
+                PathBuf::from("/tmp/x-hub/ext")
+            );
+            return;
+        }
+        // 盘符形式：canonicalize 在 Windows 上的真实产物
+        assert_eq!(
+            simplify_path(Path::new(r"\\?\A:\x-hub\publish-src\1.3.0\lan-share")),
+            PathBuf::from(r"A:\x-hub\publish-src\1.3.0\lan-share")
+        );
+        // UNC 形式：还原成 `\\server\share`
+        assert_eq!(
+            simplify_path(Path::new(r"\\?\UNC\srv\share\ext")),
+            PathBuf::from(r"\\srv\share\ext")
+        );
+        // 普通路径不动
+        assert_eq!(
+            simplify_path(Path::new(r"C:\x-hub\extensions\com.a.b")),
+            PathBuf::from(r"C:\x-hub\extensions\com.a.b")
+        );
+        // 设备路径不剥（剥了会变成不存在的盘符路径）
+        assert_eq!(
+            simplify_path(Path::new(r"\\?\Volume{8f0e1c2a}\x")),
+            PathBuf::from(r"\\?\Volume{8f0e1c2a}\x")
+        );
+        // 含 `..` 组件不剥：Win32 会规范化，语义会变
+        assert_eq!(
+            simplify_path(Path::new(r"\\?\C:\a\..\b")),
+            PathBuf::from(r"\\?\C:\a\..\b")
+        );
+    }
+
+    #[test]
+    fn simplify_existing_keeps_usable_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let canon = dir.path().canonicalize().unwrap();
+        if cfg!(windows) {
+            assert!(
+                canon.to_string_lossy().starts_with(r"\\?\"),
+                "前提不成立：Windows 的 canonicalize 应当返回 verbatim 形式"
+            );
+        }
+        let plain = simplify_existing(&canon);
+        assert!(plain.is_dir(), "简化后的路径必须仍可访问");
+        assert!(!plain.to_string_lossy().starts_with(r"\\?\"));
+        // 已简化 / 不存在的路径原样返回
+        assert_eq!(simplify_existing(&plain), plain);
+        let ghost = canon.join("__not_here__");
+        assert_eq!(simplify_existing(&ghost), ghost);
     }
 }
