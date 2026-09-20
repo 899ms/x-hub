@@ -584,6 +584,11 @@ function drawFrame(t: number) {
   ctx.restore()
 
   ctx.restore()
+
+  // 画完必须续上下一帧：旧实现在函数开头 reschedule，799f4b6 改「隐藏停 rAF」时
+  // 只留了各提前返回分支的 reschedule，漏了这一处 → 循环画完一帧就断，球体冻结
+  // （ringsIdle 永不更新，「静止时保持转动」开关因此失效）。
+  rafId = requestAnimationFrame(drawFrame)
 }
 
 let unlistenShown: (() => void) | null = null

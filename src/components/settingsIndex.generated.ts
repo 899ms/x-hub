@@ -46,6 +46,7 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   { section: 'ball', title: '桌面悬浮球' },
   { section: 'ball', title: '悬浮球贴边自动隐藏' },
   { section: 'ball', title: '与主窗口同时显示' },
+  { section: 'ball', title: '静止时保持转动' },
   { section: 'ball', title: '环形菜单按钮' },
   { section: 'shortcut', title: '全局快捷键' },
   { section: 'shortcut', title: '剪贴板呼出快捷键' },
