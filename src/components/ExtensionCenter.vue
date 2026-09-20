@@ -194,6 +194,9 @@ onBeforeUnmount(() => {
 let stamp = 0
 let stampTimer: number | null = null
 async function pollStamp() {
+  // 主窗隐藏（收进托盘）时 WebView2 不节流定时器，目录扫描在后台空烧——跳过本跳，
+  // 重新可见后下一轮即恢复（扩展文件只会在用户操作时变化，隐藏期间无新装/卸载）
+  if (document.hidden) return
   if (!isTauri()) return
   try {
     const s = await tauriApi.extensionsStamp()

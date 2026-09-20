@@ -30,6 +30,8 @@ const dragging = ref(false)
 const hovered = ref(false)
 /** 扫出动画播完后移除 animation（fill 覆盖 hover transform） */
 const settledAll = ref(false)
+/** 静止态暂停陀螺环自旋（与 drawFrame 的 isActiveFrame 同口径，见 CSS rings-idle 规则） */
+const ringsIdle = ref(true)
 
 const ballEl = ref<HTMLElement | null>(null)
 const cvsEl = ref<HTMLCanvasElement | null>(null)
@@ -409,6 +411,42 @@ let corePhase = 0
 let lastT = 0
 let rafId = 0
 let ctx2d: CanvasRenderingContext2D | null = null
+/** 上一帧的交互态：变化时才写 ringsIdle，避免每帧触碰响应式 */
+let lastActive = false
+
+// ---- 渲染节流（笔记本发热治理）----
+// 静止态（无拖拽/无菜单/能量已稳定）降到 24fps，交互/动画过渡期保持 60fps：
+// 悬浮球是常驻窗口，60fps 常开在笔记本上是不小的 CPU/GPU 开销（低配集显尤甚）。
+const IDLE_FPS = 24
+const IDLE_FRAME_MS = 1000 / IDLE_FPS
+let lastFrameT = 0
+
+/** 是否有需要满帧的交互/动画：拖拽、菜单展开、几何切换、能量过渡 */
+function isActiveFrame() {
+  return (
+    dragging.value ||
+    menuOpen.value ||
+    resizing.value ||
+    Math.abs(energy - targetEnergy) > 0.002
+  )
+}
+
+// 预计算潜在连线对：点在单位球上，3D 弦距固定不随旋转变化；投影是刚性旋转 +
+// 轻透视，屏幕距离被 3D 弦距 × 最大投影系数（ORB/0.78 ≈ 64）约束。
+// 只有 3D 弦距可能落进 LINE_D 的对才逐帧做屏幕距离判定，把每帧 O(n²) 的
+// 全量判定降到预计算的候选子集（约 1/10），静止渲染成本显著下降。
+const PAIR_3D_MAX = (LINE_D / (ORB / 0.78)) * 1.35
+const linePairs: Array<[number, number]> = []
+for (let i = 0; i < DOT_N; i++) {
+  for (let j = i + 1; j < DOT_N; j++) {
+    const dx = pts[i].x - pts[j].x
+    const dy = pts[i].y - pts[j].y
+    const dz = pts[i].z - pts[j].z
+    if (dx * dx + dy * dy + dz * dz < PAIR_3D_MAX * PAIR_3D_MAX) {
+      linePairs.push([i, j])
+    }
+  }
+}
 
 function project(p: P3) {
   const cy = Math.cos(yaw)
@@ -431,15 +469,37 @@ function drawDot(ctx: CanvasRenderingContext2D, p: { sx: number; sy: number; sc:
 }
 
 function drawFrame(t: number) {
-  rafId = requestAnimationFrame(drawFrame)
+  // 窗口隐藏（如主窗可见时球被隐藏）：立即停掉 rAF 链，等可见时重启，
+  // 而不是继续以 60fps 空转（旧实现每帧都 reschedule，隐藏时 CPU 照样空烧）
+  if (document.hidden || !ctx2d) {
+    cancelAnimationFrame(rafId)
+    rafId = 0
+    return
+  }
   if (!lastT) {
     lastT = t
+    lastFrameT = t
+    rafId = requestAnimationFrame(drawFrame)
     return
   }
   const dt = Math.min(0.05, (t - lastT) / 1000)
   lastT = t
   const ctx = ctx2d
-  if (!ctx || document.hidden) return
+
+  // 静止态降帧：能量已稳定且无交互时无需满帧重绘，跳过中间帧
+  const active = isActiveFrame()
+  if (!active) {
+    if (t - lastFrameT < IDLE_FRAME_MS) {
+      rafId = requestAnimationFrame(drawFrame)
+      return
+    }
+  }
+  lastFrameT = t
+  // 交互态变化 → 同步陀螺环暂停/恢复（transition 无跳变，见 CSS rings-idle 注释）
+  if (active !== lastActive) {
+    lastActive = active
+    ringsIdle.value = !active
+  }
 
   energy += (targetEnergy - energy) * Math.min(1, dt * 7)
   yaw += dt * (0.45 + energy * 1.2) // 悬停/拖拽/菜单态能量激发，自转加快
@@ -456,23 +516,20 @@ function drawFrame(t: number) {
   for (const p of proj) {
     if (p.z < 0) drawDot(ctx, p, 0.32) // 背面半球（暗）
   }
-  for (let i = 0; i < DOT_N; i++) {
+  for (const [i, j] of linePairs) {
     const a = proj[i]
-    if (a.z <= 0) continue
-    for (let j = i + 1; j < DOT_N; j++) {
-      const b = proj[j]
-      if (b.z <= 0) continue
-      const dx = a.sx - b.sx
-      const dy = a.sy - b.sy
-      const d2 = dx * dx + dy * dy
-      if (d2 < LINE_D * LINE_D) {
-        ctx.strokeStyle = accentRgba((1 - Math.sqrt(d2) / LINE_D) * (0.16 + energy * 0.32))
-        ctx.lineWidth = 0.8
-        ctx.beginPath()
-        ctx.moveTo(a.sx, a.sy)
-        ctx.lineTo(b.sx, b.sy)
-        ctx.stroke()
-      }
+    const b = proj[j]
+    if (a.z <= 0 || b.z <= 0) continue
+    const dx = a.sx - b.sx
+    const dy = a.sy - b.sy
+    const d2 = dx * dx + dy * dy
+    if (d2 < LINE_D * LINE_D) {
+      ctx.strokeStyle = accentRgba((1 - Math.sqrt(d2) / LINE_D) * (0.16 + energy * 0.32))
+      ctx.lineWidth = 0.8
+      ctx.beginPath()
+      ctx.moveTo(a.sx, a.sy)
+      ctx.lineTo(b.sx, b.sy)
+      ctx.stroke()
     }
   }
   for (const p of proj) {
@@ -563,9 +620,20 @@ function onWindowResize() {
   }, 250)
 }
 
+// 窗口重新可见（隐藏→显示，主窗收起球又出现）时重启 rAF 链；
+// drawFrame 在 document.hidden 时已停掉循环，这里负责拉起
+function onVisibilityChange() {
+  if (!document.hidden && rafId === 0 && ctx2d) {
+    lastT = 0
+    lastFrameT = 0
+    rafId = requestAnimationFrame(drawFrame)
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('resize', onWindowResize)
   document.addEventListener('keydown', onKeydown)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   ctx2d = cvsEl.value?.getContext('2d') ?? null
   rafId = requestAnimationFrame(drawFrame)
   if (!isTauri()) return
@@ -602,6 +670,13 @@ onMounted(async () => {
     menuVisual.value = 'closed'
     settledAll.value = false
     targetEnergy = 0
+    // 兜底重启渲染链：tao hide/show 重建 ex-style 可能不触发 visibilitychange，
+    // 这里显式拉起（drawFrame 隐藏时已把 rafId 清零）
+    if (rafId === 0 && ctx2d) {
+      lastT = 0
+      lastFrameT = 0
+      rafId = requestAnimationFrame(drawFrame)
+    }
     // 隐藏期间可能错过 DPI 变化且收拢几何不触发 resize 事件：显示后主动校验视口
     window.setTimeout(checkViewportSync, 100)
   })
@@ -617,9 +692,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize)
+  document.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   if (viewportTimer != null) window.clearTimeout(viewportTimer)
   cancelAnimationFrame(rafId)
-  document.removeEventListener('keydown', onKeydown)
   cancelPendingToggle()
   if (closeTimer != null) window.clearTimeout(closeTimer)
   if (settledTimer != null) window.clearTimeout(settledTimer)
@@ -632,7 +708,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="fb-root" :class="{ open: menuVisual !== 'closed', dragging, hovered, resizing }">
+  <div
+    class="fb-root"
+    :class="{ open: menuVisual !== 'closed', dragging, hovered, resizing, 'rings-idle': ringsIdle }"
+  >
     <!-- 菜单态底座：点击环形外空白收起（ADR 收起方式之一） -->
     <div v-if="menuVisual === 'open'" class="fb-backdrop" @pointerdown="closeMenu"></div>
 
@@ -1067,6 +1146,13 @@ onBeforeUnmount(() => {
   to {
     transform: rotateX(76deg) rotateY(-14deg) rotateZ(-360deg);
   }
+}
+/* 静止态暂停陀螺环自旋：三环是合成器常驻 60fps 的 transform 动画（or1/or2 还各挂
+   drop-shadow 滤镜层），球体可见但无人交互时属纯 GPU 空转，笔记本上持续发热。
+   悬浮球是常驻窗口，静止远多于交互；canvas 粒子仍以 24fps 慢速自转，静止观感基本
+   不变。animation-play-state 暂停=冻结当前角度，恢复从原角度继续，无跳变 */
+.fb-root.rings-idle .fb-oring {
+  animation-play-state: paused;
 }
 
 </style>

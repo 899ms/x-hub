@@ -134,9 +134,12 @@ async function handleDrop(file: string) {
   }
 }
 
-// ---- 运行状态检测：每 3s 轮询进程名集合，应用已启动时名称左侧显示小绿点 ----
+// ---- 运行状态检测：每 5s 轮询进程名集合，应用已启动时名称左侧显示小绿点 ----
+// 进程枚举是重量级操作（sysinfo 全量快照，单次几十毫秒），3s 太密，放宽到 5s；
+// 页面不可见（切走视图时组件卸载，interval 由 onBeforeUnmount 清理）不空转
 const runningNames = ref<Set<string>>(new Set())
 let runningTimer: ReturnType<typeof setInterval> | null = null
+const RUNNING_POLL_MS = 5000
 
 function isRunning(r: Resource): boolean {
   if (r.kind !== 'app' || !r.target) return false
@@ -157,7 +160,12 @@ async function refreshRunning() {
 onMounted(() => {
   if (!isTauri()) return
   void refreshRunning()
-  runningTimer = setInterval(() => void refreshRunning(), 3000)
+  // 主窗隐藏（收进托盘）时 WebView2 不节流定时器：进程枚举是重量级操作（sysinfo
+  // 全量快照），后台空烧白白发热——隐藏时跳过本跳，窗口重新可见后自动恢复采样
+  runningTimer = setInterval(() => {
+    if (document.hidden) return
+    void refreshRunning()
+  }, RUNNING_POLL_MS)
 })
 
 // ---- 分类筛选 ----

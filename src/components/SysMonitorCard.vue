@@ -11,6 +11,22 @@ const store = useStore()
 const POLL_INTERVAL = 2000
 let timer: ReturnType<typeof setInterval> | null = null
 
+// 主窗隐藏（收进托盘）时 WebView2 因 --disable-background-timer-throttling 不节流
+// 定时器：不暂停的话每 2s 的 IPC + sysinfo 采样在后台空烧。visibilitychange 暂停/恢复
+function startPolling() {
+  if (timer) return
+  void poll()
+  timer = setInterval(poll, POLL_INTERVAL)
+}
+function stopPolling() {
+  if (timer) clearInterval(timer)
+  timer = null
+}
+function onVisibility() {
+  if (document.hidden) stopPolling()
+  else startPolling()
+}
+
 const info = () => store.state.systemInfo
 
 async function poll() {
@@ -25,14 +41,14 @@ const memLabel = () => {
   return `${(i.memUsedMb / 1024).toFixed(1)} / ${(i.memTotalMb / 1024).toFixed(1)} GB`
 }
 
-onMounted(async () => {
-  await poll()
-  timer = setInterval(poll, POLL_INTERVAL)
+onMounted(() => {
+  document.addEventListener('visibilitychange', onVisibility)
+  if (!document.hidden) startPolling()
 })
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer)
-  timer = null
+  document.removeEventListener('visibilitychange', onVisibility)
+  stopPolling()
 })
 </script>
 
