@@ -225,6 +225,8 @@ export interface AppConfig {
   /** 悬浮球窗口位置（物理 px，拖拽后由后端记忆） */
   floating_ball_x: number | null
   floating_ball_y: number | null
+  /** 悬浮球静止态保持转动（炫酷模式，默认关）：开启 = 陀螺环常转 + canvas 满帧（旧版行为，更耗电） */
+  floating_ball_idle_spin: boolean
 }
 
 export interface AppInfo {
@@ -262,6 +264,8 @@ export interface FloatingBallState {
   /** 记忆的球心位置（物理 px，拖拽后由后端记忆） */
   x: number | null
   y: number | null
+  /** 静止态保持转动（炫酷模式）：前端据此跳过 rings-idle 暂停与 24fps 降帧 */
+  idle_spin: boolean
   /** 当前停靠边：前端据此做「悬停滑出露全」的 CSS 平移 */
   dock: BallDock
   /** 球态窗口逻辑边长（前端 resize 失配自检的期望值之一） */
@@ -869,7 +873,15 @@ export const tauriApi = {
     autoHide: boolean,
     withMain: boolean,
     buttons: string[],
-  ) => invoke<void>('floating_ball_save_settings', { enabled, autoHide, withMain, buttons }),
+    idleSpin: boolean,
+  ) =>
+    invoke<void>('floating_ball_save_settings', {
+      enabled,
+      autoHide,
+      withMain,
+      buttons,
+      idleSpin,
+    }),
   floatingBallDragBegin: () => invoke<void>('floating_ball_drag_begin'),
   floatingBallDragCancel: () => invoke<void>('floating_ball_drag_cancel'),
   floatingBallExpand: (expanded: boolean) => invoke<void>('floating_ball_expand', { expanded }),

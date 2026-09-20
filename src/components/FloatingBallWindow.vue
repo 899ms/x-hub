@@ -417,17 +417,19 @@ let lastActive = false
 // ---- 渲染节流（笔记本发热治理）----
 // 静止态（无拖拽/无菜单/能量已稳定）降到 24fps，交互/动画过渡期保持 60fps：
 // 悬浮球是常驻窗口，60fps 常开在笔记本上是不小的 CPU/GPU 开销（低配集显尤甚）。
+// 「静止时保持转动」开启（炫酷模式）时不降帧、环不停转，完整回到旧版行为。
 const IDLE_FPS = 24
 const IDLE_FRAME_MS = 1000 / IDLE_FPS
 let lastFrameT = 0
 
-/** 是否有需要满帧的交互/动画：拖拽、菜单展开、几何切换、能量过渡 */
+/** 是否有需要满帧的交互/动画：拖拽、菜单展开、几何切换、能量过渡、用户选了静止常转 */
 function isActiveFrame() {
   return (
     dragging.value ||
     menuOpen.value ||
     resizing.value ||
-    Math.abs(energy - targetEnergy) > 0.002
+    Math.abs(energy - targetEnergy) > 0.002 ||
+    (st.value?.idle_spin ?? false)
   )
 }
 

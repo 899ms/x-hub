@@ -228,6 +228,11 @@ pub struct AppConfig {
     pub floating_ball_x: Option<f64>,
     #[serde(default)]
     pub floating_ball_y: Option<f64>,
+    /// 悬浮球静止态保持转动（炫酷模式，默认关）：true = 陀螺环常转 + canvas 满帧
+    /// （v0.6.2 及以前的行为，更耗电发热）；false = 静止时环暂停 + canvas 降 24fps
+    /// （笔记本发热治理，见 FloatingBallWindow 的 rings-idle / IDLE_FPS）
+    #[serde(default)]
+    pub floating_ball_idle_spin: bool,
 }
 
 fn one() -> f64 {
@@ -388,6 +393,7 @@ impl Default for AppConfig {
             floating_ball_buttons: default_floating_ball_buttons(),
             floating_ball_x: None,
             floating_ball_y: None,
+            floating_ball_idle_spin: false,
         }
     }
 }
@@ -520,6 +526,7 @@ const BACKEND_MANAGED_FIELDS: &[&str] = &[
     "floating_ball_buttons",
     "floating_ball_x",
     "floating_ball_y",
+    "floating_ball_idle_spin",
     // 「我的扩展」本机源码目录：只经 add/remove_dev_extension 变更
     "dev_extensions",
     "dev_mode_enabled",
@@ -549,6 +556,7 @@ pub fn merge_disk_authoritative(merged: &mut AppConfig, disk: &AppConfig) {
     merged.floating_ball_buttons = disk.floating_ball_buttons.clone();
     merged.floating_ball_x = disk.floating_ball_x;
     merged.floating_ball_y = disk.floating_ball_y;
+    merged.floating_ball_idle_spin = disk.floating_ball_idle_spin;
     merged.dev_extensions = disk.dev_extensions.clone();
     // 已废弃字段（登记即加载后不再读取），仍以磁盘为准以免被快照写回
     merged.dev_mode_enabled = disk.dev_mode_enabled;

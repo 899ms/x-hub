@@ -190,6 +190,8 @@ pub struct FloatingBallState {
     /// 记忆的球心位置（物理 px，拖拽松手后由后端记忆；None = 从未拖拽过）
     pub x: Option<f64>,
     pub y: Option<f64>,
+    /// 静止态保持转动（炫酷模式）：前端据此决定是否跳过 rings-idle 暂停与 24fps 降帧
+    pub idle_spin: bool,
     /// 当前停靠边（半隐态）；露出/隐回由边缘监视循环移动窗口，前端仅只读展示
     pub dock: DockState,
     /// 球态窗口逻辑边长（前端 resize 失配自检的期望值之一）
@@ -910,6 +912,7 @@ pub fn floating_ball_get_state(app: tauri::AppHandle) -> FloatingBallState {
         buttons: cfg.floating_ball_buttons,
         x: cfg.floating_ball_x,
         y: cfg.floating_ball_y,
+        idle_spin: cfg.floating_ball_idle_spin,
         dock,
         ball_size: BALL_SIZE,
         menu_size: MENU_SIZE,
@@ -925,6 +928,7 @@ pub fn floating_ball_save_settings(
     auto_hide: bool,
     with_main: bool,
     buttons: Vec<String>,
+    idle_spin: bool,
 ) -> Result<(), String> {
     // 去重保序 + 截断上限
     let mut seen = std::collections::HashSet::new();
@@ -941,6 +945,7 @@ pub fn floating_ball_save_settings(
         cfg.floating_ball_auto_hide = auto_hide;
         cfg.floating_ball_with_main = with_main;
         cfg.floating_ball_buttons = buttons;
+        cfg.floating_ball_idle_spin = idle_spin;
         config::save(&cfg)?;
     }
 

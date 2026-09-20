@@ -14,7 +14,7 @@ import { FLOATING_BALL_BUTTONS, FLOATING_BALL_MAX_BUTTONS } from '../../composab
 const showToast = inject<(msg: string) => void>('showToast', () => {})
 const store = useStore()
 
-// ---- 桌面悬浮球（ADR 0004）：启用 / 贴边自动隐藏 / 与主窗同显 / 环形按钮增删排序 ----
+// ---- 桌面悬浮球（ADR 0004）：启用 / 贴边自动隐藏 / 与主窗同显 / 静止转动 / 环形按钮增删排序 ----
 const ballButtons = computed(() => store.state.config.floating_ball_buttons ?? [])
 
 function onToggleFloatingBall() {
@@ -27,6 +27,10 @@ function onToggleFloatingBallAutoHide() {
 
 function onToggleFloatingBallWithMain() {
   void store.setFloatingBallWithMain(!store.state.config.floating_ball_with_main)
+}
+
+function onToggleFloatingBallIdleSpin() {
+  void store.setFloatingBallIdleSpin(!store.state.config.floating_ball_idle_spin)
 }
 
 async function addBallButton(id: string) {
@@ -234,6 +238,24 @@ onMounted(async () => {
               :class="{ on: store.state.config.floating_ball_with_main }"
               :disabled="!store.state.config.floating_ball_enabled"
               @click="onToggleFloatingBallWithMain"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">静止时保持转动</span>
+              <span class="setting-desc">开启后悬浮球静止时陀螺环持续旋转、粒子满帧渲染（观感更炫酷，笔记本更耗电发热）；关闭则静止时暂停自旋并降到 24fps 省电，交互时立即恢复</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.floating_ball_idle_spin"
+              :class="{ on: store.state.config.floating_ball_idle_spin }"
+              :disabled="!store.state.config.floating_ball_enabled"
+              @click="onToggleFloatingBallIdleSpin"
             >
               <span class="toggle-knob"></span>
             </button>

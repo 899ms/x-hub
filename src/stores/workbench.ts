@@ -124,6 +124,7 @@ const state = reactive<StoreState>({
     ],
     floating_ball_x: null,
     floating_ball_y: null,
+    floating_ball_idle_spin: false,
   },
   systemInfo: null,
   online: false,
@@ -867,6 +868,7 @@ export function useStore() {
       state.config.floating_ball_auto_hide,
       state.config.floating_ball_with_main,
       state.config.floating_ball_buttons,
+      state.config.floating_ball_idle_spin,
     )
   }
 
@@ -878,6 +880,7 @@ export function useStore() {
       value,
       state.config.floating_ball_with_main,
       state.config.floating_ball_buttons,
+      state.config.floating_ball_idle_spin,
     )
   }
 
@@ -889,6 +892,7 @@ export function useStore() {
       state.config.floating_ball_auto_hide,
       value,
       state.config.floating_ball_buttons,
+      state.config.floating_ball_idle_spin,
     )
   }
 
@@ -901,6 +905,19 @@ export function useStore() {
       state.config.floating_ball_auto_hide,
       state.config.floating_ball_with_main,
       state.config.floating_ball_buttons,
+      state.config.floating_ball_idle_spin,
+    )
+  }
+
+  async function setFloatingBallIdleSpin(value: boolean) {
+    state.config.floating_ball_idle_spin = value
+    if (!isTauri()) return
+    await tauriApi.floatingBallSaveSettings(
+      state.config.floating_ball_enabled,
+      state.config.floating_ball_auto_hide,
+      state.config.floating_ball_with_main,
+      state.config.floating_ball_buttons,
+      value,
     )
   }
 
@@ -1154,6 +1171,7 @@ export function useStore() {
     setFloatingBallAutoHide,
     setFloatingBallWithMain,
     setFloatingBallButtons,
+    setFloatingBallIdleSpin,
     setClipboardShortcut,
     setClipboardPaused,
     setClipboardRetention,
