@@ -1,37 +1,27 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { ref } from 'vue'
 import { Cpu, MemoryStick } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
+import { useAdaptivePolling } from '../composables/useAdaptivePolling'
 
 // 标题可由工作台自定义布局覆盖：title = 自定义文案，hideTitle = 关闭标题行
 defineProps<{ title?: string; hideTitle?: boolean }>()
 
 const store = useStore()
 
-const POLL_INTERVAL = 2000
-let timer: ReturnType<typeof setInterval> | null = null
+// 卡片根元素：滚出工作台视口时暂停采样
+const cardRef = ref<HTMLElement | null>(null)
 
-// 主窗隐藏（收进托盘）时 WebView2 因 --disable-background-timer-throttling 不节流
-// 定时器：不暂停的话每 2s 的 IPC + sysinfo 采样在后台空烧。visibilitychange 暂停/恢复
-function startPolling() {
-  if (timer) return
-  void poll()
-  timer = setInterval(poll, POLL_INTERVAL)
-}
-function stopPolling() {
-  if (timer) clearInterval(timer)
-  timer = null
-}
-function onVisibility() {
-  if (document.hidden) stopPolling()
-  else startPolling()
-}
+// 自适应采样：可见且聚焦 2s、失焦 5s、隐藏/滚出视口停；从停止恢复立即补采。
+// 隐藏即停的原因：收进托盘后 WebView2 若无节流（现由浏览器兜底钳到 ≥1s），
+// 每 2s 的 IPC + sysinfo 采样在后台空烧。visibilitychange/焦点/视口由 composable 统一处理
+useAdaptivePolling(() => store.refreshSystemInfo(), {
+  activeMs: 2000,
+  idleMs: 5000,
+  viewport: cardRef,
+})
 
 const info = () => store.state.systemInfo
-
-async function poll() {
-  await store.refreshSystemInfo()
-}
 
 const cpuPct = () => Math.round(info()?.cpuUsage ?? 0)
 const memPct = () => Math.round(info()?.memPercent ?? 0)
@@ -40,20 +30,10 @@ const memLabel = () => {
   if (!i) return '—'
   return `${(i.memUsedMb / 1024).toFixed(1)} / ${(i.memTotalMb / 1024).toFixed(1)} GB`
 }
-
-onMounted(() => {
-  document.addEventListener('visibilitychange', onVisibility)
-  if (!document.hidden) startPolling()
-})
-
-onUnmounted(() => {
-  document.removeEventListener('visibilitychange', onVisibility)
-  stopPolling()
-})
 </script>
 
 <template>
-  <section class="card sys-monitor" :aria-label="title ?? '系统资源'">
+  <section ref="cardRef" class="card sys-monitor" :aria-label="title ?? '系统资源'">
     <header v-if="!hideTitle" class="sm-header">
       <h3 class="sm-title">
         <Cpu :size="14" :stroke-width="2" aria-hidden="true" />

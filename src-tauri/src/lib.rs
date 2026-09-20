@@ -40,10 +40,13 @@ mod xhub_api;
 
 /// WebView2 附加浏览器参数（主窗/倒计时浮窗/便签浮窗必须完全一致，
 /// 同一 user data folder 下不同参数的环境创建会失败）。
-/// 保留 wry 默认的 --disable-features 前缀 + 唯一有官方背书的
-/// --disable-background-timer-throttling（禁用后台定时器节流，见 WebView2 浏览器标志文档）。
+/// 保留 wry 默认的 --disable-features 前缀；曾带 --disable-background-timer-throttling
+/// （禁用后台定时器节流），已摘除：隐藏窗口里的 JS 定时器交还浏览器自动节流
+/// （钳到 ≥1s、长期隐藏降到每分钟 1 次）兜底，重量级轮询由 useAdaptivePolling
+/// 按可见性/聚焦自行门控。到点类「正事」（倒计时/待办提醒）在 Rust 原生线程，
+/// 不受此参数影响。
 pub const ADDITIONAL_BROWSER_ARGS: &str =
-    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-timer-throttling";
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 
 use commands::DbState;
 use rusqlite::Connection;

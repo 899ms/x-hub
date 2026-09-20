@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
 import { MoreHorizontal, FolderCog, FolderOpen, PackageOpen, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
@@ -15,6 +15,7 @@ import {
 } from '../api/tauri'
 import { accentOf, iconSrc } from '../composables/useResourceIcon'
 import { loadExtensionModules } from '../composables/useDashboardLayout'
+import { useAdaptivePolling } from '../composables/useAdaptivePolling'
 import ExtensionSettingsDialog from './ExtensionSettingsDialog.vue'
 import MarketDetailDialog from './MarketDetailDialog.vue'
 import ExtensionPublishDialog from './ExtensionPublishDialog.vue'
@@ -182,21 +183,11 @@ onMounted(() => {
   void loadMarket()
   // 「我的扩展」标签页的目录清单（列表真源；发布入口是否出现也看它）
   void loadDevMode()
-  // 运行时热更新：轮询扩展目录内容戳，变化（新装/卸载/改 manifest）即刷新列表，无需重启
-  stampTimer = window.setInterval(() => void pollStamp(), 5000)
-})
-
-onBeforeUnmount(() => {
-  if (stampTimer !== null) window.clearInterval(stampTimer)
 })
 
 /** 扩展目录内容戳：首次记录基准，之后变化则刷新列表 */
 let stamp = 0
-let stampTimer: number | null = null
 async function pollStamp() {
-  // 主窗隐藏（收进托盘）时 WebView2 不节流定时器，目录扫描在后台空烧——跳过本跳，
-  // 重新可见后下一轮即恢复（扩展文件只会在用户操作时变化，隐藏期间无新装/卸载）
-  if (document.hidden) return
   if (!isTauri()) return
   try {
     const s = await tauriApi.extensionsStamp()
@@ -208,6 +199,11 @@ async function pollStamp() {
     /* 忽略轮询失败 */
   }
 }
+
+// 运行时热更新：轮询扩展目录内容戳，变化（新装/卸载/改 manifest）即刷新列表，无需重启。
+// 目录扫描是重量级 FS + IPC：可见且聚焦 5s，失焦/隐藏完全停——扩展文件只会在用户
+// 于本窗口操作时变化，失焦期间不可能变；从停止恢复时立即补扫一次（useAdaptivePolling）。
+useAdaptivePolling(pollStamp, { activeMs: 5000 })
 
 function onInstall() {
   switchTab('market')

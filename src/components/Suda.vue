@@ -16,6 +16,7 @@ import { CATEGORIES, categorize } from '../utils/categories'
 import { useStore } from '../stores/workbench'
 import { reportClientError } from '../utils/error-report'
 import { accentOf, fileAccentOf, iconSrc, useResourceIcon } from '../composables/useResourceIcon'
+import { useAdaptivePolling } from '../composables/useAdaptivePolling'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import SudaFormDialog from './SudaFormDialog.vue'
 import SudaScanDialog from './SudaScanDialog.vue'
@@ -26,7 +27,6 @@ const showToast = inject<(msg: string, action?: { label: string; onClick: () => 
   () => {},
 )
 const rootRef = ref<HTMLElement | null>(null)
-void rootRef
 const hasOverlayModal = computed(() => formVisible.value || menu.value.visible || scanVisible.value)
 const { onIconError, showImageIcon, showWebFallbackIcon, iconText, fileIconOf } =
   useResourceIcon()
@@ -77,10 +77,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenDrop?.()
-  if (runningTimer) {
-    clearInterval(runningTimer)
-    runningTimer = null
-  }
 })
 
 // ---- 拖拽去重：目标路径与现有资源一致即视为重复（统一分隔符/大小写后比较） ----
@@ -134,12 +130,13 @@ async function handleDrop(file: string) {
   }
 }
 
-// ---- 运行状态检测：每 5s 轮询进程名集合，应用已启动时名称左侧显示小绿点 ----
-// 进程枚举是重量级操作（sysinfo 全量快照，单次几十毫秒），3s 太密，放宽到 5s；
-// 页面不可见（切走视图时组件卸载，interval 由 onBeforeUnmount 清理）不空转
+// ---- 运行状态检测：轮询进程名集合，应用已启动时名称左侧显示小绿点 ----
+// 进程枚举是重量级操作（sysinfo 全量快照，单次几十毫秒）：可见且聚焦 5s、
+// 失焦/滚出视口 15s 慢速档、隐藏完全停（收托盘后无意义且空烧发热），
+// 从停止恢复时立即补采一轮。门控统一走 useAdaptivePolling。
 const runningNames = ref<Set<string>>(new Set())
-let runningTimer: ReturnType<typeof setInterval> | null = null
-const RUNNING_POLL_MS = 5000
+const RUNNING_ACTIVE_MS = 5000
+const RUNNING_IDLE_MS = 15000
 
 function isRunning(r: Resource): boolean {
   if (r.kind !== 'app' || !r.target) return false
@@ -157,15 +154,10 @@ async function refreshRunning() {
   }
 }
 
-onMounted(() => {
-  if (!isTauri()) return
-  void refreshRunning()
-  // 主窗隐藏（收进托盘）时 WebView2 不节流定时器：进程枚举是重量级操作（sysinfo
-  // 全量快照），后台空烧白白发热——隐藏时跳过本跳，窗口重新可见后自动恢复采样
-  runningTimer = setInterval(() => {
-    if (document.hidden) return
-    void refreshRunning()
-  }, RUNNING_POLL_MS)
+useAdaptivePolling(refreshRunning, {
+  activeMs: RUNNING_ACTIVE_MS,
+  idleMs: RUNNING_IDLE_MS,
+  viewport: rootRef,
 })
 
 // ---- 分类筛选 ----
