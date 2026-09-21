@@ -363,58 +363,59 @@ function onVirtualDown(e: PointerEvent) {
 
 <template>
   <section ref="rootRef" class="todo-view">
-    <header class="tv-head">
-      <div class="tv-title">
-        <ListTodo :size="16" :stroke-width="2" />
-        <h2>待办</h2>
-      </div>
-      <span class="tv-spacer"></span>
-      <div class="tv-tags">
-        <button
-          v-for="tag in allTags"
-          :key="tag.id"
-          type="button"
-          class="tv-tagchip"
-          :class="{ on: tagFilter.includes(tag.id) }"
-          @click="toggleTagFilter(tag.id)"
-        >
-          <i class="dot" :style="{ background: tag.color || 'var(--brand-500)' }"></i>{{ tag.name }}
-          <span class="x" title="删除该标签" @click.stop="removeTag(tag.id)"><X :size="10" :stroke-width="2.5" /></span>
-        </button>
-      </div>
-      <button type="button" class="tv-primary" @click="openNew()">
-        <Plus :size="14" :stroke-width="2.2" />新建待办
-      </button>
-    </header>
-
-    <!-- 双维工具栏：范围（筛选）× 展示形态（列表/日历） -->
-    <div class="tv-toolbar">
-      <div class="tv-seg">
-        <button
-          v-for="h in HORIZONS"
-          :key="h.key"
-          type="button"
-          :class="{ on: horizon === h.key }"
-          @click="horizon = h.key"
-        >
-          {{ h.label }}
-        </button>
-      </div>
-      <span class="tv-spacer"></span>
-      <button type="button" class="tv-ghost" :class="{ on: showDone }" @click="showDone = !showDone">
-        {{ showDone ? '看未完成' : '看已完成' }}
-      </button>
-      <div v-if="narrow" class="tv-seg">
-        <button type="button" :class="{ on: mode === 'list' }" @click="mode = 'list'">列表</button>
-        <button type="button" :class="{ on: mode === 'calendar' }" @click="mode = 'calendar'">日历</button>
-      </div>
-    </div>
-
     <div class="tv-body" :class="{ narrow }">
-      <!-- 列表 -->
-      <div v-show="!narrow || mode === 'list'" class="tv-list">
-        <p v-if="!groups.length" class="tv-empty">这个范围里没有待办</p>
-        <div v-for="g in groups" :key="g.label" class="tv-group">
+      <!-- 列表卡：视图头 + 双维工具栏 + 列表（与速记视图一致，内容全部落在卡片里） -->
+      <section v-show="!narrow || mode === 'list'" class="card tv-list">
+        <header class="tv-head">
+          <div class="tv-title">
+            <ListTodo :size="16" :stroke-width="2" />
+            <h2>待办</h2>
+          </div>
+          <span class="tv-spacer"></span>
+          <div class="tv-tags">
+            <button
+              v-for="tag in allTags"
+              :key="tag.id"
+              type="button"
+              class="tv-tagchip"
+              :class="{ on: tagFilter.includes(tag.id) }"
+              @click="toggleTagFilter(tag.id)"
+            >
+              <i class="dot" :style="{ background: tag.color || 'var(--brand-500)' }"></i>{{ tag.name }}
+              <span class="x" title="删除该标签" @click.stop="removeTag(tag.id)"><X :size="10" :stroke-width="2.5" /></span>
+            </button>
+          </div>
+          <button type="button" class="tv-primary" @click="openNew()">
+            <Plus :size="14" :stroke-width="2.2" />新建待办
+          </button>
+        </header>
+
+        <!-- 双维工具栏：范围（筛选）× 展示形态（列表/日历） -->
+        <div class="tv-toolbar">
+          <div class="tv-seg">
+            <button
+              v-for="h in HORIZONS"
+              :key="h.key"
+              type="button"
+              :class="{ on: horizon === h.key }"
+              @click="horizon = h.key"
+            >
+              {{ h.label }}
+            </button>
+          </div>
+          <span class="tv-spacer"></span>
+          <button type="button" class="tv-ghost" :class="{ on: showDone }" @click="showDone = !showDone">
+            {{ showDone ? '看未完成' : '看已完成' }}
+          </button>
+          <div v-if="narrow" class="tv-seg">
+            <button type="button" :class="{ on: mode === 'list' }" @click="mode = 'list'">列表</button>
+            <button type="button" :class="{ on: mode === 'calendar' }" @click="mode = 'calendar'">日历</button>
+          </div>
+        </div>
+
+        <div class="tv-scroll">
+          <p v-if="!groups.length" class="tv-empty">这个范围里没有待办</p>
+          <div v-for="g in groups" :key="g.label" class="tv-group">
           <div class="tv-group-h" :class="{ pinned: g.label === '置顶', overdue: g.label === '逾期' }">
             <span>{{ g.label }}</span>
             <span class="cnt">{{ g.items.length }}</span>
@@ -486,10 +487,11 @@ function onVirtualDown(e: PointerEvent) {
             </div>
           </div>
         </div>
-      </div>
+        </div>
+      </section>
 
-      <!-- 日历 -->
-      <div v-show="!narrow || mode === 'calendar'" class="tv-cal">
+      <!-- 日历卡 -->
+      <section v-show="!narrow || mode === 'calendar'" class="card tv-cal">
         <div class="tv-cal-h">
           <button type="button" class="tv-icon" aria-label="上一页" @click="shift(-1)">
             <ChevronLeft :size="14" :stroke-width="2" />
@@ -586,7 +588,7 @@ function onVirtualDown(e: PointerEvent) {
             </div>
           </div>
         </div>
-      </div>
+      </section>
     </div>
 
     <TodoEditDialog
@@ -615,8 +617,8 @@ function onVirtualDown(e: PointerEvent) {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 18px 16px;
+  /* 与速记视图（.view-notes）同一套外边距，卡片贴齐内容区 */
+  padding: 0 20px 20px 0;
   overflow: hidden;
 }
 .tv-head {
@@ -736,19 +738,27 @@ function onVirtualDown(e: PointerEvent) {
 .tv-body.narrow {
   flex-direction: column;
 }
+/* 卡片布局：两张卡（列表 / 日历）与速记视图一致，内容全部落在卡片里。
+   .card 提供毛玻璃底/描边/圆角/阴影，这里只负责内部排版与滚动。 */
 .tv-list,
 .tv-cal {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
   overflow: auto;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-  background: var(--bg-card-soft);
-  padding: 10px 12px;
 }
 .tv-body:not(.narrow) .tv-list {
   flex: 0 0 40%;
+}
+/* 列表内容区：头部与工具栏固定，只有分组列表滚动 */
+.tv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 .tv-empty {
   margin: 12px 0;
