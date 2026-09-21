@@ -5,6 +5,7 @@ import { useStore } from '../stores/workbench'
 import type { RepeatEndMode, RepeatMode, RepeatUnit, Todo } from '../api/tauri'
 import { addDays, nextMonday, repeatEndLabel, repeatLabel } from '../utils/todoSchedule'
 import TodoDateTimeField from './TodoDateTimeField.vue'
+import AppSelect, { type AppSelectOption } from './AppSelect.vue'
 
 /**
  * 待办编辑弹层：标题 / 描述（轻量 Markdown）/ 标签 / 置顶 / 周期 / 截止与提醒。
@@ -52,6 +53,36 @@ const PRESET_MODES: Array<{ mode: RepeatMode; label: string }> = [
   { mode: 'monthly', label: '每月' },
   { mode: 'yearly', label: '每年' },
   { mode: 'custom', label: '自定义…' },
+]
+
+// 下拉一律用系统通用组件 AppSelect（见 DESIGN.md §5「下拉」），不用原生 <select>：
+// 原生下拉的展开列表由系统绘制，配色/圆角/字号都不受主题控制。
+const REPEAT_UNIT_OPTIONS: AppSelectOption[] = [
+  { value: 'day', label: '天' },
+  { value: 'week', label: '周' },
+  { value: 'month', label: '个月' },
+  { value: 'year', label: '年' },
+]
+const MONTH_NTH_MODE_OPTIONS: AppSelectOption[] = [
+  { value: 'day', label: '每月第几天' },
+  { value: 'nth', label: '每月第几个星期几' },
+]
+const MONTH_NTH_OPTIONS: AppSelectOption[] = [
+  { value: '1', label: '第 1 个' },
+  { value: '2', label: '第 2 个' },
+  { value: '3', label: '第 3 个' },
+  { value: '4', label: '第 4 个' },
+  { value: '5', label: '第 5 个' },
+  { value: '-1', label: '最后一个' },
+]
+const WEEKDAY_SELECT_OPTIONS: AppSelectOption[] = WEEKDAYS.map((w, i) => ({
+  value: String(i),
+  label: `星期${w}`,
+}))
+const END_MODE_OPTIONS: AppSelectOption[] = [
+  { value: 'never', label: '永不结束' },
+  { value: 'until', label: '到某日结束' },
+  { value: 'count', label: '共 N 次' },
 ]
 
 /** 默认截止：预设日期（新建）或 23:59 */
@@ -325,48 +356,57 @@ async function remove() {
           </div>
 
           <div v-if="repeatMode === 'custom'" class="te-row2">
-            <label class="te-inline">
+            <div class="te-inline">
               <span class="te-sub">每</span>
               <input v-model.number="repeatEvery" type="number" min="1" max="99" class="te-input te-num" />
-              <select v-model="repeatUnit" class="te-input">
-                <option value="day">天</option>
-                <option value="week">周</option>
-                <option value="month">个月</option>
-                <option value="year">年</option>
-              </select>
-            </label>
+              <AppSelect
+                class="te-input te-select"
+                :model-value="repeatUnit"
+                :options="REPEAT_UNIT_OPTIONS"
+                aria-label="重复单位"
+                @update:model-value="repeatUnit = $event as RepeatUnit"
+              />
+            </div>
           </div>
 
           <div v-if="repeatMode === 'monthly'" class="te-row2">
-            <select v-model="monthNthMode" class="te-input">
-              <option value="day">每月第几天</option>
-              <option value="nth">每月第几个星期几</option>
-            </select>
+            <AppSelect
+              class="te-input te-select"
+              :model-value="monthNthMode"
+              :options="MONTH_NTH_MODE_OPTIONS"
+              aria-label="每月方式"
+              @update:model-value="monthNthMode = $event as 'day' | 'nth'"
+            />
             <template v-if="monthNthMode === 'day'">
               <input v-model.number="monthDay" type="number" min="1" max="31" class="te-input te-num" />
               <span class="te-sub">日（超出当月天数时取当月最后一天）</span>
             </template>
             <template v-else>
-              <select v-model.number="monthNth" class="te-input">
-                <option :value="1">第 1 个</option>
-                <option :value="2">第 2 个</option>
-                <option :value="3">第 3 个</option>
-                <option :value="4">第 4 个</option>
-                <option :value="5">第 5 个</option>
-                <option :value="-1">最后一个</option>
-              </select>
-              <select v-model.number="monthNthWeekday" class="te-input">
-                <option v-for="(w, i) in WEEKDAYS" :key="w" :value="i">星期{{ w }}</option>
-              </select>
+              <AppSelect
+                class="te-input te-select"
+                :model-value="String(monthNth)"
+                :options="MONTH_NTH_OPTIONS"
+                aria-label="第几个星期几"
+                @update:model-value="monthNth = Number($event)"
+              />
+              <AppSelect
+                class="te-input te-select"
+                :model-value="String(monthNthWeekday)"
+                :options="WEEKDAY_SELECT_OPTIONS"
+                aria-label="星期几"
+                @update:model-value="monthNthWeekday = Number($event)"
+              />
             </template>
           </div>
 
           <div v-if="repeatMode !== 'once'" class="te-row2">
-            <select v-model="endMode" class="te-input">
-              <option value="never">永不结束</option>
-              <option value="until">到某日结束</option>
-              <option value="count">共 N 次</option>
-            </select>
+            <AppSelect
+              class="te-input te-select"
+              :model-value="endMode"
+              :options="END_MODE_OPTIONS"
+              aria-label="结束条件"
+              @update:model-value="endMode = $event as RepeatEndMode"
+            />
             <input v-if="endMode === 'count'" v-model.number="repeatCount" type="number" min="1" class="te-input te-num" />
           </div>
 
@@ -490,6 +530,14 @@ async function remove() {
 }
 .te-num {
   width: 70px;
+  flex: 0 0 auto;
+}
+/* AppSelect 触发器：贴合弹层输入框的紧凑档（覆盖其默认 38px 高度） */
+.te-select {
+  min-height: 0;
+  padding: 6px 9px;
+  font-size: 0.78rem;
+  width: auto;
   flex: 0 0 auto;
 }
 .te-chips {

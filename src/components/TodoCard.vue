@@ -6,6 +6,7 @@ import type { Todo } from '../api/tauri'
 import { parseTodoItems } from '../utils/todoParse'
 import { useTodoChildren } from '../composables/useTodoChildren'
 import TodoRow from './TodoRow.vue'
+import AppSelect from './AppSelect.vue'
 import {
   addDays,
   calendarGrid,
@@ -293,9 +294,16 @@ const remindMin = ref(0)
 
 const WEEK_LABELS = ['一', '二', '三', '四', '五', '六', '日'] as const
 const calCells = computed(() => calendarGrid(calCursor.value, new Date()))
-const selHourOptions = HOUR_OPTIONS
 const selMinOptions = computed(() => minuteOptions(selMin.value))
 const remindMinOptions = computed(() => minuteOptions(remindMin.value))
+// AppSelect 的值为字符串，时分选项在此转一次（下拉一律走系统组件，不用原生 <select>）
+const hourSelectOptions = HOUR_OPTIONS.map((h) => ({ value: String(h.value), label: h.label }))
+const selMinSelectOptions = computed(() =>
+  selMinOptions.value.map((m) => ({ value: String(m.value), label: m.label })),
+)
+const remindMinSelectOptions = computed(() =>
+  remindMinOptions.value.map((m) => ({ value: String(m.value), label: m.label })),
+)
 
 function openSchedule(t: Todo, anchor: HTMLElement) {
   const today = new Date()
@@ -593,17 +601,21 @@ watch(
           <div class="sp-time-row">
             <label>截止时间</label>
             <div class="sp-time-wrap">
-              <select v-model.number="selHour" class="sp-select" aria-label="截止小时">
-                <option v-for="h in selHourOptions" :key="h.value" :value="h.value">
-                  {{ h.label }}
-                </option>
-              </select>
+              <AppSelect
+                class="sp-select"
+                :model-value="String(selHour)"
+                :options="hourSelectOptions"
+                aria-label="截止小时"
+                @update:model-value="selHour = Number($event)"
+              />
               <span class="sp-colon">:</span>
-              <select v-model.number="selMin" class="sp-select" aria-label="截止分钟">
-                <option v-for="m in selMinOptions" :key="m.value" :value="m.value">
-                  {{ m.label }}
-                </option>
-              </select>
+              <AppSelect
+                class="sp-select"
+                :model-value="String(selMin)"
+                :options="selMinSelectOptions"
+                aria-label="截止分钟"
+                @update:model-value="selMin = Number($event)"
+              />
             </div>
           </div>
           <div class="sp-remind">
@@ -621,17 +633,21 @@ watch(
           <div v-if="remindOn" class="sp-remind">
             <div class="r-label">提醒时间</div>
             <div class="sp-time-wrap">
-              <select v-model.number="remindHour" class="sp-select" aria-label="提醒小时">
-                <option v-for="h in selHourOptions" :key="h.value" :value="h.value">
-                  {{ h.label }}
-                </option>
-              </select>
+              <AppSelect
+                class="sp-select"
+                :model-value="String(remindHour)"
+                :options="hourSelectOptions"
+                aria-label="提醒小时"
+                @update:model-value="remindHour = Number($event)"
+              />
               <span class="sp-colon">:</span>
-              <select v-model.number="remindMin" class="sp-select" aria-label="提醒分钟">
-                <option v-for="m in remindMinOptions" :key="m.value" :value="m.value">
-                  {{ m.label }}
-                </option>
-              </select>
+              <AppSelect
+                class="sp-select"
+                :model-value="String(remindMin)"
+                :options="remindMinSelectOptions"
+                aria-label="提醒分钟"
+                @update:model-value="remindMin = Number($event)"
+              />
             </div>
           </div>
           <div class="sp-actions">
@@ -998,19 +1014,22 @@ watch(
   align-items: center;
   gap: 4px;
 }
+/* 时分下拉：AppSelect（系统通用下拉组件）的紧凑档，覆盖其默认 38px 高度 */
 .sp-select {
   border: 1px solid var(--border-soft);
   background: var(--input-bg);
   color: var(--text-1);
   border-radius: 6px;
-  padding: 4px 6px;
+  min-height: 0;
+  padding: 3px 4px 3px 6px;
   font-size: 0.75em;
   outline: none;
-  width: 4em;
-  text-align: center;
+  width: 4.6em;
+  justify-content: center;
+  gap: 2px;
   font-family: inherit;
 }
-.sp-select:focus {
+.sp-select:focus-visible {
   border-color: var(--brand-500);
   box-shadow: var(--shadow-focus);
 }

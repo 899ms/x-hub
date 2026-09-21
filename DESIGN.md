@@ -177,6 +177,12 @@ x-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
 
 > 用量展示已移交 service 扩展 `com.x-hub.token-stats`（宿主侧 TokenStatsCard / UsageView 已移除，见 AGENTS.md 约定 17）。
 
+### 表单控件（下拉 / 日期时间）
+
+- **下拉一律用 `AppSelect`，禁止原生 `<select>`**：原生下拉的展开列表由系统绘制，配色、圆角、字号、hover 全都不受主题令牌控制，与卡片/弹窗的玻璃质感冲突；`AppSelect` 是无头封装 + 令牌自绘，关闭态与展开态都在主题内。需要紧凑档时由使用方覆盖触发器样式（如 `TodoCard.vue` 的 `.sp-select`、`TodoEditDialog.vue` 的 `.te-select`）。
+- **日期/时间一律用应用内控件，禁止原生 `<input type="date" | "datetime-local">`**：原生日期选择器弹出的是浏览器/系统日历。统一用 Reka UI 的 `DatePicker` + `TimeField`（见 §8），封装组件为 `TodoDateTimeField.vue`（待办截止/提醒/周期结束日期）与 `CountdownCard.vue`（倒计时定时）。
+- **多选/单选组**用胶囊 chip（`.te-chip` / `.tv-tagchip` 一类），不用原生 `<input type="checkbox">` 平铺。
+
 ### 弹窗 / 浮层
 
 - 统一 `modal-card`：`--bg-card-solid` + 遮罩 `--scrim`（暗色下保证对比度）+ `--shadow-dock`。
@@ -205,7 +211,7 @@ x-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
 
 ## 8. Reka UI 组件规范（v0.1.13 起）
 
-> 详细文档见 `docs/reka-ui.md`。Reka UI 为无头组件库（不提供样式），外观一律用项目设计令牌自绘。当前仅用于复杂输入组件（`CountdownCard.vue`）：`DatePicker`（定时日期）、`TimeField`（定时/每天时:分）、`NumberField`（时长/间隔步进）。
+> 详细文档见 `docs/reka-ui.md`。Reka UI 为无头组件库（不提供样式），外观一律用项目设计令牌自绘。当前用于复杂输入组件：`CountdownCard.vue`（`DatePicker` 定时日期、`TimeField` 定时/每天时:分、`NumberField` 时长/间隔步进）、`TodoDateTimeField.vue`（待办截止/提醒/周期结束日期）。
 
 ### 8.1 Portal 弹层：容器样式必须 `:global()`
 
@@ -243,4 +249,5 @@ x-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
 | 层 | z-index |
 |---|---|
 | `modal-mask`（遮罩） | 100 |
-| 日历弹层 `.cc-calendar-content` | 110 |
+| 日历弹层 `.cc-calendar-content`（倒计时卡） | 110 |
+| 日历弹层 `.tdt-calendar-content`（待办弹层内，需高于 modal） | 130 |
