@@ -131,6 +131,19 @@ pub struct ModuleVariant {
     pub ideal_h: u32,
 }
 
+/// 工作台模块选项（manifest.moduleOptions，可选；仅对 module 形态有效）。
+///
+/// `default_hide_title` = 作者显式声明「这张卡默认要不要宿主表头」。扩展 module 卡片默认**没有**表头
+/// （卡面完全由扩展自己画）；作者想让宿主渲染与内置模块一致的表头（品牌色图标 + manifest.name），
+/// 就写 `"moduleOptions": { "defaultHideTitle": false }`。用户在布局编辑器里用「Aa」可按卡片覆盖，
+/// 用户显式设置优先于这里。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModuleOptions {
+    /// None = 未声明（默认不显示表头）；Some(false) = 默认显示；Some(true) = 默认不显示
+    #[serde(default, rename = "defaultHideTitle")]
+    pub default_hide_title: Option<bool>,
+}
+
 /// 扩展 manifest（manifest.json），对齐 spec §4。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
@@ -187,6 +200,9 @@ pub struct ExtensionManifest {
     /// 工作台模块形态声明（manifest 字段为 moduleVariants；module 形态可选多形态）
     #[serde(default, rename = "moduleVariants")]
     pub module_variants: Vec<ModuleVariant>,
+    /// 工作台模块选项（manifest 字段为 moduleOptions；module 形态可选）
+    #[serde(default, rename = "moduleOptions")]
+    pub module_options: ModuleOptions,
 }
 
 fn default_kind() -> String {
@@ -236,6 +252,8 @@ pub struct ExtensionEntry {
     pub actions: Vec<ExtensionAction>,
     /// 工作台模块形态声明（module 形态多形态注册；空 = 单个默认形态）
     pub module_variants: Vec<ModuleVariant>,
+    /// 工作台模块选项（manifest.moduleOptions 原样透传；module 卡片表头默认显隐用）
+    pub module_options: ModuleOptions,
 }
 
 fn runtime_str(r: &ExtensionRuntime) -> &'static str {
@@ -370,6 +388,7 @@ fn load_extension(dir: &Path, source: &str) -> ExtensionEntry {
         expose: Vec::new(),
         actions: Vec::new(),
         module_variants: Vec::new(),
+        module_options: ModuleOptions::default(),
     };
 
     let manifest = match read_manifest(dir) {
@@ -420,6 +439,7 @@ fn load_extension(dir: &Path, source: &str) -> ExtensionEntry {
         expose: manifest.expose,
         actions: manifest.actions,
         module_variants: manifest.module_variants,
+        module_options: manifest.module_options,
     }
 }
 
@@ -1412,6 +1432,31 @@ mod tests {
         assert_eq!(manifest.kind, "view");
         // 未声明 moduleVariants → 空
         assert!(manifest.module_variants.is_empty());
+        // 未声明 moduleOptions → None（扩展卡默认不显示宿主表头）
+        assert_eq!(manifest.module_options.default_hide_title, None);
+    }
+
+    #[test]
+    fn parses_module_options_default_hide_title() {
+        let dir = tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            "com.x-hub.clock-mini",
+            serde_json::json!({
+                "id": "com.x-hub.clock-mini",
+                "name": "迷你时钟",
+                "version": "0.1.0",
+                "kind": "module",
+                "surfaces": ["module"],
+                "entry": { "module": "./module/index.html" },
+                "moduleOptions": { "defaultHideTitle": false }
+            }),
+        );
+
+        let entry = load_extension(&dir.path().join("com.x-hub.clock-mini"), SOURCE_INSTALLED);
+        assert!(!entry.invalid);
+        // 写了 false = 作者要宿主默认显示表头
+        assert_eq!(entry.module_options.default_hide_title, Some(false));
     }
 
     #[test]

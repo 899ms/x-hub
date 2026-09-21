@@ -316,6 +316,18 @@ export interface ExtensionEntry {
   actions: { id: string; title: string; surface: string }[]
   /** 工作台模块形态声明（manifest.moduleVariants；module 形态多形态注册，空 = 单个默认形态） */
   module_variants: ExtensionModuleVariant[]
+  /** 工作台模块选项（manifest.moduleOptions；module 卡片表头默认显隐） */
+  module_options: ExtensionModuleOptions
+}
+
+/** 工作台模块选项（后端 extension.rs::ModuleOptions） */
+export interface ExtensionModuleOptions {
+  /**
+   * 作者对 module 卡片宿主表头的声明：
+   * `null`/缺省 = 未声明（默认不显示表头）；`false` = 默认显示；`true` = 默认不显示。
+   * 用户仍可在布局编辑器里按卡片覆盖。
+   */
+  default_hide_title: boolean | null
 }
 
 /** 「我的扩展」状态（后端 extension.rs::DevModeStatus） */

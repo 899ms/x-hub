@@ -50,4 +50,14 @@ window.xhub.events.on('xhub:variant-changed', (variant) => render(variant))
 
 module 入口默认按**多形态自适应**写：尺寸跟随当前格子（cq 单位或 `container-type`），形态决定内容密度/结构。
 
+⚠️ **视口 = 卡片内容区（减去宿主表头，如果有的话），而且可能非常矮**：宿主保证 iframe 高度严格等于内容区高度（0.6.3 上曾有宿主 bug 让它恒为浏览器默认的 150px、矮卡底部被裁，已修）。**扩展卡默认没有宿主表头**；只有作者写了 `moduleOptions.defaultHideTitle: false` 时，卡顶才会多一行约 30px 的表头（用户在编辑器里也能按卡片开关）。工作台卡片高度由网格决定（行高下限 36px），4×2 的小格子在小窗口下内容区可能只有 ~86px，**有表头还要再减**。入口**不要**假设「至少 150px 高」，也别写死 `min-height`；用 `height: 100%` + `box-sizing: border-box` + `cqh`/`clamp()` 排版，溢出交给 `overflow: hidden/auto` 兜底。
+
+### module 卡片的留白（边距）
+
+**宿主不给 iframe 加内边距**——卡片内容区就是 iframe 视口，四周留白完全由扩展自己写。约定：
+
+- `body { padding: 12px; box-sizing: border-box }`（模板的写法）。12px 与内置模块卡一致，放一起才齐；`box-sizing: border-box` 必写，否则 `padding + height: 100%` 会撑出滚动条。
+- 有表头时表头自带 12px 上留白，iframe 从表头**下方**开始——所以**不要再额外加顶部留白**去「避开表头」。
+- 格子矮的时候优先用 `clamp()` / `cqh` 缩字号与间距，而不是把留白删到 0（删到 0 在正常格子里会贴边）。
+
 预览环境用 `?xhub-variant=<id>` 调试，`__xhubPreview.setVariant(id)` 模拟切换。

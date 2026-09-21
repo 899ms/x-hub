@@ -43,6 +43,8 @@ export interface DashModuleDef {
   title: string
   defaultVariant: string
   variants: DashVariantDef[]
+  /** 作者声明的表头默认显隐（仅扩展 module 有，加载时已解析为布尔：未声明 = true；内置模块恒为 false/显示） */
+  defaultHideTitle?: boolean
 }
 
 export interface DashPlacement {
@@ -187,6 +189,16 @@ export function dashPlacementTitle(p: DashPlacement): string {
   return p.title ?? dashModuleTitle(p.id)
 }
 
+/**
+ * 卡片是否隐藏表头：用户显式设置优先，其次扩展作者声明的默认（manifest.moduleOptions.defaultHideTitle）；
+ * 内置模块没有作者默认，恒为显示。三态语义：undefined = 跟随作者默认，true/false = 用户已明确表态。
+ * 扩展的 `defaultHideTitle` 在 loadExtensionModules 里已解析成布尔（未声明 = true = 默认不显示表头）。
+ */
+export function dashPlacementHideTitle(p: DashPlacement): boolean {
+  if (typeof p.hideTitle === 'boolean') return p.hideTitle
+  return dashModuleDef(p.id)?.defaultHideTitle === true
+}
+
 /** 取模块指定形态；未指定 / 不存在时回退 defaultVariant / 第一个形态 */
 export function dashVariantDef(id: string, variant?: string): DashVariantDef | undefined {
   const def = dashModuleDef(id)
@@ -266,7 +278,8 @@ function parsePlacements(raw: string): DashPlacement[] | null {
         // 标题：trim 后为空视为「用默认标题」；超长截断，避免手改 JSON 撑破卡片
         const title =
           typeof s.title === 'string' && s.title.trim() ? s.title.trim().slice(0, TITLE_MAX) : undefined
-        const hideTitle = s.hideTitle === true ? true : undefined
+        // 表头显隐三态：true/false = 用户明确设置；缺省 = 跟随扩展作者声明的默认
+        const hideTitle = typeof s.hideTitle === 'boolean' ? s.hideTitle : undefined
         // 用回退后的生效形态 id 归一：无效/过期 variant（JSON 手改、扩展升级改名）不透传
         return { id: s.id!, x, y, w, h, variant: vd.id, title, hideTitle }
       })
@@ -317,7 +330,8 @@ function persist() {
       }
       // 标题相关字段只在设置过时写入，老数据保持原样（少字段 = 默认标题 + 显示标题行）
       if (p.title) o.title = p.title
-      if (p.hideTitle) o.hideTitle = true
+      // 表头显隐三态都要落盘：false 也是用户表态（要覆盖扩展作者的 defaultHideTitle）
+      if (typeof p.hideTitle === 'boolean') o.hideTitle = p.hideTitle
       return o
     }),
   )
@@ -408,6 +422,8 @@ export async function loadExtensionModules() {
             title: e.name,
             defaultVariant: variants[0].id,
             variants,
+            // 作者声明宿主表头默认显隐：不写（null）= 默认不显示表头；写 false = 默认显示
+            defaultHideTitle: e.module_options?.default_hide_title !== false,
           }
         }),
     )
@@ -575,13 +591,17 @@ function setModuleVariant(id: string, variant: string): boolean {
   return true
 }
 
-/** 设置卡片标题：title 传空 = 用模块内置标题；hideTitle = 是否隐藏标题行 */
-function setModuleTitle(id: string, title?: string | null, hideTitle?: boolean): boolean {
+/**
+ * 设置卡片标题：title 传空 = 用模块内置标题；
+ * hideTitle = 显式 true/false 记为用户表态（会落盘，可覆盖扩展作者的默认），传 null = 清回「跟随作者默认」
+ */
+function setModuleTitle(id: string, title?: string | null, hideTitle?: boolean | null): boolean {
   const p = placements.value.find((q) => q.id === id)
   if (!p) return false
   const t = typeof title === 'string' ? title.trim().slice(0, TITLE_MAX) : ''
   p.title = t || undefined
-  if (typeof hideTitle === 'boolean') p.hideTitle = hideTitle || undefined
+  if (hideTitle === null) p.hideTitle = undefined
+  else if (typeof hideTitle === 'boolean') p.hideTitle = hideTitle
   persistIfIdle()
   return true
 }

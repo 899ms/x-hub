@@ -1788,6 +1788,7 @@ mod tests {
             description: String::new(),
             config: Map::new(),
             module_variants: vec![],
+            module_options: Default::default(),
         };
         assert!(declares(&manifest, "data:read"));
         assert!(!declares(&manifest, "data:write"));

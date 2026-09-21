@@ -25,6 +25,7 @@ import {
   PanelTopClose,
   Pin,
   Plus,
+  Puzzle,
   Quote,
   Repeat,
   Settings2,
@@ -155,10 +156,8 @@ function fileIconOf(r: Resource) {
 
 // ---- 模块分发 ----
 const stickySlot = computed(() => (props.modId === 'sticky2' ? 2 : 1))
-const isExt = computed(() => props.modId.startsWith('ext:'))
-const extName = computed(() =>
-  isExt.value ? props.modId.slice('ext:'.length) : dashModuleTitle(props.modId),
-)
+// 缩印里的模块名：一律取模块注册表标题（扩展 = manifest.name），不要用 ext: 后面的 id
+const extName = computed(() => dashModuleTitle(props.modId))
 const kind = computed(() => {
   const id = props.modId
   if (id.startsWith('ext:')) return 'ext'
@@ -495,7 +494,7 @@ const kind = computed(() => {
     <!-- ===== 扩展模块 / 未知模块：骨架示意 ===== -->
     <template v-else>
       <header class="hd hd-split" :class="{ 'hd-float': hideTitle }">
-        <h3 class="hd-title"><Boxes class="ic" /><span>{{ extName }}</span></h3>
+        <h3 v-if="!hideTitle" class="hd-title"><Puzzle class="ic" /><span>{{ title ?? extName }}</span></h3>
       </header>
       <div class="sk-lines">
         <i></i><i style="width: 74%"></i><i style="width: 52%"></i>

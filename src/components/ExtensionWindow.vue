@@ -66,6 +66,9 @@ void frameRef
 }
 .ew-frame {
   flex: 1;
+  /* 同 ExtensionView：替换元素的自动最小高度 = iframe 固有高度（150px），
+     窗口高度小于它时会被裁，显式 min-height: 0 才能收缩 */
+  min-height: 0;
   width: 100%;
   border: 0;
   background: transparent;

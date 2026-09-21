@@ -32,6 +32,8 @@
 - [ ] 所有颜色走 `var(--xhub-*, fallback)`，深浅色都看一遍；
 - [ ] 桥调用有 `try/catch`，被拒（`PERMISSION_DENIED`）时界面要说人话而不是白屏；
 - [ ] **页面底用 `var(--xhub-page-bg, transparent)`**（无壁纸=宿主页面背景，有壁纸=transparent），内容表面用 `var(--xhub-surface)`；`module` 卡片也透明；
+- [ ] 声明了 `module` 的话：入口在**最小格子**下也能排版——卡片 iframe 视口 = 内容区（开了宿主表头再减约 30px），最矮只有 ~86px（见 `pitfalls.md` 第 22 条）；
+- [ ] 声明了 `module` 的话：**没和宿主表头重复画标题**——扩展卡默认无表头、标题自己画；只有写了 `moduleOptions.defaultHideTitle: false` 才有宿主表头（此时卡名 = `manifest.name`，别再自己画，见第 23 条）；
 - [ ] 壁纸透底态（`data-xhub-wallpaper-clear="1"`）去掉白描边、文字加黑柔光晕。
 
 ## 平台关卡会查什么（发布前逐条自查）

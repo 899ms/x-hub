@@ -25,7 +25,13 @@ import type { Component } from 'vue'
 import { useTheme } from '../composables/useTheme'
 import { broadcastThemeToFrames } from '../composables/themeTokens'
 import { iconSrc } from '../composables/useResourceIcon'
-import { dashVariantDef, useDashboardLayout, type DashPlacement } from '../composables/useDashboardLayout'
+import {
+  dashPlacementHideTitle,
+  dashPlacementTitle,
+  dashVariantDef,
+  useDashboardLayout,
+  type DashPlacement,
+} from '../composables/useDashboardLayout'
 import SettingsSkeleton from '../components/SettingsSkeleton.vue'
 
 // 大体量/低频视图异步分包按需加载，缩小首屏主 chunk
@@ -287,6 +293,10 @@ function dashCardProps(p: DashPlacement): Record<string, unknown> {
       surface: 'module',
       variant: p.variant ?? dashVariantDef(id)?.id ?? null,
       onOpenSurface: (surface: string) => openExtensionSurface(extId, surface),
+      // 扩展 module 卡片也有宿主表头（标题 = 自定义标题 ?? manifest.name），与内置模块一致
+      ...titleProps(p),
+      // 扩展卡没有内置文案兜底，标题给宿主侧解析后的值
+      title: dashPlacementTitle(p),
     }
   }
   switch (id) {
@@ -320,7 +330,7 @@ function dashCardProps(p: DashPlacement): Record<string, unknown> {
 
 /** 卡片标题相关 props：title = 自定义标题（缺省由卡片回退内置文案），hideTitle = 关闭标题行 */
 function titleProps(p: DashPlacement): { title?: string; hideTitle: boolean } {
-  return { title: p.title, hideTitle: p.hideTitle === true }
+  return { title: p.title, hideTitle: dashPlacementHideTitle(p) }
 }
 
 // 主界面行高按「总行数均分可用高度」自适应（1fr），窗口缩放/分辨率变化只改每格像素值、

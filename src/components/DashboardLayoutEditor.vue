@@ -9,6 +9,7 @@ import {
   dashModuleDef,
   dashModuleTitle,
   dashModuleVariants,
+  dashPlacementHideTitle,
   dashPlacementTitle,
   dashVariantDef,
   findFreeSpot,
@@ -362,16 +363,16 @@ const titlePop = ref<DashPlacement | null>(null)
 const titleDraft = ref('')
 const titleHideDraft = ref(false)
 
-/** 只有卡片自带表头的模块才谈得上改标题：扩展模块是 iframe 铺满、时钟/天气是纯内容卡 */
+/** 只有卡片自带表头的模块才谈得上改标题：时钟/天气是纯内容卡（扩展 module 也有宿主表头，可改） */
 function canTitle(id: string): boolean {
-  return !id.startsWith('ext:') && id !== 'clock' && id !== 'weather'
+  return id !== 'clock' && id !== 'weather'
 }
 
 async function openTitlePop(p: DashPlacement, e: PointerEvent) {
   closeVariantPop()
   titlePop.value = p
   titleDraft.value = p.title ?? ''
-  titleHideDraft.value = p.hideTitle === true
+  titleHideDraft.value = dashPlacementHideTitle(p)
   popStyle.value = { left: '0px', top: '0px' }
   await positionPop(e, '.le-tpop', 260, 180)
 }
@@ -386,11 +387,12 @@ function applyTitle() {
   layout.setModuleTitle(titlePop.value.id, titleDraft.value, titleHideDraft.value)
 }
 
+/** 恢复默认：清空自定义标题，表头显隐回到「跟随作者默认」（扩展卡才有作者默认；内置卡 = 显示） */
 function resetTitle() {
   if (!titlePop.value) return
   titleDraft.value = ''
-  titleHideDraft.value = false
-  applyTitle()
+  layout.setModuleTitle(titlePop.value.id, '', null)
+  titleHideDraft.value = dashPlacementHideTitle(titlePop.value)
 }
 
 function fitsMin(p: DashPlacement, vd: DashVariantDef): boolean {
@@ -541,7 +543,7 @@ function previewComponent(id: string) {
                 :mod-id="p.id"
                 :variant="p.variant"
                 :title="p.title"
-                :hide-title="p.hideTitle === true"
+                :hide-title="dashPlacementHideTitle(p)"
               />
             </div>
 
@@ -559,7 +561,7 @@ function previewComponent(id: string) {
                 v-if="canTitle(p.id)"
                 type="button"
                 class="le-cell-btn"
-                :class="{ on: p.hideTitle }"
+                :class="{ on: dashPlacementHideTitle(p) }"
                 data-title-btn
                 :title="`设置${dashModuleTitle(p.id)}标题`"
                 :aria-label="`设置${dashModuleTitle(p.id)}标题`"

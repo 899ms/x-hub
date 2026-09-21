@@ -23,7 +23,10 @@
       --well: var(--xhub-bg-card, rgba(255, 255, 255, 0.04));
     }
 
-    /* module 卡片：宿主已套玻璃卡，扩展页面保持透明，只做排版 */
+    /* module 卡片：宿主已套玻璃卡；**默认没有宿主表头**，卡面完全由本页负责（包括要不要画标题）。
+       想让宿主画一行「品牌色图标 + manifest.name」，在 manifest 声明
+       "moduleOptions": { "defaultHideTitle": false }，此时不要再画一遍同名标题。
+       12px 内边距与内置模块卡一致；留白全由本页负责，宿主不给 iframe 加 padding。 */
     html, body { height: 100%; }
     body {
       margin: 0;
