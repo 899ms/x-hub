@@ -476,10 +476,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   gap: 8px;
   align-items: center;
 }
-.scheme-select {
+/* AppSelect 根是 fragment，父级 scoped class 落不到触发器上，用 :deep() 穿透（DESIGN.md §5）。
+   高度不覆盖：AppSelect 默认 min-height 38px 与本行输入框同高。 */
+.web-input-row :deep(.scheme-select) {
   flex-shrink: 0;
   width: 92px;
-  height: 38px;
 }
 .web-target-wrap {
   flex: 1;

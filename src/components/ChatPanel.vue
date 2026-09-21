@@ -951,16 +951,18 @@ defineExpose({
   max-width: 320px;
   min-width: 0;
 }
-.model-app-select {
-  min-height: 24px !important;
-  padding: 2px 6px !important;
-  border: none !important;
-  background: transparent !important;
-  font-size: 0.75rem !important;
-  width: 180px !important;
+/* AppSelect 根是 fragment，父级 scoped class 落不到触发器上，用 :deep() 穿透（DESIGN.md §5）。
+   穿透后特异性已高于组件自身的 .app-select-trigger，不需要 !important。 */
+.model-sel :deep(.model-app-select) {
+  min-height: 24px;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  font-size: 0.75rem;
+  width: 180px;
 }
-.model-app-select:hover {
-  background: var(--bg-card-soft) !important;
+.model-sel :deep(.model-app-select:hover) {
+  background: var(--bg-card-soft);
 }
 .model-empty {
   font-size: 0.75rem;
