@@ -180,6 +180,7 @@ x-hub 是一个安静、可靠的本地桌面工作台：用户打开它是为�
 ### 表单控件（下拉 / 日期时间）
 
 - **下拉一律用 `AppSelect`，禁止原生 `<select>`**：原生下拉的展开列表由系统绘制，配色、圆角、字号、hover 全都不受主题令牌控制，与卡片/弹窗的玻璃质感冲突；`AppSelect` 是无头封装 + 令牌自绘，关闭态与展开态都在主题内。需要紧凑档时由使用方覆盖触发器样式（如 `TodoCard.vue` 的 `.sp-select`、`TodoEditDialog.vue` 的 `.te-select`）。
+- **改 `AppSelect` 内部样式必须用 `:deep()`**：它的模板根是 fragment（触发器 `<button>` + `Teleport`），Vue 只把父级 scope id 给**单一根元素**，所以父组件的 `.sp-select { … }` 这类 scoped 规则**匹配不到触发器，是死规则**（`ChatPanel.vue` 早期用 `!important` 也没救回来）。正确写法：用父级容器做前缀穿透，如 `.sp-time-wrap :deep(.sp-select) { … }`；`class`/`style` 属性本身会正常落到触发器上（`inheritAttrs: false` + `v-bind="$attrs"`）。
 - **日期/时间一律用应用内控件，禁止原生 `<input type="date" | "datetime-local">`**：原生日期选择器弹出的是浏览器/系统日历。统一用 Reka UI 的 `DatePicker` + `TimeField`（见 §8），封装组件为 `TodoDateTimeField.vue`（待办截止/提醒/周期结束日期）与 `CountdownCard.vue`（倒计时定时）。
 - **多选/单选组**用胶囊 chip（`.te-chip` / `.tv-tagchip` 一类），不用原生 `<input type="checkbox">` 平铺。
 

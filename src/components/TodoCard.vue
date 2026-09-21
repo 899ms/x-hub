@@ -1000,7 +1000,7 @@ watch(
 .sp-time-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 10px;
 }
 .sp-time-row label {
@@ -1012,24 +1012,24 @@ watch(
 .sp-time-wrap {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
-/* 时分下拉：AppSelect（系统通用下拉组件）的紧凑档，覆盖其默认 38px 高度 */
-.sp-select {
-  border: 1px solid var(--border-soft);
-  background: var(--input-bg);
-  color: var(--text-1);
-  border-radius: 6px;
+/* 时分下拉：AppSelect（系统通用下拉组件）的紧凑档，覆盖其默认 38px 高度。
+   AppSelect 的根是 fragment（触发器 + Teleport），父级 scoped class 落不到触发器上
+   （Vue 只把父 scope id 给单一根元素），内部样式必须用 :deep() 穿透，见 DESIGN.md §5。 */
+.sp-time-wrap :deep(.sp-select) {
   min-height: 0;
-  padding: 3px 4px 3px 6px;
+  padding: 3px 6px;
   font-size: 0.75em;
-  outline: none;
   width: 4.6em;
   justify-content: center;
-  gap: 2px;
-  font-family: inherit;
+  gap: 4px;
 }
-.sp-select:focus-visible {
+/* 默认 label 是 flex:1，会把数字顶到左边缘；收缩成内容宽，让「数字 + 箭头」整体居中 */
+.sp-time-wrap :deep(.sp-select .app-select-label) {
+  flex: 0 1 auto;
+}
+.sp-time-wrap :deep(.sp-select:focus-visible) {
   border-color: var(--brand-500);
   box-shadow: var(--shadow-focus);
 }

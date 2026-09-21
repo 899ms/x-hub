@@ -360,7 +360,7 @@ async function remove() {
               <span class="te-sub">每</span>
               <input v-model.number="repeatEvery" type="number" min="1" max="99" class="te-input te-num" />
               <AppSelect
-                class="te-input te-select"
+                class="te-select"
                 :model-value="repeatUnit"
                 :options="REPEAT_UNIT_OPTIONS"
                 aria-label="重复单位"
@@ -371,7 +371,7 @@ async function remove() {
 
           <div v-if="repeatMode === 'monthly'" class="te-row2">
             <AppSelect
-              class="te-input te-select"
+              class="te-select"
               :model-value="monthNthMode"
               :options="MONTH_NTH_MODE_OPTIONS"
               aria-label="每月方式"
@@ -383,14 +383,14 @@ async function remove() {
             </template>
             <template v-else>
               <AppSelect
-                class="te-input te-select"
+                class="te-select"
                 :model-value="String(monthNth)"
                 :options="MONTH_NTH_OPTIONS"
                 aria-label="第几个星期几"
                 @update:model-value="monthNth = Number($event)"
               />
               <AppSelect
-                class="te-input te-select"
+                class="te-select"
                 :model-value="String(monthNthWeekday)"
                 :options="WEEKDAY_SELECT_OPTIONS"
                 aria-label="星期几"
@@ -401,7 +401,7 @@ async function remove() {
 
           <div v-if="repeatMode !== 'once'" class="te-row2">
             <AppSelect
-              class="te-input te-select"
+              class="te-select"
               :model-value="endMode"
               :options="END_MODE_OPTIONS"
               aria-label="结束条件"
@@ -532,11 +532,14 @@ async function remove() {
   width: 70px;
   flex: 0 0 auto;
 }
-/* AppSelect 触发器：贴合弹层输入框的紧凑档（覆盖其默认 38px 高度） */
-.te-select {
+/* AppSelect 触发器：贴合弹层输入框的紧凑档（覆盖其默认 38px 高度）。
+   AppSelect 的根是 fragment（触发器 + Teleport），父级 scoped class 落不到触发器上
+   （Vue 只把父 scope id 给单一根元素），所以必须用 :deep() 穿透，见 DESIGN.md §5。 */
+.te-row2 :deep(.te-select) {
   min-height: 0;
   padding: 6px 9px;
   font-size: 0.78rem;
+  background: var(--bg-card-soft);
   width: auto;
   flex: 0 0 auto;
 }
@@ -597,14 +600,14 @@ async function remove() {
 .te-inline {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 0.75rem;
   color: var(--text-2);
 }
 .te-row2 {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 10px;
   flex-wrap: wrap;
 }

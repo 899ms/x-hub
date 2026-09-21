@@ -242,6 +242,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 触发器样式（默认档）。
+   注意：本组件模板根是 fragment（触发器 + Teleport），Vue 只把父级 scope id 给单一根元素，
+   所以父组件写的 `.xxx-select { … }` scoped 规则匹配不到这里，是死规则。使用方要覆盖内部
+   样式必须用 :deep() 穿透（父级容器做前缀），见 DESIGN.md §5「表单控件」。 */
 .app-select-trigger {
   display: flex;
   align-items: center;
