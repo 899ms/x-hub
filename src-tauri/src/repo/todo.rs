@@ -1,9 +1,10 @@
-use crate::models::Todo;
+use crate::models::{RepeatRule, Todo};
 use crate::repo::now;
+use crate::todo_recurrence;
 use rusqlite::{params, Connection, Result};
 
 const COLS: &str =
-    "id, title, done, priority, created_at, updated_at, completed_at, due_at, remind_at, remind_fired, parent_id, sort_order, version";
+    "id, title, done, priority, created_at, updated_at, completed_at, due_at, remind_at, remind_fired, parent_id, sort_order, version, description, pinned, repeat_mode, repeat_every, repeat_unit, repeat_weekdays, repeat_month_day, repeat_month_nth, repeat_end_mode, repeat_end_at, repeat_count, repeat_done_count, repeat_last_done_at";
 
 pub fn list(conn: &Connection) -> Result<Vec<Todo>> {
     let mut stmt = conn.prepare(&format!(
@@ -191,6 +192,255 @@ pub fn toggle(conn: &Connection, id: i64) -> Result<Todo> {
     get(conn, id)
 }
 
+// ---------- 待办升级：描述 / 置顶 / 周期（v0.5.0） ----------
+
+/// 设置描述（轻量 Markdown）
+pub fn set_description(conn: &Connection, id: i64, description: &str) -> Result<Todo> {
+    conn.execute(
+        "UPDATE todos SET description = ?1, updated_at = ?2, version = version + 1 WHERE id = ?3",
+        params![description, now(), id],
+    )?;
+    get(conn, id)
+}
+
+pub fn set_description_with_version(
+    conn: &Connection,
+    id: i64,
+    description: &str,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let affected = conn
+        .execute(
+            "UPDATE todos SET description = ?1, updated_at = ?2, version = version + 1
+             WHERE id = ?3 AND (?4 IS NULL OR version = ?4)",
+            params![description, now(), id, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    get(conn, id).map_err(|e| e.to_string())
+}
+
+/// 置顶开关（置顶条目脱离日期分组，固定排在列表最顶部「置顶」区）
+pub fn set_pinned(conn: &Connection, id: i64, pinned: bool) -> Result<Todo> {
+    conn.execute(
+        "UPDATE todos SET pinned = ?1, updated_at = ?2, version = version + 1 WHERE id = ?3",
+        params![pinned as i64, now(), id],
+    )?;
+    get(conn, id)
+}
+
+pub fn set_pinned_with_version(
+    conn: &Connection,
+    id: i64,
+    pinned: bool,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let affected = conn
+        .execute(
+            "UPDATE todos SET pinned = ?1, updated_at = ?2, version = version + 1
+             WHERE id = ?3 AND (?4 IS NULL OR version = ?4)",
+            params![pinned as i64, now(), id, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    get(conn, id).map_err(|e| e.to_string())
+}
+
+/// 写入周期规则（整组 repeat_* 列一起写；`repeat_done_count` 是统计量，改规则不清零）
+pub fn set_repeat(conn: &Connection, id: i64, rule: &RepeatRule) -> Result<Todo> {
+    conn.execute(
+        "UPDATE todos SET
+           repeat_mode = ?1, repeat_every = ?2, repeat_unit = ?3, repeat_weekdays = ?4,
+           repeat_month_day = ?5, repeat_month_nth = ?6, repeat_end_mode = ?7,
+           repeat_end_at = ?8, repeat_count = ?9, updated_at = ?10, version = version + 1
+         WHERE id = ?11",
+        params![
+            rule.mode,
+            rule.every,
+            rule.unit,
+            rule.weekdays,
+            rule.month_day,
+            rule.month_nth,
+            rule.end_mode,
+            rule.end_at,
+            rule.count,
+            now(),
+            id
+        ],
+    )?;
+    get(conn, id)
+}
+
+pub fn set_repeat_with_version(
+    conn: &Connection,
+    id: i64,
+    rule: &RepeatRule,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let affected = conn
+        .execute(
+            "UPDATE todos SET
+               repeat_mode = ?1, repeat_every = ?2, repeat_unit = ?3, repeat_weekdays = ?4,
+               repeat_month_day = ?5, repeat_month_nth = ?6, repeat_end_mode = ?7,
+               repeat_end_at = ?8, repeat_count = ?9, updated_at = ?10, version = version + 1
+             WHERE id = ?11 AND (?12 IS NULL OR version = ?12)",
+            params![
+                rule.mode,
+                rule.every,
+                rule.unit,
+                rule.weekdays,
+                rule.month_day,
+                rule.month_nth,
+                rule.end_mode,
+                rule.end_at,
+                rule.count,
+                now(),
+                id,
+                expected_version
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    get(conn, id).map_err(|e| e.to_string())
+}
+
+/// 子待办全部复位为未完成（周期滚动到下一轮时调用，§11 第 6 项）
+pub fn reset_children(conn: &Connection, parent_id: i64) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE todos SET done = 0, completed_at = NULL, updated_at = ?1, version = version + 1
+         WHERE parent_id = ?2 AND done = 1",
+        params![now(), parent_id],
+    )?;
+    Ok(n)
+}
+
+/// 周期待办「完成本轮」：`due_at` 滚到下一个未来时刻（不补逾期历史），
+/// `remind_at` 按同一偏移平移并重新武装；计数 +1；子待办复位；
+/// 非置顶条目清空手动排序位（换组后原顺序失效，与 schedule() 同口径）。
+/// 结束条件用尽时把 `repeat_mode` 置回 `once` 并保留该行（§5.3）。
+pub fn complete_recurring(
+    conn: &Connection,
+    id: i64,
+    now_ms: i64,
+) -> Result<Todo, String> {
+    complete_recurring_inner(conn, id, now_ms, None)
+}
+
+pub fn complete_recurring_with_version(
+    conn: &Connection,
+    id: i64,
+    now_ms: i64,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    complete_recurring_inner(conn, id, now_ms, expected_version)
+}
+
+fn complete_recurring_inner(
+    conn: &Connection,
+    id: i64,
+    now_ms: i64,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let t = get(conn, id).map_err(|e| e.to_string())?;
+    if t.repeat_mode == "once" {
+        return Err(format!("NOT_RECURRING: 待办 {id} 不是周期待办"));
+    }
+    let Some(due) = t.due_at else {
+        return Err(format!("INVALID_STATE: 周期待办 {id} 缺少截止时刻，无法滚动"));
+    };
+    let rule = RepeatRule::from_todo(&t);
+    let next = todo_recurrence::next_occurrence(&rule, due, now_ms);
+    let ended = match next {
+        None => true,
+        Some(n) => todo_recurrence::reached_end(&rule, n, t.repeat_done_count),
+    };
+    let ts = now();
+    let affected = if ended {
+        // 规则用尽：转普通待办并保留该行，due_at 不动（过期即按逾期处理）
+        conn.execute(
+            "UPDATE todos SET repeat_mode = 'once',
+               repeat_done_count = repeat_done_count + 1, repeat_last_done_at = ?1,
+               updated_at = ?2, version = version + 1
+             WHERE id = ?3 AND (?4 IS NULL OR version = ?4)",
+            params![ts, ts, id, expected_version],
+        )
+    } else {
+        let new_due = next.unwrap();
+        let shift = new_due - due;
+        let new_remind = t.remind_at.map(|r| r + shift);
+        conn.execute(
+            "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0,
+               repeat_done_count = repeat_done_count + 1, repeat_last_done_at = ?3,
+               sort_order = CASE WHEN pinned = 1 THEN sort_order ELSE NULL END,
+               updated_at = ?4, version = version + 1
+             WHERE id = ?5 AND (?6 IS NULL OR version = ?6)",
+            params![new_due, new_remind, ts, ts, id, expected_version],
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    if !ended {
+        reset_children(conn, id).map_err(|e| e.to_string())?;
+    }
+    get(conn, id).map_err(|e| e.to_string())
+}
+
+/// 撤销「完成本轮」：计数 −1，`due_at` 滚回上一个实例，提醒随之回移
+pub fn undo_recurring(conn: &Connection, id: i64) -> Result<Todo, String> {
+    undo_recurring_inner(conn, id, None)
+}
+
+pub fn undo_recurring_with_version(
+    conn: &Connection,
+    id: i64,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    undo_recurring_inner(conn, id, expected_version)
+}
+
+fn undo_recurring_inner(
+    conn: &Connection,
+    id: i64,
+    expected_version: Option<i64>,
+) -> Result<Todo, String> {
+    let t = get(conn, id).map_err(|e| e.to_string())?;
+    if t.repeat_mode == "once" {
+        // 已滚动到结束时 repeat_mode 已置回 once，规则信息不再存在，无法回滚
+        return Err(format!("NOT_RECURRING: 待办 {id} 已结束周期，无法撤销本轮"));
+    }
+    let Some(due) = t.due_at else {
+        return Err(format!("INVALID_STATE: 周期待办 {id} 缺少截止时刻，无法回滚"));
+    };
+    let rule = RepeatRule::from_todo(&t);
+    let Some(prev) = todo_recurrence::previous_occurrence(&rule, due) else {
+        return Err(format!("INVALID_STATE: 待办 {id} 没有上一轮可回滚"));
+    };
+    let shift = prev - due;
+    let new_remind = t.remind_at.map(|r| r + shift);
+    let ts = now();
+    let affected = conn
+        .execute(
+            "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0,
+               repeat_done_count = MAX(repeat_done_count - 1, 0),
+               updated_at = ?3, version = version + 1
+             WHERE id = ?4 AND (?5 IS NULL OR version = ?5)",
+            params![prev, new_remind, ts, id, expected_version],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(not_found_or_conflict(conn, id, "待办"));
+    }
+    get(conn, id).map_err(|e| e.to_string())
+}
+
 /// 删除待办。子待办经外键 ON DELETE CASCADE 一并删除。
 pub fn delete(conn: &Connection, id: i64) -> Result<Vec<i64>> {
     let kids = children_ids(conn, id)?;
@@ -263,6 +513,19 @@ pub fn row_to_todo(row: &rusqlite::Row) -> Result<Todo> {
         parent_id: row.get(10)?,
         sort_order: row.get(11)?,
         version: row.get(12)?,
+        description: row.get(13)?,
+        pinned: row.get::<_, i64>(14)? != 0,
+        repeat_mode: row.get(15)?,
+        repeat_every: row.get(16)?,
+        repeat_unit: row.get(17)?,
+        repeat_weekdays: row.get(18)?,
+        repeat_month_day: row.get(19)?,
+        repeat_month_nth: row.get(20)?,
+        repeat_end_mode: row.get(21)?,
+        repeat_end_at: row.get(22)?,
+        repeat_count: row.get(23)?,
+        repeat_done_count: row.get(24)?,
+        repeat_last_done_at: row.get(25)?,
     })
 }
 
@@ -557,5 +820,212 @@ mod tests {
         let kids = delete_with_version(&conn, parent.id, None).unwrap();
         assert_eq!(kids, vec![kid.id]);
         assert!(get(&conn, parent.id).is_err());
+    }
+
+    // ---------- 待办升级：描述 / 置顶 / 周期 ----------
+
+    fn ts(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        use chrono::TimeZone;
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    fn daily_rule() -> RepeatRule {
+        RepeatRule {
+            mode: "daily".into(),
+            every: None,
+            unit: None,
+            weekdays: None,
+            month_day: None,
+            month_nth: None,
+            end_mode: None,
+            end_at: None,
+            count: None,
+        }
+    }
+
+    fn recurring(conn: &Connection, title: &str, due: i64) -> Todo {
+        let t = create(conn, title, None, None).unwrap();
+        schedule(conn, t.id, Some(due), None).unwrap();
+        set_repeat(conn, t.id, &daily_rule()).unwrap()
+    }
+
+    #[test]
+    fn set_description_and_pinned_persist() {
+        let conn = setup();
+        let t = create(&conn, "交房租", None, None).unwrap();
+        assert_eq!(t.description, "");
+        assert!(!t.pinned);
+
+        let d = set_description(&conn, t.id, "转账给房东").unwrap();
+        assert_eq!(d.description, "转账给房东");
+        assert_eq!(d.version, 1);
+
+        let p = set_pinned(&conn, t.id, true).unwrap();
+        assert!(p.pinned);
+        assert_eq!(p.version, 2);
+        // 描述不被置顶写入抹掉
+        assert_eq!(p.description, "转账给房东");
+    }
+
+    #[test]
+    fn set_repeat_writes_all_rule_columns() {
+        let conn = setup();
+        let t = create(&conn, "每月交房租", None, None).unwrap();
+        let mut rule = daily_rule();
+        rule.mode = "monthly".into();
+        rule.month_day = Some(1);
+        rule.end_mode = Some("until".into());
+        rule.end_at = Some(ts(2027, 1, 1, 0, 0));
+        let got = set_repeat(&conn, t.id, &rule).unwrap();
+        assert_eq!(got.repeat_mode, "monthly");
+        assert_eq!(got.repeat_month_day, Some(1));
+        assert_eq!(got.repeat_end_mode.as_deref(), Some("until"));
+        assert_eq!(got.repeat_end_at, Some(ts(2027, 1, 1, 0, 0)));
+    }
+
+    #[test]
+    fn complete_recurring_rolls_due_and_counts() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let t = recurring(&conn, "喝 8 杯水", due);
+
+        let rolled = complete_recurring(&conn, t.id, due).unwrap();
+        assert_eq!(rolled.due_at, Some(ts(2026, 9, 22, 9, 0)));
+        assert_eq!(rolled.repeat_done_count, 1);
+        assert!(rolled.repeat_last_done_at.is_some());
+        // 周期待办不置 done、不进已完成列表
+        assert!(!rolled.done);
+        assert_eq!(rolled.completed_at, None);
+        assert_eq!(rolled.repeat_mode, "daily");
+    }
+
+    #[test]
+    fn complete_recurring_skips_missed_and_shifts_reminder() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let remind = ts(2026, 9, 21, 8, 30);
+        let t = create(&conn, "喝 8 杯水", None, None).unwrap();
+        schedule(&conn, t.id, Some(due), Some(remind)).unwrap();
+        set_repeat(&conn, t.id, &daily_rule()).unwrap();
+
+        // 逾期 3 天后点掉：直接滚到明天，不补做历史
+        let now = ts(2026, 9, 24, 10, 0);
+        let rolled = complete_recurring(&conn, t.id, now).unwrap();
+        assert_eq!(rolled.due_at, Some(ts(2026, 9, 25, 9, 0)));
+        // 提醒按同一偏移平移（提前 30 分钟），并重新武装
+        assert_eq!(rolled.remind_at, Some(ts(2026, 9, 25, 8, 30)));
+        assert!(!rolled.remind_fired);
+        assert_eq!(rolled.repeat_done_count, 1);
+    }
+
+    #[test]
+    fn complete_recurring_resets_children() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let parent = recurring(&conn, "每周复盘", due);
+        let k1 = create(&conn, "子一", Some(parent.id), None).unwrap();
+        let k2 = create(&conn, "子二", Some(parent.id), None).unwrap();
+        toggle(&conn, k1.id).unwrap();
+        toggle(&conn, k2.id).unwrap();
+
+        complete_recurring(&conn, parent.id, due).unwrap();
+        // 下一轮子待办全部复位为未完成（§11 第 6 项）
+        assert!(!get(&conn, k1.id).unwrap().done);
+        assert!(!get(&conn, k2.id).unwrap().done);
+        assert_eq!(get(&conn, k1.id).unwrap().completed_at, None);
+    }
+
+    #[test]
+    fn complete_recurring_clears_sort_order_unless_pinned() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let a = recurring(&conn, "普通周期", due);
+        reorder(&conn, &[a.id]).unwrap();
+        let rolled = complete_recurring(&conn, a.id, due).unwrap();
+        // 换组后原手动顺序失效（与 schedule() 同口径）
+        assert_eq!(rolled.sort_order, None);
+
+        let b = recurring(&conn, "置顶周期", due);
+        set_pinned(&conn, b.id, true).unwrap();
+        reorder(&conn, &[b.id]).unwrap();
+        let rolled_b = complete_recurring(&conn, b.id, due).unwrap();
+        // 置顶条目脱离日期分组，滚动不影响置顶区内的次序
+        assert_eq!(rolled_b.sort_order, Some(1));
+        assert!(rolled_b.pinned);
+    }
+
+    #[test]
+    fn complete_recurring_ends_on_until() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let t = create(&conn, "到某日为止", None, None).unwrap();
+        schedule(&conn, t.id, Some(due), None).unwrap();
+        let mut rule = daily_rule();
+        rule.end_mode = Some("until".into());
+        rule.end_at = Some(ts(2026, 9, 22, 0, 0));
+        set_repeat(&conn, t.id, &rule).unwrap();
+
+        // 本轮完成后下一轮 9/23 已超出 until → 结束：转 once、保留该行、due_at 不动
+        let ended = complete_recurring(&conn, t.id, due).unwrap();
+        assert_eq!(ended.repeat_mode, "once");
+        assert_eq!(ended.due_at, Some(due));
+        assert_eq!(ended.repeat_done_count, 1);
+    }
+
+    #[test]
+    fn complete_recurring_ends_on_count() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let t = create(&conn, "共 2 次", None, None).unwrap();
+        schedule(&conn, t.id, Some(due), None).unwrap();
+        let mut rule = daily_rule();
+        rule.end_mode = Some("count".into());
+        rule.count = Some(2);
+        set_repeat(&conn, t.id, &rule).unwrap();
+
+        let first = complete_recurring(&conn, t.id, due).unwrap();
+        assert_eq!(first.repeat_mode, "daily");
+        assert_eq!(first.repeat_done_count, 1);
+
+        let second = complete_recurring(&conn, t.id, first.due_at.unwrap()).unwrap();
+        assert_eq!(second.repeat_mode, "once");
+        assert_eq!(second.repeat_done_count, 2);
+    }
+
+    #[test]
+    fn undo_recurring_rolls_back_due_and_count() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let t = recurring(&conn, "喝 8 杯水", due);
+        complete_recurring(&conn, t.id, due).unwrap();
+
+        let back = undo_recurring(&conn, t.id).unwrap();
+        assert_eq!(back.due_at, Some(due));
+        assert_eq!(back.repeat_done_count, 0);
+    }
+
+    #[test]
+    fn complete_recurring_rejects_plain_todo() {
+        let conn = setup();
+        let t = create(&conn, "普通待办", None, None).unwrap();
+        let err = complete_recurring(&conn, t.id, 0).unwrap_err();
+        assert!(err.starts_with("NOT_RECURRING"), "{err}");
+    }
+
+    #[test]
+    fn complete_recurring_with_version_conflicts_on_stale() {
+        let conn = setup();
+        let due = ts(2026, 9, 21, 9, 0);
+        let t = recurring(&conn, "喝 8 杯水", due);
+        // schedule + set_repeat 各推进一次版本
+        let cur = get(&conn, t.id).unwrap().version;
+        let err = complete_recurring_with_version(&conn, t.id, due, Some(cur - 1)).unwrap_err();
+        assert!(err.starts_with("CONFLICT"), "{err}");
+        let ok = complete_recurring_with_version(&conn, t.id, due, Some(cur)).unwrap();
+        assert_eq!(ok.due_at, Some(ts(2026, 9, 22, 9, 0)));
     }
 }

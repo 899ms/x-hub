@@ -48,6 +48,69 @@ export interface Todo {
   parent_id: number | null
   /** 手动拖拽排序位（分组内升序）；null = 未手动排序，按创建时间倒序 */
   sort_order: number | null
+  /** 轻量 Markdown 正文（勾选一律用子待办） */
+  description: string
+  /** 置顶：脱离日期分组，固定排在列表最顶部「置顶」区 */
+  pinned: boolean
+  /** 周期规则总开关：once / daily / weekly / monthly / yearly / weekdays / custom */
+  repeat_mode: RepeatMode
+  repeat_every: number | null
+  /** custom：day / week / month / year */
+  repeat_unit: RepeatUnit | null
+  /** 位掩码 bit0=周一 … bit6=周日 */
+  repeat_weekdays: number | null
+  /** monthly：1..31，-1 = 月末 */
+  repeat_month_day: number | null
+  /** monthly：第几个（1..5，-1 = 最后一个） */
+  repeat_month_nth: number | null
+  /** never / until / count */
+  repeat_end_mode: RepeatEndMode | null
+  /** until：截止日期（毫秒时间戳） */
+  repeat_end_at: number | null
+  /** count：共 N 次 */
+  repeat_count: number | null
+  /** 累计完成次数（统计用，不逐次留历史） */
+  repeat_done_count: number
+  repeat_last_done_at: string | null
+}
+
+export type RepeatMode = 'once' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'weekdays' | 'custom'
+export type RepeatUnit = 'day' | 'week' | 'month' | 'year'
+export type RepeatEndMode = 'never' | 'until' | 'count'
+
+/** 周期规则（写入用；与后端 RepeatRule 对齐） */
+export interface RepeatRuleInput {
+  mode: RepeatMode
+  every: number | null
+  unit: RepeatUnit | null
+  weekdays: number | null
+  month_day: number | null
+  month_nth: number | null
+  end_mode: RepeatEndMode | null
+  end_at: number | null
+  count: number | null
+}
+
+/** 待办标签（与笔记标签是两套独立定义） */
+export interface TodoTag {
+  id: number
+  name: string
+  /** '' = 用默认色；否则 #rrggbb */
+  color: string
+  sort_order: number
+  created_at: string
+}
+
+/** 待办-标签关联对 */
+export interface TodoTagLink {
+  todo_id: number
+  tag_id: number
+}
+
+/** 周期待办的虚拟实例（不落库，仅日历渲染） */
+export interface TodoOccurrence {
+  todo_id: number
+  at_ms: number
 }
 
 export interface Sticky {
@@ -816,6 +879,43 @@ export const tauriApi = {
     invoke<Todo>('schedule_todo', { id, dueAt, remindAt }),
   /** 待办拖拽排序：按传入顺序写入手动排序位（前端按分组计算完整顺序） */
   reorderTodoOrders: (ids: number[]) => invoke<void>('reorder_todo_orders', { ids }),
+  /** 设置待办描述（轻量 Markdown） */
+  setTodoDescription: (id: number, description: string) =>
+    invoke<Todo>('set_todo_description', { id, description }),
+  /** 置顶开关：置顶条目脱离日期分组，固定排在列表最顶部「置顶」区 */
+  setTodoPinned: (id: number, pinned: boolean) =>
+    invoke<Todo>('set_todo_pinned', { id, pinned }),
+  /** 写入周期规则（整组 repeat_* 列一起写） */
+  setTodoRepeat: (id: number, rule: RepeatRuleInput) =>
+    invoke<Todo>('set_todo_repeat', {
+      id,
+      repeatMode: rule.mode,
+      repeatEvery: rule.every,
+      repeatUnit: rule.unit,
+      repeatWeekdays: rule.weekdays,
+      repeatMonthDay: rule.month_day,
+      repeatMonthNth: rule.month_nth,
+      repeatEndMode: rule.end_mode,
+      repeatEndAt: rule.end_at,
+      repeatCount: rule.count,
+    }),
+  /** 周期待办「完成本轮」：due_at 滚到下一个未来时刻、计数 +1、子待办复位 */
+  completeTodoRecurring: (id: number) => invoke<Todo>('complete_todo_recurring', { id }),
+  /** 撤销「完成本轮」：计数 −1，due_at 滚回上一个实例 */
+  undoTodoRecurring: (id: number) => invoke<Todo>('undo_todo_recurring', { id }),
+  /** 展开区间内的周期待办虚拟实例（规则只实现于 Rust 侧） */
+  expandTodoOccurrences: (fromMs: number, toMs: number) =>
+    invoke<TodoOccurrence[]>('expand_todo_occurrences', { fromMs, toMs }),
+  listTodoTags: () => invoke<TodoTag[]>('list_todo_tags'),
+  createTodoTag: (name: string, color?: string) =>
+    invoke<TodoTag>('create_todo_tag', { name, color: color ?? null }),
+  updateTodoTag: (id: number, name: string, color?: string) =>
+    invoke<TodoTag>('update_todo_tag', { id, name, color: color ?? null }),
+  deleteTodoTag: (id: number) => invoke<void>('delete_todo_tag', { id }),
+  /** 全量设置某条待办的标签 */
+  setTodoTags: (id: number, tagIds: number[]) =>
+    invoke<void>('set_todo_tags', { id, tagIds }),
+  listTodoTagLinks: () => invoke<TodoTagLink[]>('list_todo_tag_links'),
   listStickies: () => invoke<Sticky[]>('list_stickies'),
   getDetachedStickies: () => invoke<DetachedSticky[]>('get_detached_stickies'),
   saveSticky: (slot: number, content: string) =>

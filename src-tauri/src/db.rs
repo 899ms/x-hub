@@ -82,7 +82,45 @@ fn migrate(conn: &Connection) -> Result<()> {
           version INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
           updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now')),
-          completed_at TEXT
+          completed_at TEXT,
+          -- 轻量 Markdown 正文（勾选一律用子待办，正文不放 checklist）
+          description TEXT NOT NULL DEFAULT '',
+          -- 置顶：脱离日期分组，固定排在列表最顶部「置顶」区
+          pinned INTEGER NOT NULL DEFAULT 0,
+          -- 周期规则总开关：once 一次性 / daily / weekly / monthly / yearly / weekdays / custom
+          repeat_mode TEXT NOT NULL DEFAULT 'once',
+          -- custom：每 N 个 repeat_unit
+          repeat_every INTEGER,
+          repeat_unit TEXT,
+          -- 位掩码 bit0=周一 … bit6=周日（weekly 多选、custom+week 用）
+          repeat_weekdays INTEGER,
+          -- monthly：1..31，-1 = 月末
+          repeat_month_day INTEGER,
+          -- monthly：第几个（1..5，-1 = 最后一个），非空时与 repeat_weekdays 组合表达「第几个星期几」
+          repeat_month_nth INTEGER,
+          -- 结束条件：never / until / count
+          repeat_end_mode TEXT,
+          repeat_end_at INTEGER,
+          repeat_count INTEGER,
+          -- 累计完成次数与上次完成时间（统计用，不逐次留历史）
+          repeat_done_count INTEGER NOT NULL DEFAULT 0,
+          repeat_last_done_at TEXT
+        );
+
+        -- 待办标签：与笔记标签（tags / note_tags）是两套独立定义，互不同步
+        CREATE TABLE IF NOT EXISTS todo_tags (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          -- '' = 用默认色；否则 #rrggbb
+          color TEXT NOT NULL DEFAULT '',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS todo_tag_links (
+          todo_id INTEGER NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+          tag_id INTEGER NOT NULL REFERENCES todo_tags(id) ON DELETE CASCADE,
+          PRIMARY KEY (todo_id, tag_id)
         );
 
         CREATE TABLE IF NOT EXISTS stickies (
@@ -352,6 +390,49 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // 待办升级（v0.5.0）：描述 / 置顶 / 周期规则列。全部可空或带 DEFAULT，
+    // 老库启动即补齐，零数据改造（与 v0.3.4 补列的既有模式一致）。
+    if !todo_cols.iter().any(|c| c == "description") {
+        conn.execute(
+            "ALTER TABLE todos ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !todo_cols.iter().any(|c| c == "pinned") {
+        conn.execute(
+            "ALTER TABLE todos ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !todo_cols.iter().any(|c| c == "repeat_mode") {
+        conn.execute(
+            "ALTER TABLE todos ADD COLUMN repeat_mode TEXT NOT NULL DEFAULT 'once'",
+            [],
+        )?;
+    }
+    for col in [
+        "repeat_every",
+        "repeat_weekdays",
+        "repeat_month_day",
+        "repeat_month_nth",
+        "repeat_end_at",
+        "repeat_count",
+    ] {
+        if !todo_cols.iter().any(|c| c == col) {
+            conn.execute(&format!("ALTER TABLE todos ADD COLUMN {col} INTEGER"), [])?;
+        }
+    }
+    for col in ["repeat_unit", "repeat_end_mode", "repeat_last_done_at"] {
+        if !todo_cols.iter().any(|c| c == col) {
+            conn.execute(&format!("ALTER TABLE todos ADD COLUMN {col} TEXT"), [])?;
+        }
+    }
+    if !todo_cols.iter().any(|c| c == "repeat_done_count") {
+        conn.execute(
+            "ALTER TABLE todos ADD COLUMN repeat_done_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     // 便签/浮窗便签表补乐观锁版本号
     let sticky_cols: Vec<String> = conn
         .prepare("PRAGMA table_info(stickies)")?
@@ -379,6 +460,15 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_todos_remind ON todos(remind_at)",
+        [],
+    )?;
+    // 待办升级新增索引：同样必须在补列之后创建（老库此时才具备这些列）
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_todo_tag_links_tag ON todo_tag_links(tag_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_todos_repeat ON todos(repeat_mode)",
         [],
     )?;
 

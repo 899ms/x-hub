@@ -95,35 +95,6 @@ const quoteText = computed(() => {
   return randomLocalQuote().content
 })
 
-interface MonthCell {
-  day: number
-  inMonth: boolean
-  today: boolean
-}
-const monthHead = computed(() => {
-  const d = previewDate.value
-  return `${d.getFullYear()}年${d.getMonth() + 1}月`
-})
-const monthCells = computed<MonthCell[]>(() => {
-  const d = previewDate.value
-  const y = d.getFullYear()
-  const m = d.getMonth()
-  const firstWeekday = new Date(y, m, 1).getDay()
-  const days = new Date(y, m + 1, 0).getDate()
-  const prevDays = new Date(y, m, 0).getDate()
-  const cells: MonthCell[] = []
-  for (let i = firstWeekday - 1; i >= 0; i--) {
-    cells.push({ day: prevDays - i, inMonth: false, today: false })
-  }
-  for (let day = 1; day <= days; day++) {
-    cells.push({ day, inMonth: true, today: day === d.getDate() })
-  }
-  while (cells.length % 7 !== 0) {
-    cells.push({ day: cells.length - firstWeekday - days + 1, inMonth: false, today: false })
-  }
-  return cells
-})
-
 /**
  * 相对时间：逐条对齐 NotesOverviewCard 的 fmtTime（含「小时前」需同一天、跨年补年份）。
  * 读 tick 让「刚刚」在下一分钟自然变成「1 分钟前」。
@@ -230,7 +201,7 @@ const snippetList = computed(() => store.state.snippets.slice(0, 12))
 export interface PreviewTodoGroup {
   label: string
   /** 渲染用条目（软上限，防超大列表拖垮编辑器 DOM） */
-  items: { id: number; title: string; priority: number; badge: DueBadge | null }[]
+  items: { id: number; title: string; priority: number; badge: DueBadge | null; due_at: number | null }[]
   /** 该组真实条数：计数徽标必须显全量，否则预览数字与真卡不符 */
   total: number
 }
@@ -249,6 +220,7 @@ const todoGroups = computed<PreviewTodoGroup[]>(() => {
         title: t.title,
         priority: t.priority,
         badge: dueBadge(t, today),
+        due_at: t.due_at,
       })),
     })
   }
@@ -277,9 +249,6 @@ export const dashPreviewData = {
   dateText,
   lunar,
   quoteText,
-  monthHead,
-  monthCells,
-  weekdays: WEEKDAYS,
   relTime,
   fmtRemain,
   weather,

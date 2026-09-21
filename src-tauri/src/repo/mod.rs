@@ -8,6 +8,7 @@ pub mod snippet;
 pub mod sticky;
 pub mod tag;
 pub mod todo;
+pub mod todo_tag;
 
 /// 生成纳秒精度的 UTC 时间戳，用于保证排序唯一性
 pub fn now() -> String {

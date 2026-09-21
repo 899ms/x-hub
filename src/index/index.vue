@@ -3,6 +3,8 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted, provide, ref, w
 import { listen } from '@tauri-apps/api/event'
 import TitleBar from '../components/TitleBar.vue'
 import TodoCard from '../components/TodoCard.vue'
+import TodoView from '../components/TodoView.vue'
+import TodoCalendarCard from '../components/TodoCalendarCard.vue'
 import Suda from '../components/Suda.vue'
 import NoteList from '../components/NoteList.vue'
 import NotesOverviewCard from '../components/NotesOverviewCard.vue'
@@ -20,7 +22,7 @@ import { isTauri, tauriApi } from '../api/tauri'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import type { Countdown, ExtensionEntry, Note, Resource, Todo } from '../api/tauri'
 import { playChime } from '../utils/chime'
-import { FileText, FolderOpen, LayoutDashboard, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
+import { FileText, FolderOpen, LayoutDashboard, ListTodo, MessageSquare, Puzzle, Settings, ChevronLeft, ChevronRight, AppWindow, PanelRight } from 'lucide-vue-next'
 import type { Component } from 'vue'
 import { useTheme } from '../composables/useTheme'
 import { broadcastThemeToFrames } from '../composables/themeTokens'
@@ -109,6 +111,7 @@ function onWallpaperError() {
 // ---- 视图切换（统一导航范式：每个侧栏项 = 一个独立视图） ----
 const navigation = [
   { id: 'dashboard', label: '工作台', icon: LayoutDashboard },
+  { id: 'todos', label: '待办', icon: ListTodo },
   { id: 'notes', label: '速记', icon: FileText },
   { id: 'suda', label: '速达', icon: FolderOpen },
   { id: 'chat', label: '对话', icon: MessageSquare },
@@ -254,9 +257,9 @@ function openNotes() {
 function openSuda() {
   activeView.value = 'suda'
 }
-// 待办概览卡的「去待办」：待办卡就在工作台，直接切回工作台即可
+// 待办概览卡 / 待办卡标题栏的「打开待办视图」：进独立的待办视图（标签筛选、月/周日历、周期待办）
 function openTodo() {
-  activeView.value = 'dashboard'
+  activeView.value = 'todos'
 }
 
 // ---- 工作台自定义布局（12 列单元格网格，模块库两栏编辑器） ----
@@ -275,6 +278,7 @@ const dashCardComponents: Record<string, Component> = {
   countdown: CountdownCard,
   prompts: PromptBoxCard,
   todo: TodoCard,
+  calendar: TodoCalendarCard,
   recent: RecentBar,
 }
 
@@ -317,7 +321,9 @@ function dashCardProps(p: DashPlacement): Record<string, unknown> {
     case 'prompts':
       return { onOpenManage: openPromptManage, ...titleProps(p) }
     case 'todo':
-      return { highlightId: highlightTodoId.value, ...titleProps(p) }
+      return { highlightId: highlightTodoId.value, onOpenDetail: openTodo, ...titleProps(p) }
+    case 'calendar':
+      return { onOpenDetail: openTodo, ...titleProps(p) }
     case 'countdown':
       return { sizeW: p.w, sizeH: p.h, ...titleProps(p) }
     case 'sysmon':
@@ -411,6 +417,10 @@ onMounted(async () => {
     unlistenTodosChanged = await listen('todos-changed', () => {
       void store.refreshTodos()
     })
+    // 待办标签定义/关联被外部（扩展桥）改动后刷新
+    unlistenTodoTagsChanged = await listen('todo-tags-changed', () => {
+      void store.refreshTodoTags()
+    })
     // 待办提醒到点：toast 提示（系统通知由后端 todo_reminder 直接发）
     unlistenTodoRemind = await listen<Todo>('todo-remind', (e) => {
       const title = e.payload?.title ?? ''
@@ -457,6 +467,7 @@ let unlistenCountdownsChanged: (() => void) | null = null
 let unlistenNotesChanged: (() => void) | null = null
 let unlistenSnippetsChanged: (() => void) | null = null
 let unlistenTodosChanged: (() => void) | null = null
+let unlistenTodoTagsChanged: (() => void) | null = null
 let unlistenTodoRemind: (() => void) | null = null
 let unlistenBallAction: (() => void) | null = null
 let unlistenOpenChatSettings: (() => void) | null = null
@@ -470,6 +481,7 @@ onUnmounted(() => {
   unlistenNotesChanged?.()
   unlistenSnippetsChanged?.()
   unlistenTodosChanged?.()
+  unlistenTodoTagsChanged?.()
   unlistenTodoRemind?.()
   unlistenBallAction?.()
   unlistenOpenChatSettings?.()
@@ -798,6 +810,9 @@ provide('showToast', showToast)
             <button class="pill-btn" type="button" @click="openLayoutEditor">自定义布局</button>
           </div>
         </div>
+
+        <!-- 待办视图：标签筛选 / 月·周日历 / 周期待办（宽窗左右同屏，窄窗单栏） -->
+        <TodoView v-else-if="activeView === 'todos'" />
 
         <!-- 速记：独立视图 -->
         <section v-else-if="activeView === 'notes'" class="view view-notes" tabindex="-1" aria-label="速记">

@@ -121,8 +121,126 @@ export function calendarGrid(cursor: Date, today: Date): Array<{ key: string; da
   return cells
 }
 
-export const HOUR_OPTIONS: ReadonlyArray<{ value: number; label: string }> = Array.from(
-  { length: 24 },
+/**
+ * 待办视图分组序号：0 置顶 → 1 逾期 → 2 今天 → 3 本周 → 4 本月 → 5 以后 → 6 无日期。
+ * 与卡片用的 4 组（GROUP_META）不同：视图有「置顶」区与更细的时间切分，
+ * 卡片保持轻量，不跟着改。
+ */
+export const VIEW_GROUP_COUNT = 7
+
+export const VIEW_GROUP_META: ReadonlyArray<{ label: string }> = [
+  { label: '置顶' },
+  { label: '逾期' },
+  { label: '今天' },
+  { label: '本周' },
+  { label: '本月' },
+  { label: '以后' },
+  { label: '无日期' },
+]
+
+/** 自然周结束（周日 23:59:59.999） */
+function endOfWeek(d: Date): Date {
+  const monday = addDays(startOfDay(d), -((d.getDay() + 6) % 7))
+  return addDays(monday, 7)
+}
+
+export function viewGroupOf(
+  t: { pinned: boolean; due_at: number | null },
+  today: Date,
+): number {
+  // 置顶与日期无关：固定进最顶部「置顶」区（周期待办滚动换组也不会掉出去）
+  if (t.pinned) return 0
+  if (t.due_at == null) return 6
+  const due = new Date(t.due_at)
+  const d = startOfDay(due)
+  const today0 = startOfDay(today)
+  if (d.getTime() < today0.getTime()) return 1
+  if (d.getTime() === today0.getTime()) return 2
+  if (d.getTime() < endOfWeek(today).getTime()) return 3
+  if (d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear()) return 4
+  return 5
+}
+
+/** 时间范围视图（horizon）筛选：今天 / 本周 / 本月 / 全部 */
+export type Horizon = 'today' | 'week' | 'month' | 'all'
+
+export function inHorizon(t: { due_at: number | null }, horizon: Horizon, today: Date): boolean {
+  if (horizon === 'all') return true
+  if (t.due_at == null) return false
+  const d = startOfDay(new Date(t.due_at))
+  const today0 = startOfDay(today)
+  // 逾期条目不属于任何范围，但必须始终可见（否则会「消失」）
+  if (d.getTime() < today0.getTime()) return true
+  if (horizon === 'today') return d.getTime() === today0.getTime()
+  if (horizon === 'week') return d.getTime() < endOfWeek(today).getTime()
+  return d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear()
+}
+
+const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'] as const
+
+/** 周期规则的短文案（行内展示用；规则的权威解释在 Rust 侧） */
+export function repeatLabel(t: {
+  repeat_mode: string
+  repeat_every: number | null
+  repeat_unit: string | null
+  repeat_weekdays: number | null
+  repeat_month_day: number | null
+  repeat_month_nth: number | null
+  due_at: number | null
+}): string {
+  const days = (mask: number) =>
+    WEEKDAY_LABELS.filter((_, i) => mask & (1 << i)).join('、')
+  switch (t.repeat_mode) {
+    case 'daily':
+      return '每天'
+    case 'weekdays':
+      return '每个工作日'
+    case 'weekly':
+      return t.repeat_weekdays ? `每周 ${days(t.repeat_weekdays)}` : '每周'
+    case 'monthly': {
+      if (t.repeat_month_nth != null) {
+        const nth = t.repeat_month_nth === -1 ? '最后' : `第 ${t.repeat_month_nth}`
+        const wd = t.repeat_weekdays ? days(t.repeat_weekdays) : ''
+        return `每月 ${nth}个${wd}`
+      }
+      const day = t.repeat_month_day === -1 ? '最后一天' : `${t.repeat_month_day} 日`
+      return `每月 ${day}`
+    }
+    case 'yearly': {
+      if (t.due_at == null) return '每年'
+      const d = new Date(t.due_at)
+      return `每年 ${d.getMonth() + 1} 月 ${d.getDate()} 日`
+    }
+    case 'custom': {
+      const unit = { day: '天', week: '周', month: '个月', year: '年' }[t.repeat_unit ?? 'day'] ?? '天'
+      const every = t.repeat_every ?? 1
+      if (t.repeat_unit === 'week' && t.repeat_weekdays) {
+        return `每 ${every} 周的 ${days(t.repeat_weekdays)}`
+      }
+      return `每 ${every} ${unit}`
+    }
+    default:
+      return ''
+  }
+}
+
+/** 结束条件的短文案（空串 = 永不结束） */
+export function repeatEndLabel(t: {
+  repeat_end_mode: string | null
+  repeat_end_at: number | null
+  repeat_count: number | null
+}): string {
+  if (t.repeat_end_mode === 'until' && t.repeat_end_at != null) {
+    const d = new Date(t.repeat_end_at)
+    return `到 ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 为止`
+  }
+  if (t.repeat_end_mode === 'count' && t.repeat_count != null) {
+    return `共 ${t.repeat_count} 次`
+  }
+  return ''
+}
+
+export const HOUR_OPTIONS: ReadonlyArray<{ value: number; label: string }> = Array.from(  { length: 24 },
   (_, h) => ({ value: h, label: String(h).padStart(2, '0') }),
 )
 

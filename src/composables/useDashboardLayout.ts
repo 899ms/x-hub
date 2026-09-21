@@ -82,7 +82,6 @@ export const DASH_MODULES: DashModuleDef[] = [
     variants: [
       v('big', '大时钟', 3, 3, 4, 3, '时间 + 日期 + 天气 + 语录'),
       v('lunar', '今日阴阳历', 2, 2, 3, 3, '时间 + 阳历 + 农历'),
-      v('month', '整月日历', 4, 4, 5, 5, '全月视图'),
       v('minimal', '极简时间', 2, 1, 2, 2, '只留大号时间'),
     ],
   },
@@ -148,6 +147,12 @@ export const DASH_MODULES: DashModuleDef[] = [
     title: '待办',
     defaultVariant: 'list',
     variants: [v('list', '列表', 3, 3, 4, 5, '优先级列表')],
+  },
+  {
+    id: 'calendar',
+    title: '日历',
+    defaultVariant: 'month',
+    variants: [v('month', '整月日历', 4, 4, 5, 5, '待办分布（含周期待办的虚拟实例）')],
   },
   {
     id: 'recent',

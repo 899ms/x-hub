@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, provide, ref, watch } from 'vue'
-import { ListTodo, PanelTopClose } from 'lucide-vue-next'
+import { ArrowRight, ListTodo, PanelTopClose } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 import type { Todo } from '../api/tauri'
 import { parseTodoItems } from '../utils/todoParse'
@@ -23,7 +23,13 @@ import {
   startOfDay,
 } from '../utils/todoSchedule'
 
-const props = defineProps<{ highlightId?: number | null; title?: string; hideTitle?: boolean }>()
+const props = defineProps<{
+  highlightId?: number | null
+  title?: string
+  hideTitle?: boolean
+  /** 标题栏右侧「打开待办视图 →」：进独立待办视图（标签筛选 / 日历 / 周期待办） */
+  onOpenDetail?: () => void
+}>()
 
 const store = useStore()
 const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
@@ -437,6 +443,16 @@ watch(
         <span>{{ title ?? '待办' }}</span>
       </h3>
       <div class="todo-header-actions">
+        <button
+          v-if="props.onOpenDetail"
+          class="todo-float"
+          type="button"
+          title="打开待办视图（标签 / 日历 / 周期）"
+          aria-label="打开待办视图"
+          @click="props.onOpenDetail()"
+        >
+          <ArrowRight :size="14" :stroke-width="2" aria-hidden="true" />
+        </button>
         <button
           class="todo-float"
           type="button"

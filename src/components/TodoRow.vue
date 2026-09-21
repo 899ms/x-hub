@@ -8,13 +8,16 @@ import {
   ChevronDown,
   ChevronRight,
   Plus,
+  Repeat,
+  Pin,
   Sun,
   Trash2,
   X,
 } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 import type { Todo } from '../api/tauri'
-import { dueBadge, fmtHM } from '../utils/todoSchedule'
+import { dueBadge, fmtHM, repeatEndLabel, repeatLabel } from '../utils/todoSchedule'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 /**
  * 待办行（TodoCard 的递归子组件）：父条目与子待办共用一套行渲染。
@@ -37,6 +40,11 @@ const props = withDefaults(
 const emit = defineEmits<{ subdrag: [e: PointerEvent] }>()
 
 const store = useStore()
+/** 轻提示（卡片层提供；浮窗等宿主没有时为 noop） */
+const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
+  'showToast',
+  () => {},
+)
 /** 排期弹层（卡片层提供）：浮窗等宿主没有弹层时为 null，日期徽标转只读展示、隐藏「日期」按钮 */
 const openSchedule = inject<((t: Todo, el: HTMLElement) => void) | null>('todoOpenSchedule', null)
 const canSchedule = openSchedule != null
@@ -67,6 +75,20 @@ function toggleCollapse() {
 }
 
 const badge = computed(() => (props.todo.done ? null : dueBadge(props.todo, new Date())))
+/** 周期待办：规则文案 + 结束条件（空串 = 一次性待办） */
+const repeatText = computed(() => (props.todo.repeat_mode === 'once' ? '' : repeatLabel(props.todo)))
+const repeatTitle = computed(() => {
+  if (props.todo.repeat_mode === 'once') return ''
+  const end = repeatEndLabel(props.todo)
+  const base = `${repeatLabel(props.todo)}${end ? ` · ${end}` : ''}`
+  return `${base} · 已累计完成 ${props.todo.repeat_done_count} 次（勾选=完成本轮，日期滚到下一轮）`
+})
+/** 该条待办的标签（待办专属定义，与笔记标签无关） */
+const tagChips = computed(() => {
+  const ids = store.todoTagIds(props.todo.id)
+  if (!ids.length) return []
+  return store.state.todoTags.filter((t) => ids.includes(t.id))
+})
 const remindOn = computed(() => !props.todo.done && props.todo.remind_at != null)
 const showProgress = computed(() => !props.isSub && !props.todo.done && kids.value.length > 0)
 
@@ -74,6 +96,11 @@ function onBadgeClick(e: MouseEvent) {
   if (!canSchedule) return
   const el = e.currentTarget
   if (el instanceof HTMLElement) openSchedule(props.todo, el)
+}
+
+/** 点击图钉立即取消置顶（置顶与日期无关，取消后回到按日期分组的位置） */
+function unpin() {
+  void store.setTodoPinned(props.todo.id, false).then(() => showToast(`「${props.todo.title}」已取消置顶`))
 }
 
 function onRowPointerDown(e: PointerEvent) {
@@ -91,12 +118,58 @@ function onRowPointerDown(e: PointerEvent) {
 
 async function toggle() {
   const wasDone = props.todo.done
+  // 勾父带子：父待办标记完成时，未完成的子待办一并勾上（取消完成不连带走子待办，保留各自进度）。
+  // 有未完成子项时先确认——静默连勾用户看不见，容易误以为只勾了父条目。
+  if (!wasDone && kids.value.some((k) => !k.done)) {
+    confirmKids.value = kids.value.filter((k) => !k.done).length
+    showKidsConfirm.value = true
+    return
+  }
+  await applyToggle()
+}
+
+async function applyToggle() {
+  const wasDone = props.todo.done
+  // 周期待办：勾选 = 「完成本轮」，日期滚到下一轮（不置 done、不进已完成列表）。
+  // 就地滚动后给一条可撤销提示，否则用户会以为点了没反应。
+  if (!wasDone && props.todo.repeat_mode !== 'once') {
+    const updated = await store.completeTodoRecurring(props.todo.id)
+    if (updated) {
+      const next = updated.repeat_mode === 'once' ? '周期已结束' : `已滚到 ${nextLabel(updated)}`
+      showToast(next, {
+        label: '撤销',
+        onClick: () => void store.undoTodoRecurring(props.todo.id),
+      })
+    }
+    return
+  }
   await store.toggleTodo(props.todo.id)
-  // 勾父带子：父待办标记完成时，未完成的子待办一并勾上（取消完成不连带走子待办，保留各自进度）
   if (wasDone) return
   for (const k of kids.value) {
     if (!k.done) await store.toggleTodo(k.id)
   }
+}
+
+/** 滚动后的下一个截止文案：今天 / 明天 / M月D日 */
+function nextLabel(t: Todo): string {
+  if (t.due_at == null) return '下一轮'
+  const d = new Date(t.due_at)
+  const badge = dueBadge({ due_at: t.due_at }, new Date())
+  if (badge && (badge.kind === 'today' || badge.kind === 'tmr')) return badge.text
+  return `${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+/** 确认弹窗状态：未完成子待办数量（> 0 时弹窗） */
+const showKidsConfirm = ref(false)
+const confirmKids = ref(0)
+
+async function onKidsConfirm() {
+  showKidsConfirm.value = false
+  await applyToggle()
+}
+
+function onKidsCancel() {
+  showKidsConfirm.value = false
 }
 
 async function cyclePriority() {
@@ -368,6 +441,16 @@ function hideTip() {
         @blur="commitEdit"
       ></textarea>
       <div v-else class="todo-line">
+        <button
+          v-if="todo.pinned"
+          class="todo-pin"
+          type="button"
+          aria-label="取消置顶"
+          title="已置顶（与日期无关，固定在「置顶」区），点击取消"
+          @click.stop="unpin"
+        >
+          <Pin :size="12" :stroke-width="2.2" />
+        </button>
         <span
           class="todo-label"
           :data-tip="todo.title"
@@ -404,6 +487,15 @@ function hideTip() {
           <span v-if="remindOn && todo.remind_at != null" class="todo-badge remind" title="到点弹提醒">
             <Bell :size="10" :stroke-width="2" />
             提醒 {{ fmtHM(todo.remind_at) }}
+          </span>
+          <span v-if="repeatText" class="todo-badge repeat" :title="repeatTitle">
+            <Repeat :size="10" :stroke-width="2" />
+            {{ repeatText }}
+          </span>
+          <span v-if="tagChips.length" class="todo-tags">
+            <span v-for="tag in tagChips" :key="tag.id" class="todo-tag" :title="tag.name">
+              <i class="dot" :style="{ background: tag.color || 'var(--brand-500)' }"></i>{{ tag.name }}
+            </span>
           </span>
           <span
             v-if="showProgress"
@@ -522,6 +614,16 @@ function hideTip() {
       </div>
     </Transition>
   </Teleport>
+
+  <ConfirmDialog
+    :visible="showKidsConfirm"
+    title="还有子待办未完成"
+    :message="`「${props.todo.title}」下还有 ${confirmKids} 条子待办未完成，是否确认完成？`"
+    hint="确认后会一并勾选这些子待办；取消则本条待办保持未完成。"
+    confirm-text="确认并勾选子项"
+    @confirm="onKidsConfirm"
+    @cancel="onKidsCancel"
+  />
 </template>
 
 <style scoped>
@@ -713,6 +815,56 @@ function hideTip() {
   background: var(--c-green-soft);
   color: var(--c-green-ink);
   cursor: default;
+}
+/* 周期徽标：蓝色（与倒计时/重复语义一致），只读展示 */
+.todo-badge.repeat {
+  background: var(--c-blue-soft);
+  color: var(--c-blue-ink);
+  cursor: default;
+}
+.todo-badge.repeat:hover {
+  transform: none;
+  filter: none;
+}
+/* 置顶图钉：行首标识，颜色与「置顶」分区标题一致 */
+  .todo-pin {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--brand-500);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .todo-pin:hover {
+    color: var(--c-red-ink);
+  }
+/* 待办标签：小圆点 + 名字 */
+.todo-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.todo-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-card-soft);
+  border: 1px solid var(--border-soft);
+  color: var(--text-3);
+  font-size: 0.625em;
+  font-weight: 600;
+}
+.todo-tag .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 .todo-badge.remind:hover {
   transform: none;

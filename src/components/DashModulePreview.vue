@@ -36,6 +36,7 @@ import {
 import { accentOf, iconSrc, isImageIcon, CATEGORY_ICONS } from '../composables/useResourceIcon'
 import { dashModuleTitle } from '../composables/useDashboardLayout'
 import { dashPreviewData } from '../composables/useDashPreviewData'
+import { calendarGrid, isoKey } from '../utils/todoSchedule'
 import type { Resource } from '../api/tauri'
 
 /**
@@ -70,9 +71,6 @@ const {
   dateText,
   lunar,
   quoteText,
-  monthHead,
-  monthCells,
-  weekdays,
   relTime,
   fmtRemain,
   weather,
@@ -158,6 +156,17 @@ function fileIconOf(r: Resource) {
 const stickySlot = computed(() => (props.modId === 'sticky2' ? 2 : 1))
 // 缩印里的模块名：一律取模块注册表标题（扩展 = manifest.name），不要用 ext: 后面的 id
 const extName = computed(() => dashModuleTitle(props.modId))
+/** 日历模块缩印：当月 6×7 网格 + 有截止的待办分布（真实卡片同源 utils/todoSchedule） */
+const calCells = computed(() => calendarGrid(new Date(), new Date()))
+const calMarked = computed(() => {
+  const map = new Map<string, number>()
+  for (const t of todoGroups.value.flatMap((g) => g.items)) {
+    if (t.due_at == null) continue
+    const key = isoKey(new Date(t.due_at))
+    map.set(key, (map.get(key) ?? 0) + 1)
+  }
+  return map
+})
 const kind = computed(() => {
   const id = props.modId
   if (id.startsWith('ext:')) return 'ext'
@@ -176,18 +185,6 @@ const kind = computed(() => {
         <div v-if="lunar" class="lunar-date">{{ lunar.monthName }}{{ lunar.dayName }}</div>
         <hr v-if="lunar" class="lunar-div" />
         <div v-if="lunar" class="lunar-extra">{{ lunar.ganZhiYear }}年 · 属{{ lunar.zodiac }}</div>
-      </div>
-      <div v-else-if="variant === 'month'" class="clock-month">
-        <div class="month-head">{{ monthHead }}</div>
-        <div class="month-grid">
-          <span v-for="wd in weekdays" :key="'h' + wd" class="month-cell wd">{{ wd }}</span>
-          <span
-            v-for="(c, i) in monthCells"
-            :key="i"
-            class="month-cell"
-            :class="{ today: c.today, other: !c.inMonth }"
-          >{{ c.day }}</span>
-        </div>
       </div>
       <div v-else-if="variant === 'minimal'" class="clock-mini">
         <div class="mini-time">{{ timeHM }}<span class="mini-sec">{{ secText }}</span></div>
@@ -469,6 +466,19 @@ const kind = computed(() => {
     </template>
 
     <!-- ===== 最近使用 ===== -->
+    <template v-else-if="kind === 'calendar'">
+      <h3 v-if="!hideTitle" class="hd-title">
+        <CalendarDays class="ic" /><span>{{ title ?? '日历' }}</span>
+      </h3>
+      <div class="cal-mini">
+        <div v-for="d in ['一', '二', '三', '四', '五', '六', '日']" :key="d" class="cal-dow">{{ d }}</div>
+        <div v-for="c in calCells" :key="c.key" class="cal-cell" :class="{ out: c.out, today: c.today }">
+          <span class="cal-day">{{ c.day }}</span>
+          <i v-if="calMarked.get(c.key)" class="cal-dot" :title="`${calMarked.get(c.key)} 条待办`"></i>
+        </div>
+      </div>
+    </template>
+
     <template v-else-if="kind === 'recent'">
       <header class="hd hd-split" :class="{ 'hd-float': hideTitle }">
         <h3 v-if="!hideTitle" class="hd-title"><Flame class="ic" /><span>{{ title ?? '最近使用' }}</span></h3>
@@ -521,6 +531,50 @@ const kind = computed(() => {
   font-size: calc(13 * var(--u));
   line-height: 1.45;
   color: var(--text-1);
+}
+/* 日历模块缩印：月历网格 + 有待办的日子点一个小点 */
+.cal-mini {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: calc(2 * var(--u));
+}
+.cal-dow {
+  font-size: calc(9 * var(--u));
+  font-weight: 700;
+  color: var(--text-4);
+  text-align: center;
+}
+.cal-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: calc(1 * var(--u));
+  padding: calc(2 * var(--u));
+  border: 1px solid var(--border-soft);
+  border-radius: calc(4 * var(--u));
+  background: var(--bg-card-soft);
+  overflow: hidden;
+}
+.cal-cell.out {
+  opacity: 0.4;
+}
+.cal-cell.today {
+  border-color: var(--brand-500);
+}
+.cal-day {
+  font-size: calc(9 * var(--u));
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
+}
+.cal-dot {
+  width: calc(4 * var(--u));
+  height: calc(4 * var(--u));
+  border-radius: 50%;
+  background: var(--brand-500);
 }
 html[data-theme='dark'] .dpv {
   --todo-pri-default: #52525f;
@@ -626,8 +680,7 @@ html[data-theme='dark'] .dpv {
 
 /* ---- 时钟：big ---- */
 .clock-big,
-.clock-lunar,
-.clock-month {
+.clock-lunar {
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -750,43 +803,6 @@ html[data-theme='dark'] .dpv {
   font-size: calc(12 * var(--u));
   color: var(--text-3);
   white-space: nowrap;
-}
-.month-head {
-  font-size: calc(15 * var(--u));
-  font-weight: 700;
-  flex-shrink: 0;
-}
-.month-grid {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  grid-auto-rows: 1fr;
-  gap: calc(3 * var(--u));
-}
-.month-cell {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 0;
-  font-size: calc(11 * var(--u));
-  font-variant-numeric: tabular-nums;
-  color: var(--text-2);
-  border-radius: calc(4 * var(--u));
-  overflow: hidden;
-}
-.month-cell.wd {
-  color: var(--text-4);
-  font-weight: 600;
-}
-.month-cell.today {
-  background: var(--brand-500);
-  color: var(--text-on-accent);
-  font-weight: 700;
-}
-.month-cell.other {
-  color: var(--text-3);
-  opacity: 0.4;
 }
 .clock-mini {
   height: 100%;

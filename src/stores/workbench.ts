@@ -16,6 +16,10 @@ import {
   type SystemInfo,
   type Tag,
   type Todo,
+  type RepeatRuleInput,
+  type TodoOccurrence,
+  type TodoTag,
+  type TodoTagLink,
   type WeatherCurrent,
 } from '../api/tauri'
 
@@ -36,6 +40,10 @@ interface StoreState {
   countdowns: Countdown[]
   snippets: Snippet[]
   tags: Tag[]
+  /** 待办标签定义（与笔记标签 tags 是两套独立定义） */
+  todoTags: TodoTag[]
+  /** 待办-标签关联（前端构建筛选映射用） */
+  todoTagLinks: TodoTagLink[]
   config: AppConfig
   systemInfo: SystemInfo | null
   online: boolean
@@ -53,6 +61,8 @@ const state = reactive<StoreState>({
   countdowns: [],
   snippets: [],
   tags: [],
+  todoTags: [],
+  todoTagLinks: [],
   config: {
     theme_mode: 'light',
     theme_preset: 'indigo',
@@ -151,6 +161,8 @@ export function useStore() {
     state.snippets = snippets
     state.countdowns = data.countdowns
     state.loaded = true
+    // 待办标签与关联单独拉（不进 get_initial_data：老库/老版本兼容面更小）
+    void refreshTodoTags()
   }
 
   // ---- 提示词百宝箱 ----
@@ -358,6 +370,19 @@ export function useStore() {
           remind_fired: false,
           parent_id: parentId,
           sort_order: null,
+          description: '',
+          pinned: false,
+          repeat_mode: 'once' as const,
+          repeat_every: null,
+          repeat_unit: null,
+          repeat_weekdays: null,
+          repeat_month_day: null,
+          repeat_month_nth: null,
+          repeat_end_mode: null,
+          repeat_end_at: null,
+          repeat_count: null,
+          repeat_done_count: 0,
+          repeat_last_done_at: null,
         }
     state.todos.push(t)
     // 顶级待办落入「手动排序过」的分组时（组内已有 sort_order 非空条目），
@@ -450,6 +475,147 @@ export function useStore() {
   async function refreshTodos() {
     if (!isTauri()) return
     state.todos = await tauriApi.listTodos()
+  }
+
+  // ---- 待办升级：描述 / 置顶 / 周期 / 标签 ----
+
+  function replaceTodo(updated: Todo) {
+    const i = state.todos.findIndex((t) => t.id === updated.id)
+    if (i >= 0) state.todos[i] = updated
+    return updated
+  }
+
+  /** 设置描述（轻量 Markdown） */
+  async function setTodoDescription(id: number, description: string) {
+    if (!isTauri()) {
+      const cur = state.todos.find((t) => t.id === id)
+      return cur ? replaceTodo({ ...cur, description }) : null
+    }
+    return replaceTodo(await tauriApi.setTodoDescription(id, description))
+  }
+
+  /** 置顶开关：置顶条目脱离日期分组，固定排在列表最顶部「置顶」区 */
+  async function setTodoPinned(id: number, pinned: boolean) {
+    if (!isTauri()) {
+      const cur = state.todos.find((t) => t.id === id)
+      return cur ? replaceTodo({ ...cur, pinned }) : null
+    }
+    return replaceTodo(await tauriApi.setTodoPinned(id, pinned))
+  }
+
+  /** 写入周期规则（规则由 Rust 侧唯一实现，这里只落库） */
+  async function setTodoRepeat(id: number, rule: RepeatRuleInput) {
+    if (!isTauri()) {
+      const cur = state.todos.find((t) => t.id === id)
+      return cur
+        ? replaceTodo({
+            ...cur,
+            repeat_mode: rule.mode,
+            repeat_every: rule.every,
+            repeat_unit: rule.unit,
+            repeat_weekdays: rule.weekdays,
+            repeat_month_day: rule.month_day,
+            repeat_month_nth: rule.month_nth,
+            repeat_end_mode: rule.end_mode,
+            repeat_end_at: rule.end_at,
+            repeat_count: rule.count,
+          })
+        : null
+    }
+    return replaceTodo(await tauriApi.setTodoRepeat(id, rule))
+  }
+
+  /** 周期待办「完成本轮」：日期滚到下一轮（子待办由后端复位） */
+  async function completeTodoRecurring(id: number) {
+    if (!isTauri()) return null
+    const updated = replaceTodo(await tauriApi.completeTodoRecurring(id))
+    // 后端把子待办复位为未完成，本地同步（避免子项仍显示勾选）
+    for (const k of state.todos.filter((t) => t.parent_id === id && t.done)) {
+      k.done = false
+      k.completed_at = null
+    }
+    return updated
+  }
+
+  /** 撤销「完成本轮」：日期滚回上一轮 */
+  async function undoTodoRecurring(id: number) {
+    if (!isTauri()) return null
+    return replaceTodo(await tauriApi.undoTodoRecurring(id))
+  }
+
+  /** 展开区间内的周期待办虚拟实例（日历渲染用；规则在 Rust 侧） */
+  async function expandTodoOccurrences(fromMs: number, toMs: number): Promise<TodoOccurrence[]> {
+    if (!isTauri()) return []
+    return tauriApi.expandTodoOccurrences(fromMs, toMs)
+  }
+
+  /** 待办标签定义 + 关联（外部改动后也可手动刷新） */
+  async function refreshTodoTags() {
+    if (!isTauri()) return
+    const [tags, links] = await Promise.all([
+      tauriApi.listTodoTags().catch(() => [] as TodoTag[]),
+      tauriApi.listTodoTagLinks().catch(() => [] as TodoTagLink[]),
+    ])
+    state.todoTags = tags
+    state.todoTagLinks = links
+  }
+
+  async function createTodoTag(name: string, color = '') {
+    if (!isTauri()) {
+      const tag: TodoTag = {
+        id: Date.now(),
+        name,
+        color,
+        sort_order: state.todoTags.length,
+        created_at: new Date().toISOString(),
+      }
+      state.todoTags.push(tag)
+      return tag
+    }
+    const tag = await tauriApi.createTodoTag(name, color)
+    await refreshTodoTags()
+    return tag
+  }
+
+  async function updateTodoTag(id: number, name: string, color = '') {
+    if (!isTauri()) {
+      const i = state.todoTags.findIndex((t) => t.id === id)
+      if (i >= 0) state.todoTags[i] = { ...state.todoTags[i], name, color }
+      return
+    }
+    await tauriApi.updateTodoTag(id, name, color)
+    await refreshTodoTags()
+  }
+
+  async function deleteTodoTag(id: number) {
+    if (!isTauri()) {
+      state.todoTags = state.todoTags.filter((t) => t.id !== id)
+      state.todoTagLinks = state.todoTagLinks.filter((l) => l.tag_id !== id)
+      return
+    }
+    await tauriApi.deleteTodoTag(id)
+    await refreshTodoTags()
+  }
+
+  /** 全量设置某条待办的标签 */
+  async function setTodoTags(id: number, tagIds: number[]) {
+    if (!isTauri()) {
+      state.todoTagLinks = [
+        ...state.todoTagLinks.filter((l) => l.todo_id !== id),
+        ...tagIds.map((tag_id) => ({ todo_id: id, tag_id })),
+      ]
+      return
+    }
+    await tauriApi.setTodoTags(id, tagIds)
+    state.todoTagLinks = [
+      ...state.todoTagLinks.filter((l) => l.todo_id !== id),
+      ...tagIds.map((tag_id) => ({ todo_id: id, tag_id })),
+    ]
+  }
+
+  /** 某条待办的标签 id 列表 */
+  function todoTagIds(id: number): number[] {
+    return state.todoTagLinks.filter((l) => l.todo_id === id).map((l) => l.tag_id)
   }
 
   // ---- 便签 ----
@@ -1122,6 +1288,18 @@ export function useStore() {
     scheduleTodo,
     reorderTodos,
     refreshTodos,
+    setTodoDescription,
+    setTodoPinned,
+    setTodoRepeat,
+    completeTodoRecurring,
+    undoTodoRecurring,
+    expandTodoOccurrences,
+    refreshTodoTags,
+    createTodoTag,
+    updateTodoTag,
+    deleteTodoTag,
+    setTodoTags,
+    todoTagIds,
     saveSticky,
     detachSticky,
     focusDetachedSticky,

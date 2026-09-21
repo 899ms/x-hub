@@ -33,6 +33,7 @@ mod skills;
 mod sticky_window;
 mod sysmon;
 mod todo_reminder;
+mod todo_recurrence;
 mod tray;
 pub mod updater;
 mod win_taskbar;
@@ -520,6 +521,18 @@ pub fn run() {
             commands::delete_todo,
             commands::schedule_todo,
             commands::reorder_todo_orders,
+            commands::set_todo_description,
+            commands::set_todo_pinned,
+            commands::set_todo_repeat,
+            commands::complete_todo_recurring,
+            commands::undo_todo_recurring,
+            commands::expand_todo_occurrences,
+            commands::list_todo_tags,
+            commands::create_todo_tag,
+            commands::update_todo_tag,
+            commands::delete_todo_tag,
+            commands::set_todo_tags,
+            commands::list_todo_tag_links,
             commands::list_stickies,
             commands::save_sticky,
             commands::get_detached_stickies,

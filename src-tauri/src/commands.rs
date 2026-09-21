@@ -3,10 +3,15 @@ use crate::config;
 use crate::config::AppConfig;
 use crate::models::{
     ChatMessage, ChatModelConfig, ChatSession, ClipboardItem, Countdown, DetachedSticky, Note,
-    Resource, ResourceKind, SearchResult, Snippet, Sticky, Tag, Todo,
+    RepeatRule, Resource, ResourceKind, SearchResult, Snippet, Sticky, Tag, Todo, TodoOccurrence,
+    TodoTag, TodoTagLink,
 };
 use crate::process;
-use crate::repo::{chat, clipboard, countdown, detached_sticky, note, resource, snippet, sticky, tag, todo};
+use crate::repo::{
+    chat, clipboard, countdown, detached_sticky, note, resource, snippet, sticky, tag, todo,
+    todo_tag,
+};
+use crate::todo_recurrence;
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
@@ -372,6 +377,239 @@ pub fn reorder_todo_orders(
     log::debug!("待办排序更新: {} 条", ids.len());
     Ok(())
 }
+
+// ---------- 待办升级：描述 / 置顶 / 周期 / 标签 ----------
+
+/// 设置待办描述（轻量 Markdown）
+#[tauri::command]
+pub fn set_todo_description(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+    description: String,
+) -> Result<Todo, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let t = todo::set_description(&conn, id, &description).map_err(err_str)?;
+    drop(conn);
+    let _ = app.emit("todos-changed", ());
+    log::debug!("待办描述更新: id={} ({} 字)", id, description.chars().count());
+    Ok(t)
+}
+
+/// 置顶开关：置顶条目脱离日期分组，固定排在列表最顶部「置顶」区
+#[tauri::command]
+pub fn set_todo_pinned(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+    pinned: bool,
+) -> Result<Todo, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let t = todo::set_pinned(&conn, id, pinned).map_err(err_str)?;
+    drop(conn);
+    let _ = app.emit("todos-changed", ());
+    log::debug!("待办置顶更新: id={} pinned={}", id, pinned);
+    Ok(t)
+}
+
+/// 写入周期规则（整组 repeat_* 列一起写；非法取值 fail-fast）
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn set_todo_repeat(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+    repeat_mode: String,
+    repeat_every: Option<i64>,
+    repeat_unit: Option<String>,
+    repeat_weekdays: Option<i64>,
+    repeat_month_day: Option<i64>,
+    repeat_month_nth: Option<i64>,
+    repeat_end_mode: Option<String>,
+    repeat_end_at: Option<i64>,
+    repeat_count: Option<i64>,
+) -> Result<Todo, String> {
+    let mut rule = RepeatRule {
+        mode: repeat_mode,
+        every: repeat_every,
+        unit: repeat_unit,
+        weekdays: repeat_weekdays,
+        month_day: repeat_month_day,
+        month_nth: repeat_month_nth,
+        end_mode: repeat_end_mode,
+        end_at: repeat_end_at,
+        count: repeat_count,
+    };
+    rule.validate()?;
+    rule.normalize();
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let t = todo::set_repeat(&conn, id, &rule).map_err(err_str)?;
+    drop(conn);
+    let _ = app.emit("todos-changed", ());
+    log::info!(
+        "待办周期更新: id={} mode={} (下次 due_at={:?})",
+        id,
+        t.repeat_mode,
+        t.due_at
+    );
+    Ok(t)
+}
+
+/// 周期待办「完成本轮」：due_at 滚到下一个未来时刻、计数 +1、子待办复位
+#[tauri::command]
+pub fn complete_todo_recurring(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+) -> Result<Todo, String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let t = todo::complete_recurring(&conn, id, now_ms)?;
+    drop(conn);
+    let _ = app.emit("todos-changed", ());
+    log::info!(
+        "周期待办滚动: id={} mode={} 下一轮 due_at={:?} 累计完成={}",
+        id,
+        t.repeat_mode,
+        t.due_at,
+        t.repeat_done_count
+    );
+    Ok(t)
+}
+
+/// 撤销「完成本轮」：计数 −1，due_at 滚回上一个实例
+#[tauri::command]
+pub fn undo_todo_recurring(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+) -> Result<Todo, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let t = todo::undo_recurring(&conn, id)?;
+    drop(conn);
+    let _ = app.emit("todos-changed", ());
+    log::info!("周期待办撤销: id={} 回到 due_at={:?}", id, t.due_at);
+    Ok(t)
+}
+
+/// 展开 [from_ms, to_ms] 内的周期待办虚拟实例（日历渲染用；规则只实现于 Rust 侧）
+#[tauri::command]
+pub fn expand_todo_occurrences(
+    state: State<'_, DbState>,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<TodoOccurrence>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let todos = todo::list(&conn).map_err(err_str)?;
+    let mut out = Vec::new();
+    for t in todos {
+        if t.done || t.parent_id.is_some() || !todo_recurrence::is_recurring(&t) {
+            continue;
+        }
+        let Some(due) = t.due_at else { continue };
+        let rule = RepeatRule::from_todo(&t);
+        for at_ms in todo_recurrence::expand_occurrences(
+            &rule,
+            due,
+            t.repeat_done_count,
+            from_ms,
+            to_ms,
+        ) {
+            out.push(TodoOccurrence {
+                todo_id: t.id,
+                at_ms,
+            });
+        }
+    }
+    out.sort_by_key(|o| o.at_ms);
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn list_todo_tags(state: State<'_, DbState>) -> Result<Vec<TodoTag>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    todo_tag::list(&conn).map_err(err_str)
+}
+
+#[tauri::command]
+pub fn create_todo_tag(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    name: String,
+    color: Option<String>,
+) -> Result<TodoTag, String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("标签名不能为空".into());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tag = todo_tag::create(&conn, n, color.as_deref().unwrap_or("")).map_err(err_str)?;
+    drop(conn);
+    let _ = app.emit("todo-tags-changed", ());
+    log::info!("新建待办标签: id={} {}", tag.id, tag.name);
+    Ok(tag)
+}
+
+#[tauri::command]
+pub fn update_todo_tag(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+    name: String,
+    color: Option<String>,
+) -> Result<TodoTag, String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("标签名不能为空".into());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tag = todo_tag::update(&conn, id, n, color.as_deref().unwrap_or("")).map_err(err_str)?;
+    drop(conn);
+    let _ = app.emit("todo-tags-changed", ());
+    Ok(tag)
+}
+
+#[tauri::command]
+pub fn delete_todo_tag(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    todo_tag::delete(&conn, id).map_err(err_str)?;
+    drop(conn);
+    let _ = app.emit("todo-tags-changed", ());
+    let _ = app.emit("todos-changed", ());
+    Ok(())
+}
+
+/// 全量设置某条待办的标签
+#[tauri::command]
+pub fn set_todo_tags(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    id: i64,
+    tag_ids: Vec<i64>,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    todo_tag::set_todo_tags(&conn, id, &tag_ids).map_err(err_str)?;
+    drop(conn);
+    let _ = app.emit("todos-changed", ());
+    log::debug!("待办标签更新: id={} → {:?}", id, tag_ids);
+    Ok(())
+}
+
+/// 待办-标签全量关联（前端构建筛选映射用）
+#[tauri::command]
+pub fn list_todo_tag_links(state: State<'_, DbState>) -> Result<Vec<TodoTagLink>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let links = todo_tag::list_links(&conn).map_err(err_str)?;
+    Ok(links
+        .into_iter()
+        .map(|(todo_id, tag_id)| TodoTagLink { todo_id, tag_id })
+        .collect())
+}
+
 
 // ---------- 便签 ----------
 

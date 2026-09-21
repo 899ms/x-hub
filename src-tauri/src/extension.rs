@@ -884,7 +884,21 @@ pub(crate) const XHUB_BRIDGE_SCRIPT: &str = r#"
         update:function(opts){return call('data','todos.update',opts||{});},
         toggle:function(opts){return call('data','todos.toggle',opts||{});},
         delete:function(opts){return call('data','todos.delete',opts||{});},
-        schedule:function(opts){return call('data','todos.schedule',opts||{});}
+        schedule:function(opts){return call('data','todos.schedule',opts||{});},
+        setDescription:function(opts){return call('data','todos.setDescription',opts||{});},
+        setPinned:function(opts){return call('data','todos.setPinned',opts||{});},
+        setRepeat:function(opts){return call('data','todos.setRepeat',opts||{});},
+        setTags:function(opts){return call('data','todos.setTags',opts||{});},
+        completeRecurring:function(opts){return call('data','todos.completeRecurring',opts||{});},
+        undoRecurring:function(opts){return call('data','todos.undoRecurring',opts||{});},
+        expandOccurrences:function(opts){return call('data','todos.expandOccurrences',opts||{});}
+      },
+      todoTags:{
+        list:function(){return call('data','todoTags.list',{});},
+        links:function(){return call('data','todoTags.links',{});},
+        create:function(opts){return call('data','todoTags.create',opts||{});},
+        update:function(opts){return call('data','todoTags.update',opts||{});},
+        delete:function(opts){return call('data','todoTags.delete',opts||{});}
       },
       stickies:{
         list:function(){return call('data','stickies.list',{});},

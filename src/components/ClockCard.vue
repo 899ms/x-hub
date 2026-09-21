@@ -18,7 +18,7 @@ import { toLunar } from '../utils/lunar'
 
 const props = withDefaults(
   defineProps<{
-    /** 形态：big 大时钟 / lunar 今日阴阳历 / month 整月日历 / minimal 极简时间 */
+    /** 形态：big 大时钟 / lunar 今日阴阳历 / minimal 极简时间 */
     variant?: string
     /** 编辑器缩略模式：纯展示，无交互副作用（时钟 tick 照常，成本极低） */
     preview?: boolean
@@ -64,7 +64,7 @@ const dateText = computed(() => {
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 周${WEEKDAYS[d.getDay()]}`
 })
 
-/** 分钟级 tick：农历 / 月视图按天变化，用分钟取整的原始数值驱动——秒级 tick 的
+/** 分钟级 tick：农历按天变化，用分钟取整的原始数值驱动——秒级 tick 的
  *  重算在分钟未变时被 computed 缓存短路（不能用新 Date 对象：引用每秒都变，照样重算） */
 const minuteTick = computed(() => Math.floor(now.value.getTime() / 60_000))
 
@@ -143,43 +143,6 @@ const weatherSubText = computed(() => {
   return `${weatherDesc.value.label}${city}`
 })
 
-// ---- 整月日历（month 形态）----
-interface MonthCell {
-  day: number
-  inMonth: boolean
-  today: boolean
-}
-
-const monthTitle = computed(() => {
-  const d = new Date(minuteTick.value * 60_000)
-  return `${d.getFullYear()}年${d.getMonth() + 1}月`
-})
-
-const monthCells = computed<MonthCell[]>(() => {
-  const d = new Date(minuteTick.value * 60_000)
-  const y = d.getFullYear()
-  const m = d.getMonth()
-  const firstWeekday = new Date(y, m, 1).getDay()
-  const days = new Date(y, m + 1, 0).getDate()
-  const prevDays = new Date(y, m, 0).getDate()
-  const cells: MonthCell[] = []
-  // 上月补位
-  for (let i = firstWeekday - 1; i >= 0; i--) {
-    cells.push({ day: prevDays - i, inMonth: false, today: false })
-  }
-  for (let day = 1; day <= days; day++) {
-    cells.push({
-      day,
-      inMonth: true,
-      today: day === d.getDate() && m === d.getMonth() && y === d.getFullYear(),
-    })
-  }
-  // 下月补齐整周（保持网格整齐）
-  while (cells.length % 7 !== 0) {
-    cells.push({ day: cells.length - firstWeekday - days + 1, inMonth: false, today: false })
-  }
-  return cells
-})
 </script>
 
 <template>
@@ -225,25 +188,6 @@ const monthCells = computed<MonthCell[]>(() => {
       <hr v-if="lunar" class="lunar-div" />
       <div v-if="lunar" class="lunar-extra">
         {{ lunar.ganZhiYear }}年 · 属{{ lunar.zodiac }}
-      </div>
-    </template>
-
-    <!-- 形态 · 整月日历 -->
-    <template v-else-if="variant === 'month'">
-      <div class="month-head">{{ monthTitle }}</div>
-      <div class="month-grid">
-        <span
-          v-for="wd in WEEKDAYS"
-          :key="'h' + wd"
-          class="month-cell wd"
-          aria-hidden="true"
-        >{{ wd }}</span>
-        <span
-          v-for="(c, i) in monthCells"
-          :key="i"
-          class="month-cell"
-          :class="{ today: c.today, other: !c.inMonth }"
-        >{{ c.day }}</span>
       </div>
     </template>
 
@@ -412,45 +356,6 @@ const monthCells = computed<MonthCell[]>(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* ---- 整月日历 ---- */
-.month-head {
-  flex-shrink: 0;
-  font-size: clamp(11px, 7cqh, 15px);
-  font-weight: 700;
-  color: var(--text-1);
-}
-.month-grid {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  grid-auto-rows: 1fr;
-  gap: clamp(1px, 1.8cqh, 3px);
-}
-.month-cell {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 0;
-  font-size: clamp(7px, 5.2cqh, 11px);
-  font-variant-numeric: tabular-nums;
-  color: var(--text-2);
-  border-radius: clamp(2px, 1.2cqh, 4px);
-}
-.month-cell.wd {
-  color: var(--text-4);
-  font-weight: 600;
-}
-.month-cell.today {
-  background: var(--brand-500);
-  color: var(--text-on-accent);
-  font-weight: 700;
-}
-.month-cell.other {
-  color: var(--text-3);
-  opacity: 0.4;
 }
 
 /* ---- 极简时间 ---- */

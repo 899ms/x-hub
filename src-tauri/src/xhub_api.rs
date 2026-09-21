@@ -15,6 +15,7 @@
 
 use crate::commands::DbState;
 use crate::extension::{extensions_root, ExtensionManifest, ExtensionRuntime};
+use crate::models::RepeatRule;
 use crate::repo;
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
@@ -207,6 +208,79 @@ pub(crate) static CAPABILITIES: &[Capability] = &[
         method: "todos.schedule",
         permission: Some("data:write"),
         handler: CapabilityHandler::Sync(data_todos_schedule),
+    },
+    // ----- data 待办升级：描述 / 置顶 / 周期 / 标签（v0.5.0） -----
+    Capability {
+        namespace: "data",
+        method: "todos.setDescription",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_set_description),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.setPinned",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_set_pinned),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.setRepeat",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_set_repeat),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.completeRecurring",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_complete_recurring),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.undoRecurring",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_undo_recurring),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.setTags",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todos_set_tags),
+    },
+    Capability {
+        namespace: "data",
+        method: "todos.expandOccurrences",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_todos_expand_occurrences),
+    },
+    Capability {
+        namespace: "data",
+        method: "todoTags.list",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_todo_tags_list),
+    },
+    Capability {
+        namespace: "data",
+        method: "todoTags.links",
+        permission: Some("data:read"),
+        handler: CapabilityHandler::Sync(data_todo_tags_links),
+    },
+    Capability {
+        namespace: "data",
+        method: "todoTags.create",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todo_tags_create),
+    },
+    Capability {
+        namespace: "data",
+        method: "todoTags.update",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todo_tags_update),
+    },
+    Capability {
+        namespace: "data",
+        method: "todoTags.delete",
+        permission: Some("data:write"),
+        handler: CapabilityHandler::Sync(data_todo_tags_delete),
     },
     Capability {
         namespace: "data",
@@ -707,6 +781,20 @@ fn expect_opt_i64(args: &Value, key: &str) -> Result<Option<i64>, String> {
     }
 }
 
+/// 必填整数数组（如 tagIds）：缺失报错；元素非整数 fail-fast（静默丢弃会改变语义）。
+fn expect_i64_array(args: &Value, key: &str) -> Result<Vec<i64>, String> {
+    let arr = args
+        .get(key)
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("INVALID_ARGUMENT: 缺少 {key}（应为整数数组）"))?;
+    arr.iter()
+        .map(|v| {
+            v.as_i64()
+                .ok_or_else(|| format!("INVALID_ARGUMENT: {key} 元素必须为整数"))
+        })
+        .collect()
+}
+
 /// 必填非空字符串（trim 后非空）：与宿主命令同强度校验——扩展是不可信输入源，
 /// 空/纯空白标题会制造列表空白条目。
 fn expect_non_empty(args: &Value, key: &str) -> Result<String, String> {
@@ -1053,6 +1141,279 @@ fn data_todos_schedule(
     data_write(app, state, Some("todos-changed"), |conn| {
         let todo = repo::todo::schedule_with_version(conn, id, due_at, remind_at, expected)?;
         serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+// ---------- data 写扩展：待办升级（描述 / 置顶 / 周期 / 标签） ----------
+
+/// 解析扩展传入的周期规则对象（camelCase 键）；非对象报错，不静默降级成 once。
+fn parse_repeat_rule(v: &Value) -> Result<RepeatRule, String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "INVALID_ARGUMENT: repeat 必须是对象".to_string())?;
+    let mode = obj
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .ok_or_else(|| "INVALID_ARGUMENT: repeat.mode 缺失".to_string())?
+        .to_string();
+    let rule = RepeatRule {
+        mode,
+        every: expect_opt_i64(v, "every")?,
+        unit: obj.get("unit").and_then(|u| u.as_str()).map(str::to_owned),
+        weekdays: expect_opt_i64(v, "weekdays")?,
+        month_day: expect_opt_i64(v, "monthDay")?,
+        month_nth: expect_opt_i64(v, "monthNth")?,
+        end_mode: obj
+            .get("endMode")
+            .and_then(|e| e.as_str())
+            .map(str::to_owned),
+        end_at: expect_opt_i64(v, "endAt")?,
+        count: expect_opt_i64(v, "count")?,
+    };
+    rule.validate()?;
+    Ok(rule)
+}
+
+fn data_todos_set_description(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 description".to_string())?
+        .to_string();
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo =
+            repo::todo::set_description_with_version(conn, id, &description, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todos_set_pinned(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let pinned = args
+        .get("pinned")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 pinned".to_string())?;
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::set_pinned_with_version(conn, id, pinned, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todos_set_repeat(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let repeat = args
+        .get("repeat")
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 repeat".to_string())?;
+    let mut rule = parse_repeat_rule(repeat)?;
+    rule.normalize();
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::set_repeat_with_version(conn, id, &rule, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+/// 周期待办「完成本轮」：due_at 滚动到下一个未来时刻、计数 +1、子待办复位
+fn data_todos_complete_recurring(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::complete_recurring_with_version(conn, id, now_ms, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todos_undo_recurring(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let expected = expect_opt_i64(&args, "expectedVersion")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        let todo = repo::todo::undo_recurring_with_version(conn, id, expected)?;
+        serde_json::to_value(todo).map_err(|e| e.to_string())
+    })
+}
+
+/// 全量设置某条待办的标签（tagIds 必须为整数数组）
+fn data_todos_set_tags(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let tag_ids = expect_i64_array(&args, "tagIds")?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        repo::todo_tag::set_todo_tags(conn, id, &tag_ids).map_err(|e| e.to_string())?;
+        Ok(Value::Null)
+    })
+}
+
+fn data_todo_tags_list(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    _args: Value,
+) -> Result<Value, String> {
+    data_read(state, |conn| {
+        let tags = repo::todo_tag::list(conn).map_err(|e| e.to_string())?;
+        serde_json::to_value(tags).map_err(|e| e.to_string())
+    })
+}
+
+/// 待办-标签全量关联（前端/扩展构建筛选映射用）
+fn data_todo_tags_links(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    _args: Value,
+) -> Result<Value, String> {
+    data_read(state, |conn| {
+        let links = repo::todo_tag::list_links(conn).map_err(|e| e.to_string())?;
+        let out: Vec<Value> = links
+            .into_iter()
+            .map(|(todo_id, tag_id)| serde_json::json!({ "todo_id": todo_id, "tag_id": tag_id }))
+            .collect();
+        Ok(Value::Array(out))
+    })
+}
+
+fn data_todo_tags_create(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let name = expect_non_empty(&args, "name")?;
+    let color = args
+        .get("color")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    data_write(app, state, Some("todo-tags-changed"), |conn| {
+        let tag = repo::todo_tag::create(conn, &name, &color).map_err(|e| e.to_string())?;
+        serde_json::to_value(tag).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todo_tags_update(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    let name = expect_non_empty(&args, "name")?;
+    let color = args
+        .get("color")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    data_write(app, state, Some("todo-tags-changed"), |conn| {
+        let tag = repo::todo_tag::update(conn, id, &name, &color).map_err(|e| e.to_string())?;
+        serde_json::to_value(tag).map_err(|e| e.to_string())
+    })
+}
+
+fn data_todo_tags_delete(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let id = args
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
+    data_write(app, state, Some("todos-changed"), |conn| {
+        repo::todo_tag::delete(conn, id).map_err(|e| e.to_string())?;
+        Ok(Value::Null)
+    })
+}
+
+/// 展开区间内的周期待办虚拟实例（只读；规则只实现于 Rust 侧）
+fn data_todos_expand_occurrences(
+    _app: &tauri::AppHandle,
+    state: &DbState,
+    _ext_id: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let from_ms = args
+        .get("fromMs")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 fromMs".to_string())?;
+    let to_ms = args
+        .get("toMs")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "INVALID_ARGUMENT: 缺少 toMs".to_string())?;
+    data_read(state, |conn| {
+        let todos = repo::todo::list(conn).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for t in todos {
+            if t.done || t.parent_id.is_some() || !crate::todo_recurrence::is_recurring(&t) {
+                continue;
+            }
+            let Some(due) = t.due_at else { continue };
+            let rule = RepeatRule::from_todo(&t);
+            for at_ms in crate::todo_recurrence::expand_occurrences(
+                &rule,
+                due,
+                t.repeat_done_count,
+                from_ms,
+                to_ms,
+            ) {
+                out.push(serde_json::json!({ "todo_id": t.id, "at_ms": at_ms }));
+            }
+        }
+        Ok(Value::Array(out))
     })
 }
 
@@ -1837,6 +2198,19 @@ mod tests {
         assert!(keys.contains(&("data", "todos.toggle")));
         assert!(keys.contains(&("data", "todos.delete")));
         assert!(keys.contains(&("data", "todos.schedule")));
+        // data 待办升级（描述 / 置顶 / 周期 / 标签）：漏一个键 = 扩展静默拿不到能力
+        assert!(keys.contains(&("data", "todos.setDescription")));
+        assert!(keys.contains(&("data", "todos.setPinned")));
+        assert!(keys.contains(&("data", "todos.setRepeat")));
+        assert!(keys.contains(&("data", "todos.setTags")));
+        assert!(keys.contains(&("data", "todos.completeRecurring")));
+        assert!(keys.contains(&("data", "todos.undoRecurring")));
+        assert!(keys.contains(&("data", "todos.expandOccurrences")));
+        assert!(keys.contains(&("data", "todoTags.list")));
+        assert!(keys.contains(&("data", "todoTags.links")));
+        assert!(keys.contains(&("data", "todoTags.create")));
+        assert!(keys.contains(&("data", "todoTags.update")));
+        assert!(keys.contains(&("data", "todoTags.delete")));
         assert!(keys.contains(&("data", "stickies.save")));
         assert!(keys.contains(&("data", "detachedStickies.save")));
         assert!(keys.contains(&("data", "resources.create")));
@@ -1853,6 +2227,9 @@ mod tests {
         method.ends_with(".list")
             || method.ends_with(".get")
             || method.ends_with(".ofNote")
+            // 只读的关联/展开查询（不落库）
+            || method.ends_with(".links")
+            || method.ends_with(".expandOccurrences")
     }
 
     #[test]
