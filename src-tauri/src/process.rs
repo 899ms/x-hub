@@ -14,6 +14,10 @@ pub fn launch_program(path: &str, args: Option<&str>) -> Result<(), String> {
         if let Some(dir) = target.parent() {
             c.current_dir(dir);
         }
+        // 宿主是 GUI 子系统进程（无控制台），直接启动 CLI 工具/bat 时若不指定
+        // CREATE_NO_WINDOW，Windows 会为子进程新建控制台窗口（闪黑窗）
+        #[cfg(target_os = "windows")]
+        no_console_window(&mut c);
         c
     } else {
         #[cfg(target_os = "windows")]

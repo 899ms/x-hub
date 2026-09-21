@@ -6,6 +6,21 @@ use std::path::PathBuf;
 /// 内置 Node 版本（Node 官方 LTS）
 const NODE_VERSION: &str = "v24.9.0";
 
+/// 探测子进程一律不弹控制台窗口。
+///
+/// 宿主是 GUI 子系统进程（`main.rs` 的 `windows_subsystem = "windows"`），自身没有控制台；
+/// 此时拉起控制台子系统程序（`node.exe` / `cmd` / `powershell`）若不带 `CREATE_NO_WINDOW`，
+/// Windows 会**为子进程新建一个控制台窗口**——表现为「点开扩展时闪一下黑窗」。
+/// 这里与 `process.rs::no_console_window`、`service.rs` 的后端起法保持同一口径。
+#[cfg(target_os = "windows")]
+fn no_console_window(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+}
+
+#[cfg(not(target_os = "windows"))]
+fn no_console_window(_cmd: &mut std::process::Command) {}
+
 /// 解析 Node 版本号的主版本（"v22.11.0" → 22）
 fn node_major(version: &str) -> u32 {
     version
@@ -21,8 +36,10 @@ fn node_major(version: &str) -> u32 {
 /// 检测系统 Node 是否可用且主版本 ≥ min_version（min_version 形如 "22"）。
 /// 成功返回版本号（如 "v22.11.0"）。
 fn check_system_node(min_version: Option<&str>) -> Result<String, String> {
-    let out = std::process::Command::new("node")
-        .arg("--version")
+    let mut cmd = std::process::Command::new("node");
+    cmd.arg("--version");
+    no_console_window(&mut cmd);
+    let out = cmd
         .output()
         .map_err(|_| "未检测到 Node.js".to_string())?;
     if !out.status.success() {
