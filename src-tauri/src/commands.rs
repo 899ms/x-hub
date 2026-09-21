@@ -500,12 +500,9 @@ pub fn expand_todo_occurrences(
     to_ms: i64,
 ) -> Result<Vec<TodoOccurrence>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let todos = todo::list(&conn).map_err(err_str)?;
+    let todos = todo::list_recurring_candidates(&conn).map_err(err_str)?;
     let mut out = Vec::new();
     for t in todos {
-        if t.done || t.parent_id.is_some() || !todo_recurrence::is_recurring(&t) {
-            continue;
-        }
         let Some(due) = t.due_at else { continue };
         let rule = RepeatRule::from_todo(&t);
         for at_ms in todo_recurrence::expand_occurrences(
@@ -514,7 +511,7 @@ pub fn expand_todo_occurrences(
             t.repeat_done_count,
             from_ms,
             to_ms,
-        ) {
+        )? {
             out.push(TodoOccurrence {
                 todo_id: t.id,
                 at_ms,
@@ -1745,12 +1742,9 @@ pub fn parse_dropped_path(path: String) -> Result<DroppedAppInfo, String> {
 
 /// 创建隐藏窗口的 powershell 命令：避免 GUI 应用调用时弹出黑色控制台窗口
 fn powershell() -> std::process::Command {
+    use crate::process::NoConsoleWindow;
     let mut cmd = std::process::Command::new("powershell");
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    cmd.no_console_window();
     cmd
 }
 

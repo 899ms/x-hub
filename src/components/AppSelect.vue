@@ -18,6 +18,10 @@ const props = defineProps<{
   ariaLabel?: string
   /** 弹出层最小宽度（px），默认与触发器同宽 */
   menuMinWidth?: number
+  /** 紧凑档：行内小尺寸（工具条 / 时分下拉 / 行内选择）。尺寸由组件自身承担，
+   *  使用方只需覆盖宽度这类布局属性，不必再 :deep 抄一遍 min-height/padding/字号 */
+  compact?: boolean
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'update:modelValue', value: string): void }>()
@@ -173,7 +177,8 @@ onBeforeUnmount(() => {
     v-bind="$attrs"
     type="button"
     class="app-select-trigger"
-    :class="{ open }"
+    :class="{ open, 'is-compact': compact }"
+    :disabled="disabled"
     :aria-label="ariaLabel"
     :aria-expanded="open"
     aria-haspopup="listbox"
@@ -284,6 +289,26 @@ onBeforeUnmount(() => {
 }
 .app-select-trigger.open .app-select-chevron {
   transform: rotate(180deg);
+}
+/* 紧凑档：工具条 / 时分下拉这类行内场景（字号随父级 em 缩放，宽度由使用方按布局定） */
+.app-select-trigger.is-compact {
+  gap: 4px;
+  min-height: 0;
+  padding: 3px 6px;
+  font-size: 0.75em;
+  width: auto;
+  justify-content: center;
+}
+/* 默认 label 是 flex:1，会把值顶到左边缘；紧凑档收缩成内容宽，让「值 + 箭头」整体居中 */
+.app-select-trigger.is-compact .app-select-label {
+  flex: 0 1 auto;
+}
+.app-select-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.app-select-trigger:disabled:hover {
+  border-color: var(--border-soft);
 }
 
 .app-select-menu {

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, inject, ref, toRef, watch } from 'vue'
 import { Plus, Trash2, X } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
+import { useFocusTrap } from '../composables/useFocusTrap'
 import type { RepeatEndMode, RepeatMode, RepeatUnit, Todo } from '../api/tauri'
 import { addDays, nextMonday, repeatEndLabel, repeatLabel } from '../utils/todoSchedule'
 import TodoDateTimeField from './TodoDateTimeField.vue'
@@ -22,6 +23,15 @@ const props = defineProps<{
 const emit = defineEmits<{ close: []; saved: [] }>()
 
 const store = useStore()
+/** 轻提示（宿主提供；独立使用时为 noop） */
+const showToast = inject<(msg: string, action?: { label: string; onClick: () => void }) => void>(
+  'showToast',
+  () => {},
+)
+
+/** 焦点陷阱：Tab 循环留在弹层内（与其它弹窗同一口径） */
+const cardRef = ref<HTMLElement | null>(null)
+useFocusTrap(toRef(props, 'visible'), cardRef)
 
 const title = ref('')
 const description = ref('')
@@ -219,9 +229,13 @@ const repeatInvalid = computed(() => {
 async function addTag() {
   const name = newTagName.value.trim()
   if (!name) return
-  const tag = await store.createTodoTag(name)
-  if (tag && !tagIds.value.includes(tag.id)) tagIds.value.push(tag.id)
-  newTagName.value = ''
+  try {
+    const tag = await store.createTodoTag(name)
+    if (tag && !tagIds.value.includes(tag.id)) tagIds.value.push(tag.id)
+    newTagName.value = ''
+  } catch {
+    showToast('标签没能创建，请重试')
+  }
 }
 
 function toggleTag(id: number) {
@@ -261,6 +275,10 @@ async function save() {
     await store.scheduleTodo(id, due, remind)
     emit('saved')
     emit('close')
+  } catch {
+    // 这几步是串行写入（建条目 → 描述 → 置顶 → 标签 → 周期 → 排期），中途失败会留下半成品：
+    // 至少要让用户知道没存完，而不是弹层静默不动
+    showToast('保存失败，部分改动可能没生效，请重试')
   } finally {
     busy.value = false
   }
@@ -268,16 +286,20 @@ async function save() {
 
 async function remove() {
   if (props.todo == null) return
-  await store.deleteTodo(props.todo.id)
-  emit('saved')
-  emit('close')
+  try {
+    await store.deleteTodo(props.todo.id)
+    emit('saved')
+    emit('close')
+  } catch {
+    showToast('删除失败，请重试')
+  }
 }
 </script>
 
 <template>
   <Teleport to="body">
     <div v-if="visible" class="modal-mask" @click.self="emit('close')">
-      <div class="modal-card te-card" role="dialog" aria-modal="true" aria-label="编辑待办">
+      <div ref="cardRef" class="modal-card te-card" role="dialog" aria-modal="true" aria-label="编辑待办">
         <div class="te-head">
           <h2 class="te-title">{{ props.todo ? '编辑待办' : '新建待办' }}</h2>
           <button class="te-close" type="button" aria-label="关闭" @click="emit('close')">

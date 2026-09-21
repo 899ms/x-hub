@@ -3,7 +3,6 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted, provide, ref, w
 import { listen } from '@tauri-apps/api/event'
 import TitleBar from '../components/TitleBar.vue'
 import TodoCard from '../components/TodoCard.vue'
-import TodoView from '../components/TodoView.vue'
 import TodoCalendarCard from '../components/TodoCalendarCard.vue'
 import Suda from '../components/Suda.vue'
 import NoteList from '../components/NoteList.vue'
@@ -39,6 +38,8 @@ import SettingsSkeleton from '../components/SettingsSkeleton.vue'
 // 大体量/低频视图异步分包按需加载，缩小首屏主 chunk
 const NoteEditor = defineAsyncComponent(() => import('../components/NoteEditor.vue'))
 const GlobalSearch = defineAsyncComponent(() => import('../components/GlobalSearch.vue'))
+// 待办视图：自带编辑弹层 / 确认弹窗 / 日期时间字段，体量大且非首屏，同样按需分包
+const TodoView = defineAsyncComponent(() => import('../components/TodoView.vue'))
 // 设置页：加载期间用同骨架占位（**delay 0**：以前设 80ms 是为了避免骨架一闪而过，
 // 结果那 80ms 是纯空白 —— 用户感知到的「点设置先空白」有一半来自这里）
 // 另外启动后空闲时预热这个 chunk，点「设置」时直接命中模块缓存，几乎零等待。
@@ -368,10 +369,11 @@ const BOOT_MIN_MS = 2200
 const BOOT_MAX_MS = 4000
 
 onMounted(async () => {
-  // 设置页 chunk 空闲预热：点「设置」时直接命中模块缓存，不再出现加载空白。
+  // 设置页与待办视图 chunk 空闲预热：点进去时直接命中模块缓存，不再出现加载空白。
   // （设置页内部也按大类分包 + 占位 + 悬停预取，见 SettingsView.vue 头部说明）
   const warmSettings = () => {
     void import('../components/SettingsView.vue')
+    void import('../components/TodoView.vue')
   }
   const idle = (
     window as unknown as {
@@ -390,12 +392,21 @@ onMounted(async () => {
   setTimeout(hideBootSplash, BOOT_MAX_MS)
   // 浮窗便签还原/删除后，主窗口实时同步便签与脱离状态
   if (isTauri()) {
+    /** 单条监听注册失败（桥未就绪等）不能中断启动流程：
+     *  裸 await 的任一 reject 会让其后所有监听与抽屉还原都不再执行。 */
+    const on = async <T,>(ev: string, cb: (e: { payload: T }) => void) => {
+      try {
+        return await listen<T>(ev, cb)
+      } catch {
+        return null
+      }
+    }
     void refreshInstalledExtensions()
-    unlistenStickies = await listen('stickies-changed', () => {
+    unlistenStickies = await on('stickies-changed', () => {
       store.refreshStickies()
     })
     // 倒计时到点：toast 提示 + 刷新列表（浮窗水罐同步）
-    unlistenCountdownFired = await listen<Countdown>('countdown-fired', (e) => {
+    unlistenCountdownFired = await on<Countdown>('countdown-fired', (e) => {
       const name = e.payload?.name ?? ''
       showToast(name ? `「${name}」时间到` : '倒计时时间到')
       if (store.state.config.countdown_sound) {
@@ -404,31 +415,31 @@ onMounted(async () => {
       void store.refreshCountdowns()
     })
     // ticker 顺延 / 创建更新后同步
-    unlistenCountdownsChanged = await listen('countdowns-changed', () => {
+    unlistenCountdownsChanged = await on('countdowns-changed', () => {
       void store.refreshCountdowns()
     })
     // 剪贴板浮层「存为速记 / 加入提示词库」后，主窗口实时刷新列表
-    unlistenNotesChanged = await listen('notes-changed', () => {
+    unlistenNotesChanged = await on('notes-changed', () => {
       void store.refreshNotes()
     })
-    unlistenSnippetsChanged = await listen('snippets-changed', () => {
+    unlistenSnippetsChanged = await on('snippets-changed', () => {
       void store.loadSnippets()
     })
-    unlistenTodosChanged = await listen('todos-changed', () => {
+    unlistenTodosChanged = await on('todos-changed', () => {
       void store.refreshTodos()
     })
     // 待办标签定义/关联被外部（扩展桥）改动后刷新
-    unlistenTodoTagsChanged = await listen('todo-tags-changed', () => {
+    unlistenTodoTagsChanged = await on('todo-tags-changed', () => {
       void store.refreshTodoTags()
     })
     // 待办提醒到点：toast 提示（系统通知由后端 todo_reminder 直接发）
-    unlistenTodoRemind = await listen<Todo>('todo-remind', (e) => {
+    unlistenTodoRemind = await on<Todo>('todo-remind', (e) => {
       const title = e.payload?.title ?? ''
       showToast(title ? `待办提醒：「${title}」` : '待办提醒时间到')
     })
     // 桌面悬浮球动作（ADR 0004）：切视图 / 全局搜索 / 新建速记
     // （Rust trigger 已先显示主窗口；剪贴板 act:clipboard 在 Rust 直呼浮层，不经这里）
-    unlistenBallAction = await listen<string>('floating-ball-action', (e) => {
+    unlistenBallAction = await on<string>('floating-ball-action', (e) => {
       const id = e.payload ?? ''
       if (id.startsWith('view:')) {
         const v = id.slice(5)
@@ -445,11 +456,11 @@ onMounted(async () => {
       }
     })
     // 独立对话窗「模型设置」入口：唤出主窗并定位到设置 → AI 助手
-    unlistenOpenChatSettings = await listen('open-chat-settings', () => {
+    unlistenOpenChatSettings = await on('open-chat-settings', () => {
       onOpenChatSettings()
     })
     // 形态切换（设置里的开关 / 独立窗侧改动）：切到独立窗口时收起内嵌抽屉，二者互斥
-    unlistenChatMode = await listen<boolean>('chat-window-mode', (e) => {
+    unlistenChatMode = await on<boolean>('chat-window-mode', (e) => {
       if (e.payload && chatOpen.value) {
         chatOpen.value = false
         persistChatPanelSize()

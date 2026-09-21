@@ -209,7 +209,7 @@ pub(crate) static CAPABILITIES: &[Capability] = &[
         permission: Some("data:write"),
         handler: CapabilityHandler::Sync(data_todos_schedule),
     },
-    // ----- data 待办升级：描述 / 置顶 / 周期 / 标签（v0.5.0） -----
+    // ----- data 待办 v1：描述 / 置顶 / 周期 / 标签 -----
     Capability {
         namespace: "data",
         method: "todos.setDescription",
@@ -821,11 +821,28 @@ fn data_write<F>(
 where
     F: FnOnce(&Connection) -> Result<Value, String>,
 {
+    let events: Vec<&str> = event.into_iter().collect();
+    data_write_events(app, state, &events, f)
+}
+
+/// 同 `data_write`，但落库后按顺序 emit 多个变更事件。
+/// 需要它的场合：一次写入同时改变了两个前端缓存域——例如删标签既改了标签定义
+/// （`todo-tags-changed` → refreshTodoTags）又改了待办关联（`todos-changed`），
+/// 只发一个会让另一个缓存留着旧数据。
+fn data_write_events<F>(
+    app: &tauri::AppHandle,
+    state: &DbState,
+    events: &[&str],
+    f: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(&Connection) -> Result<Value, String>,
+{
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let result = f(&conn)?;
     drop(conn);
-    if let Some(ev) = event {
-        let _ = app.emit(ev, ());
+    for ev in events {
+        let _ = app.emit(*ev, ());
     }
     Ok(result)
 }
@@ -1288,7 +1305,8 @@ fn data_todos_set_tags(
         .and_then(|v| v.as_i64())
         .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
     let tag_ids = expect_i64_array(&args, "tagIds")?;
-    data_write(app, state, Some("todos-changed"), |conn| {
+    // 与宿主命令 set_todo_tags 同口径：只改关联，但标签定义缓存也要跟着刷新
+    data_write_events(app, state, &["todos-changed", "todo-tags-changed"], |conn| {
         repo::todo_tag::set_todo_tags(conn, id, &tag_ids).map_err(|e| e.to_string())?;
         Ok(Value::Null)
     })
@@ -1373,7 +1391,8 @@ fn data_todo_tags_delete(
         .get("id")
         .and_then(|v| v.as_i64())
         .ok_or_else(|| "INVALID_ARGUMENT: 缺少 id".to_string())?;
-    data_write(app, state, Some("todos-changed"), |conn| {
+    // 删标签会级联删关联行：标签定义与待办关联两个缓存域都要刷新（宿主命令同样发两个）
+    data_write_events(app, state, &["todo-tags-changed", "todos-changed"], |conn| {
         repo::todo_tag::delete(conn, id).map_err(|e| e.to_string())?;
         Ok(Value::Null)
     })
@@ -1395,12 +1414,9 @@ fn data_todos_expand_occurrences(
         .and_then(|v| v.as_i64())
         .ok_or_else(|| "INVALID_ARGUMENT: 缺少 toMs".to_string())?;
     data_read(state, |conn| {
-        let todos = repo::todo::list(conn).map_err(|e| e.to_string())?;
+        let todos = repo::todo::list_recurring_candidates(conn).map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for t in todos {
-            if t.done || t.parent_id.is_some() || !crate::todo_recurrence::is_recurring(&t) {
-                continue;
-            }
             let Some(due) = t.due_at else { continue };
             let rule = RepeatRule::from_todo(&t);
             for at_ms in crate::todo_recurrence::expand_occurrences(
@@ -1409,10 +1425,13 @@ fn data_todos_expand_occurrences(
                 t.repeat_done_count,
                 from_ms,
                 to_ms,
-            ) {
+            )? {
                 out.push(serde_json::json!({ "todo_id": t.id, "at_ms": at_ms }));
             }
         }
+        // 与宿主命令 expand_todo_occurrences 同口径：按时刻升序。
+        // 两条路径必须给出同一顺序，否则扩展日历与宿主日历的格子排布会不一致。
+        out.sort_by_key(|o| o["at_ms"].as_i64().unwrap_or(0));
         Ok(Value::Array(out))
     })
 }

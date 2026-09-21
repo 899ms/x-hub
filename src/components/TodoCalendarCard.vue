@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, CalendarDays, ChevronLeft, ChevronRight } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 import type { Todo, TodoOccurrence } from '../api/tauri'
@@ -15,9 +15,12 @@ const store = useStore()
 
 const cursor = ref(new Date())
 const occurrences = ref<TodoOccurrence[]>([])
-const today = new Date()
+/** 工作台卡片常驻、不会重新挂载：用分钟 tick 推进「今天」，跨午夜后高亮与逾期判定才跟着走
+ *  （与 ClockCard 的 minuteTick 同一口径；只在日期真的变了才赋值，避免无谓重算） */
+const today = ref(new Date())
+let dayTimer: ReturnType<typeof setInterval> | null = null
 
-const cells = computed(() => calendarGrid(cursor.value, today))
+const cells = computed(() => calendarGrid(cursor.value, today.value))
 const monthLabel = computed(() => `${cursor.value.getFullYear()} 年 ${cursor.value.getMonth() + 1} 月`)
 
 const topTodos = computed(() => store.state.todos.filter((t) => t.parent_id == null))
@@ -51,16 +54,45 @@ const titleOf = computed(() => {
   return map
 })
 
+/** 请求序号：快速翻月时先发的响应可能后到，旧月份结果会盖掉新月份 */
+let occurrenceSeq = 0
+
 async function load() {
   const first = cells.value[0]
   const from = new Date(`${first.key}T00:00:00`)
   const to = new Date(from)
   to.setDate(to.getDate() + 42)
-  occurrences.value = await store.expandTodoOccurrences(from.getTime(), to.getTime() - 1)
+  const seq = ++occurrenceSeq
+  try {
+    const list = await store.expandTodoOccurrences(from.getTime(), to.getTime() - 1)
+    if (seq !== occurrenceSeq) return
+    occurrences.value = list
+  } catch {
+    // 卡片是概览：失败就当作「没有周期实例」，不弹提示打扰用户（待办视图里有明确提示）
+    if (seq === occurrenceSeq) occurrences.value = []
+  }
 }
 
-onMounted(() => void load())
-watch(cursor, () => void load())
+/** 周期规则签名：待办视图或扩展桥改了周期规则 / 滚动了一轮之后，
+ *  常驻卡片的虚拟实例必须重算，否则日历上留着过期的虚线实例 */
+const repeatSignature = computed(() =>
+  store.state.todos
+    .filter((t) => t.parent_id == null && !t.done && t.repeat_mode !== 'once')
+    .map((t) => `${t.id}:${t.due_at}:${t.repeat_mode}:${t.repeat_done_count}`)
+    .join('|'),
+)
+
+onMounted(() => {
+  void load()
+  dayTimer = setInterval(() => {
+    const d = new Date()
+    if (d.toDateString() !== today.value.toDateString()) today.value = d
+  }, 60_000)
+})
+onBeforeUnmount(() => {
+  if (dayTimer) clearInterval(dayTimer)
+})
+watch([cursor, today, repeatSignature], () => void load())
 
 function shift(delta: number, e: MouseEvent) {
   e.stopPropagation()
@@ -69,9 +101,27 @@ function shift(delta: number, e: MouseEvent) {
   cursor.value = d
 }
 
-function dayCount(key: string): number {
-  return (realByDay.value.get(key)?.length ?? 0) + (virtualByDay.value.get(key)?.length ?? 0)
-}
+/** 每格最多渲染的 chip 数（真实条目优先，剩余额度给虚拟实例） */
+const MAX_CHIPS = 2
+
+/** 每格要渲染的 chip 与「还有几条」：真实 + 虚拟合计口径，
+ *  余数必须按**实际渲染条数**算——真实 2 条 + 虚拟 2 条时只画 2 条、显示 +2，
+ *  不能按「各自截断」算成画 4 条还显示 +2。 */
+const chipsByDay = computed(() => {
+  const map = new Map<string, { real: Todo[]; virtual: TodoOccurrence[]; more: number }>()
+  for (const c of cells.value) {
+    const real = realByDay.value.get(c.key) ?? []
+    const virtual = virtualByDay.value.get(c.key) ?? []
+    const realShown = real.slice(0, MAX_CHIPS)
+    const virtualShown = virtual.slice(0, Math.max(0, MAX_CHIPS - realShown.length))
+    map.set(c.key, {
+      real: realShown,
+      virtual: virtualShown,
+      more: real.length + virtual.length - realShown.length - virtualShown.length,
+    })
+  }
+  return map
+})
 </script>
 
 <template>
@@ -103,19 +153,21 @@ function dayCount(key: string): number {
         <span class="tc-day">{{ c.day }}</span>
         <div class="tc-chips">
           <span
-            v-for="t in (realByDay.get(c.key) ?? []).slice(0, 2)"
+            v-for="t in (chipsByDay.get(c.key)?.real ?? [])"
             :key="'r' + t.id"
             class="tc-chip real"
             :class="{ late: dueBadge(t, today)?.kind === 'over' }"
             :title="t.title"
           >{{ t.title }}</span>
           <span
-            v-for="o in (virtualByDay.get(c.key) ?? []).slice(0, 2)"
+            v-for="o in (chipsByDay.get(c.key)?.virtual ?? [])"
             :key="'v' + o.todo_id + o.at_ms"
             class="tc-chip virtual"
             :title="`${titleOf.get(o.todo_id) ?? '周期待办'}（虚拟实例）`"
           >{{ titleOf.get(o.todo_id) ?? '周期待办' }}</span>
-          <span v-if="dayCount(c.key) > 2" class="tc-more-cnt">+{{ dayCount(c.key) - 2 }}</span>
+          <span v-if="(chipsByDay.get(c.key)?.more ?? 0) > 0" class="tc-more-cnt">
+            +{{ chipsByDay.get(c.key)?.more }}
+          </span>
         </div>
       </div>
     </div>

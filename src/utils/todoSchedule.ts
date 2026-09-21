@@ -166,7 +166,10 @@ export type Horizon = 'today' | 'week' | 'month' | 'all'
 
 export function inHorizon(t: { due_at: number | null }, horizon: Horizon, today: Date): boolean {
   if (horizon === 'all') return true
-  if (t.due_at == null) return false
+  // 无截止日期的条目不属于任何时间范围，但必须**始终可见**：
+  // 待办视图里新建待办默认不设截止，若这里返回 false，新条目保存后会立刻从列表消失
+  // （只有切到「全部」才看得见），用户会以为没建成功。
+  if (t.due_at == null) return true
   const d = startOfDay(new Date(t.due_at))
   const today0 = startOfDay(today)
   // 逾期条目不属于任何范围，但必须始终可见（否则会「消失」）
@@ -240,7 +243,8 @@ export function repeatEndLabel(t: {
   return ''
 }
 
-export const HOUR_OPTIONS: ReadonlyArray<{ value: number; label: string }> = Array.from(  { length: 24 },
+export const HOUR_OPTIONS: ReadonlyArray<{ value: number; label: string }> = Array.from(
+  { length: 24 },
   (_, h) => ({ value: h, label: String(h).padStart(2, '0') }),
 )
 

@@ -1,17 +1,9 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import {
-  CalendarDays,
-  ChevronLeft,
-  ChevronRight,
-  ListTodo,
-  Pin,
-  Plus,
-  Repeat,
-  X,
-} from 'lucide-vue-next'
+import { computed, inject, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
+import { ChevronLeft, ChevronRight, ListTodo, Plus, X } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
-import type { Todo, TodoOccurrence } from '../api/tauri'
+import type { Todo, TodoOccurrence, TodoTag } from '../api/tauri'
+import { useTodoDrag } from '../composables/useTodoDrag'
 import {
   VIEW_GROUP_META,
   addDays,
@@ -21,11 +13,11 @@ import {
   fmtHM,
   inHorizon,
   isoKey,
-  repeatLabel,
   startOfDay,
   viewGroupOf,
   type Horizon,
 } from '../utils/todoSchedule'
+import TodoRow from './TodoRow.vue'
 import TodoEditDialog from './TodoEditDialog.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 
@@ -49,8 +41,8 @@ const tagFilter = ref<number[]>([])
 const editing = ref<Todo | null>(null)
 const editingOpen = ref(false)
 const presetDue = ref<number | null>(null)
-const confirming = ref<Todo | null>(null)
-const confirmKids = ref(0)
+/** 行内确认弹窗（宿主层单实例）：子行只发请求，弹窗由这里唯一一份渲染 */
+const rowConfirm = ref<{ todo: Todo; kids: number; onConfirm: () => void } | null>(null)
 const rootRef = ref<HTMLElement | null>(null)
 const narrow = ref(false)
 
@@ -59,7 +51,11 @@ const cursor = ref(new Date())
 const calUnit = ref<'month' | 'week'>('month')
 const occurrences = ref<TodoOccurrence[]>([])
 
-const today = new Date()
+/** 视图常驻（托盘驻留 / 开着过夜）时不能让「今天」停在挂载那一刻：
+ *  分钟 tick 推进，跨午夜后分组（逾期/今天/本周）、日历高亮与逾期徽标才跟着走。
+ *  与 ClockCard 的 minuteTick 同一口径，只在日期真的变了才赋值。 */
+const today = ref(new Date())
+let dayTimer: ReturnType<typeof setInterval> | null = null
 
 const HORIZONS: Array<{ key: Horizon; label: string }> = [
   { key: 'today', label: '今天' },
@@ -84,13 +80,13 @@ const topTodos = computed(() =>
 )
 
 const visible = computed(() =>
-  topTodos.value.filter((t) => (showDone.value ? t.done : !t.done) && hasTag(t) && (showDone.value || inHorizon(t, horizon.value, today))),
+  topTodos.value.filter((t) => (showDone.value ? t.done : !t.done) && hasTag(t) && (showDone.value || inHorizon(t, horizon.value, today.value))),
 )
 
 /** 分组：置顶 → 逾期 → 今天 → 本周 → 本月 → 以后 → 无日期（组内按手动排序/创建时间） */
 const groups = computed(() => {
   const buckets: Todo[][] = VIEW_GROUP_META.map(() => [])
-  for (const t of visible.value) buckets[viewGroupOf(t, today)].push(t)
+  for (const t of visible.value) buckets[viewGroupOf(t, today.value)].push(t)
   return VIEW_GROUP_META.map((meta, i) => ({
     label: meta.label,
     items: buckets[i].slice().sort(compareByOrder),
@@ -139,7 +135,7 @@ const titleOf = computed(() => {
   return map
 })
 
-const cells = computed(() => calendarGrid(cursor.value, today))
+const cells = computed(() => calendarGrid(cursor.value, today.value))
 
 const monthLabel = computed(
   () => `${cursor.value.getFullYear()} 年 ${cursor.value.getMonth() + 1} 月`,
@@ -169,29 +165,62 @@ const weekCells = computed(() => {
   })
 })
 
+/** 周期实例请求序号：快速翻月/切周时先发的响应可能后到，旧月份结果会盖掉新月份 */
+let occurrenceSeq = 0
+
 async function loadOccurrences() {
-  const from = calendarGrid(cursor.value, today)[0]
+  const from = calendarGrid(cursor.value, today.value)[0]
   const first = new Date(`${from.key}T00:00:00`)
   const to = new Date(first)
   to.setDate(to.getDate() + 42)
-  occurrences.value = await store.expandTodoOccurrences(first.getTime(), to.getTime() - 1)
+  const seq = ++occurrenceSeq
+  try {
+    const list = await store.expandTodoOccurrences(first.getTime(), to.getTime() - 1)
+    // 已有更新的请求在途：丢弃这次结果，否则日历会闪回旧月份的实例
+    if (seq !== occurrenceSeq) return
+    occurrences.value = list
+  } catch {
+    if (seq !== occurrenceSeq) return
+    occurrences.value = []
+    showToast('周期待办实例没能算出来，日历上的虚线可能不全')
+  }
 }
 
-watch([cursor, calUnit], () => void loadOccurrences())
+watch([cursor, calUnit, today], () => void loadOccurrences())
 
 onMounted(() => {
   void loadOccurrences()
   updateNarrow()
-  if (typeof window !== 'undefined') window.addEventListener('resize', updateNarrow)
+  // 观察根元素尺寸而非 window resize：侧栏收起/展开时窗口尺寸不变、内容区却变宽，
+  // window 的 resize 根本不触发（useDashboardLayout 已有同款先例）
+  if (typeof ResizeObserver !== 'undefined') {
+    ro = new ResizeObserver(updateNarrow)
+    if (rootRef.value) ro.observe(rootRef.value)
+  } else if (typeof window !== 'undefined') {
+    window.addEventListener('resize', updateNarrow)
+  }
+  dayTimer = setInterval(() => {
+    const d = new Date()
+    if (d.toDateString() !== today.value.toDateString()) today.value = d
+  }, 60_000)
 })
 
 onBeforeUnmount(() => {
+  ro?.disconnect()
+  ro = null
   if (typeof window !== 'undefined') window.removeEventListener('resize', updateNarrow)
+  if (dayTimer) clearInterval(dayTimer)
+  // 拖拽途中切走视图（组件卸载）时把 window 级指针监听一并摘掉，避免残留在全局
+  onChipPointerUp()
 })
+
+let ro: ResizeObserver | null = null
 
 function updateNarrow() {
   const w = rootRef.value?.clientWidth ?? window.innerWidth
-  narrow.value = w < WIDE_MIN
+  const next = w < WIDE_MIN
+  // 只在真的翻转时赋值：否则 RO 回调 → 改 narrow → 布局变化 → 再次回调，空转
+  if (next !== narrow.value) narrow.value = next
 }
 
 function shift(delta: number) {
@@ -217,49 +246,80 @@ function openEdit(t: Todo) {
   editingOpen.value = true
 }
 
-/** 勾选：周期待办走「完成本轮」；有未完成子项先确认（与卡片同一套口径） */
-async function toggle(t: Todo) {
-  const kids = kidsOf.value.get(t.id) ?? []
-  const undone = kids.filter((k) => !k.done).length
-  if (!t.done && undone > 0) {
-    confirming.value = t
-    confirmKids.value = undone
+/** 统一兜底：IPC 失败给一句提示，别让失败只停在控制台（用户会以为点了没反应） */
+function run(p: Promise<unknown>, msg = '操作失败，请重试') {
+  void p.catch(() => showToast(msg))
+}
+
+/** 行内确认弹窗的回调：勾父带子 / 删除的二次确认都经这里（子行只发请求） */
+function onRowConfirm() {
+  const c = rowConfirm.value
+  rowConfirm.value = null
+  if (c) void c.onConfirm()
+}
+
+// ---- 删除（父条目级联删子）+ 撤销恢复，由 TodoRow 经 provide 调用 ----
+// 与 TodoCard 同一套语义：删除是不可逆操作，给一条可撤销提示兜住误点。
+async function removeTodo(t: Todo) {
+  const kids = store.state.todos.filter((x) => x.parent_id === t.id)
+  try {
+    await store.deleteTodo(t.id)
+  } catch {
+    showToast('删除失败，请重试')
     return
   }
-  await applyToggle(t)
+  showToast(
+    kids.length ? `已删除「${t.title}」及 ${kids.length} 条子待办` : `已删除「${t.title}」`,
+    { label: '撤销', onClick: () => void restoreTodo(t, kids) },
+  )
 }
 
-async function applyToggle(t: Todo) {
-  if (!t.done && t.repeat_mode !== 'once') {
-    const updated = await store.completeTodoRecurring(t.id)
-    if (updated) await loadOccurrences()
-    return
+/** 重建父条目后再挂回子待办，恢复创建时间/优先级/排期/完成状态 */
+async function restoreTodo(parent: Todo, kids: readonly Todo[]) {
+  const p = await store.createTodo(parent.title, null, parent.created_at)
+  if (parent.priority !== 0) await store.updateTodo(p.id, parent.title, parent.priority)
+  if (parent.due_at != null || parent.remind_at != null) {
+    await store.scheduleTodo(p.id, parent.due_at, parent.remind_at)
   }
-  await store.toggleTodo(t.id)
-  const kids = kidsOf.value.get(t.id) ?? []
-  if (!t.done) for (const k of kids) if (!k.done) await store.toggleTodo(k.id)
+  if (parent.done) await store.toggleTodo(p.id)
+  for (const k of kids) {
+    const c = await store.createTodo(k.title, p.id, k.created_at)
+    if (k.priority !== 0) await store.updateTodo(c.id, k.title, k.priority)
+    if (k.due_at != null || k.remind_at != null) {
+      await store.scheduleTodo(c.id, k.due_at, k.remind_at)
+    }
+    if (k.done) await store.toggleTodo(c.id)
+  }
+  showToast('已恢复待办')
 }
 
-async function onConfirm() {
-  const t = confirming.value
-  confirming.value = null
-  if (t) await applyToggle(t)
-}
+// ---- 行渲染全部交给 TodoRow（与卡片/浮窗同一份），这里只提供宿主能力 ----
+provide('todoOpenSchedule', (t: Todo) => openEdit(t))
+provide('todoRemoveTodo', removeTodo)
+provide('todoChildren', kidsOf)
+/** 当前展示的是未完成还是已完成（子待办拖拽仅在未完成视图开放，同卡片约束） */
+const todoViewRef = computed<'pending' | 'done'>(() => (showDone.value ? 'done' : 'pending'))
+provide('todoView', todoViewRef)
+provide('todoRowConfirm', (todo: Todo, kids: number, onConfirm: () => void) => {
+  rowConfirm.value = { todo, kids, onConfirm }
+})
 
-async function addChild(t: Todo, title: string) {
-  const name = title.trim()
-  if (!name) return
-  await store.createTodo(name, t.id)
-}
-
-const childInput = ref<number | null>(null)
-const childText = ref('')
-
-function submitChild(t: Todo) {
-  void addChild(t, childText.value)
-  childText.value = ''
-  childInput.value = null
-}
+// ---- 组内上下拖动排序（逻辑在 useTodoDrag，与卡片共用）----
+const bodyRef = ref<HTMLElement | null>(null)
+const {
+  dragId: rowDragId,
+  lineTop: dragLineTop,
+  onRowPointerDown: onRowDragStart,
+} = useTodoDrag({
+  bodyRef,
+  groups,
+  labelOf: (t) => VIEW_GROUP_META[viewGroupOf(t, today.value)].label,
+  // 已完成视图里顺序没有意义（分组也是按完成状态来的），不开放拖拽
+  enabled: () => !showDone.value,
+  reorder: (ids) => void store.reorderTodos(ids),
+})
+provide('todoDragStart', onRowDragStart)
+provide('todoDragId', rowDragId)
 
 function toggleTagFilter(id: number) {
   const i = tagFilter.value.indexOf(id)
@@ -268,23 +328,26 @@ function toggleTagFilter(id: number) {
 }
 
 async function removeTag(id: number) {
-  await store.deleteTodoTag(id)
-  tagFilter.value = tagFilter.value.filter((x) => x !== id)
+  try {
+    await store.deleteTodoTag(id)
+    tagFilter.value = tagFilter.value.filter((x) => x !== id)
+  } catch {
+    showToast('标签没能删除，请重试')
+  }
 }
 
-function tagsOf(t: Todo) {
-  const ids = store.todoTagIds(t.id)
-  if (!ids.length) return []
-  return allTags.value.filter((x) => ids.includes(x.id))
+/** 删标签会从所有待办上摘掉它，先确认（点 chip 上的 × 不再直接删） */
+const removingTag = ref<TodoTag | null>(null)
+
+function confirmRemoveTag() {
+  const tag = removingTag.value
+  removingTag.value = null
+  if (tag) void removeTag(tag.id)
 }
 
+/** 日历格子里日期徽标的逾期判定（行内的徽标由 TodoRow 自己算） */
 function badgeOf(t: Todo) {
-  return t.done ? null : dueBadge(t, new Date())
-}
-
-/** 点击图钉立即取消置顶（置顶区与日期无关，取消后回到按日期分组的位置） */
-function unpin(t: Todo) {
-  void store.setTodoPinned(t.id, false).then(() => showToast(`「${t.title}」已取消置顶`))
+  return t.done ? null : dueBadge(t, today.value)
 }
 
 // ---- 日历拖拽改期 ----
@@ -334,7 +397,7 @@ function onChipPointerUp() {
   suppressClickUntil = Date.now() + 350
   if (day == null || d.t.due_at == null) return
   if (isoKey(new Date(d.t.due_at)) === day) return
-  void moveToDay(d.t, day)
+  run(moveToDay(d.t, day), '改期失败，请重试')
 }
 
 async function moveToDay(t: Todo, day: string) {
@@ -346,6 +409,8 @@ async function moveToDay(t: Todo, day: string) {
   due.setFullYear(y, m - 1, d)
   const remind = t.remind_at == null ? null : addDays(new Date(t.remind_at), deltaDays).getTime()
   await store.scheduleTodo(t.id, due.getTime(), remind)
+  // 虚拟实例是按 due_at 现算的：改期后必须重算，否则虚线实例会留在旧日期直到翻月
+  await loadOccurrences()
   showToast(`「${t.title}」已改到 ${m} 月 ${d} 日`)
 }
 
@@ -382,7 +447,7 @@ function onVirtualDown(e: PointerEvent) {
               @click="toggleTagFilter(tag.id)"
             >
               <i class="dot" :style="{ background: tag.color || 'var(--brand-500)' }"></i>{{ tag.name }}
-              <span class="x" title="删除该标签" @click.stop="removeTag(tag.id)"><X :size="10" :stroke-width="2.5" /></span>
+              <span class="x" title="删除该标签" @click.stop="removingTag = tag"><X :size="10" :stroke-width="2.5" /></span>
             </button>
           </div>
           <button type="button" class="tv-primary" @click="openNew()">
@@ -413,80 +478,23 @@ function onVirtualDown(e: PointerEvent) {
           </div>
         </div>
 
-        <div class="tv-scroll">
+        <div ref="bodyRef" class="tv-scroll">
           <p v-if="!groups.length" class="tv-empty">这个范围里没有待办</p>
-          <div v-for="g in groups" :key="g.label" class="tv-group">
-          <div class="tv-group-h" :class="{ pinned: g.label === '置顶', overdue: g.label === '逾期' }">
-            <span>{{ g.label }}</span>
-            <span class="cnt">{{ g.items.length }}</span>
-            <span class="line"></span>
+          <div v-for="g in groups" :key="g.label" class="tv-group" :data-group="g.label">
+            <div
+              class="tv-group-h"
+              :class="{ pinned: g.label === '置顶', overdue: g.label === '逾期' }"
+            >
+              <span>{{ g.label }}</span>
+              <span class="cnt">{{ g.items.length }}</span>
+              <span class="line"></span>
+            </div>
+            <!-- 行渲染复用 TodoRow（与卡片/浮窗同一份）：优先级圆点、标签、周期徽标、
+                 子待办、行内编辑、删除+撤销、组内拖拽排序全在组件内，视图只提供宿主能力 -->
+            <TodoRow v-for="t in g.items" :key="t.id" :todo="t" />
           </div>
-          <div
-            v-for="t in g.items"
-            :key="t.id"
-            class="tv-row"
-            :class="{ pinned: t.pinned, done: t.done }"
-          >
-            <button
-              type="button"
-              class="tv-check"
-              :class="{ on: t.done }"
-              :aria-label="t.done ? '取消完成' : '完成'"
-              @click="toggle(t)"
-            ></button>
-            <div class="tv-main">
-              <div class="tv-line">
-                <button
-                  v-if="t.pinned"
-                  type="button"
-                  class="tv-pin"
-                  title="已置顶，点击取消"
-                  aria-label="取消置顶"
-                  @click.stop="unpin(t)"
-                >
-                  <Pin :size="12" :stroke-width="2.2" />
-                </button>
-                <span class="tv-label" @dblclick="openEdit(t)">{{ t.title }}</span>
-                <span v-if="badgeOf(t)" class="tv-badge" :class="badgeOf(t)!.kind">{{ badgeOf(t)!.text }}</span>
-                <span v-if="t.repeat_mode !== 'once'" class="tv-badge repeat" :title="`已累计完成 ${t.repeat_done_count} 次`">
-                  <Repeat :size="10" :stroke-width="2" />{{ repeatLabel(t) }}
-                </span>
-                <span v-for="tag in tagsOf(t)" :key="tag.id" class="tv-rowtag">
-                  <i class="dot" :style="{ background: tag.color || 'var(--brand-500)' }"></i>{{ tag.name }}
-                </span>
-              </div>
-              <div v-if="kidsOf.get(t.id)?.length" class="tv-kids">
-                <div v-for="k in kidsOf.get(t.id)" :key="k.id" class="tv-kid">
-                  <button
-                    type="button"
-                    class="tv-check small"
-                    :class="{ on: k.done }"
-                    :aria-label="k.done ? '取消完成' : '完成'"
-                    @click="store.toggleTodo(k.id)"
-                  ></button>
-                  <span :class="{ done: k.done }">{{ k.title }}</span>
-                </div>
-              </div>
-            </div>
-            <div class="tv-actions">
-              <button type="button" class="tv-icon" title="编辑" @click="openEdit(t)">
-                <CalendarDays :size="13" :stroke-width="2" />
-              </button>
-              <button type="button" class="tv-icon" title="加子待办" @click="childInput = childInput === t.id ? null : t.id">
-                <Plus :size="13" :stroke-width="2" />
-              </button>
-            </div>
-            <div v-if="childInput === t.id" class="tv-child-input">
-              <input
-                v-model="childText"
-                class="tv-input"
-                placeholder="子待办标题，回车添加"
-                @keydown.enter="submitChild(t)"
-                @keydown.esc="childInput = null"
-              />
-            </div>
-          </div>
-        </div>
+          <!-- 组内拖拽的插入指示线（由 useTodoDrag 定位） -->
+          <div v-if="dragLineTop != null" class="tv-drag-line" :style="{ top: dragLineTop + 'px' }" />
         </div>
       </section>
 
@@ -600,13 +608,24 @@ function onVirtualDown(e: PointerEvent) {
     />
 
     <ConfirmDialog
-      :visible="confirming != null"
+      :visible="rowConfirm != null"
       title="还有子待办未完成"
-      :message="`「${confirming?.title ?? ''}」下还有 ${confirmKids} 条子待办未完成，是否确认完成？`"
+      :message="`「${rowConfirm?.todo.title ?? ''}」下还有 ${rowConfirm?.kids ?? 0} 条子待办未完成，是否确认完成？`"
       hint="确认后会一并勾选这些子待办；取消则本条待办保持未完成。"
       confirm-text="确认并勾选子项"
-      @confirm="onConfirm"
-      @cancel="confirming = null"
+      @confirm="onRowConfirm"
+      @cancel="rowConfirm = null"
+    />
+
+    <ConfirmDialog
+      :visible="removingTag != null"
+      title="删除标签"
+      :message="`「${removingTag?.name ?? ''}」会从所有待办上摘掉，标签本身也会删除。`"
+      hint="这个操作不能撤销。"
+      tone="danger"
+      confirm-text="删除标签"
+      @confirm="confirmRemoveTag"
+      @cancel="removingTag = null"
     />
   </section>
 </template>
@@ -759,6 +778,30 @@ function onVirtualDown(e: PointerEvent) {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* 组内拖拽的插入指示线以它为定位基准 */
+  position: relative;
+}
+/* 组内拖拽插入线（绝对定位于 .tv-scroll，随内容滚动）：与卡片 .todo-drag-line 同一套观感 */
+.tv-drag-line {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--brand-500);
+  box-shadow: 0 0 6px var(--brand-glow);
+  pointer-events: none;
+  z-index: 5;
+}
+.tv-drag-line::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand-500);
 }
 .tv-empty {
   margin: 12px 0;

@@ -1,6 +1,6 @@
 # 0009-周期待办：就地滚动 + 未来实例虚拟展开
 
-> **状态：已决策，待实施**（决策于「待办功能升级」设计讨论，2026-09-21。术语见 `CONTEXT.md` 的「待办」一节。）
+> **状态：已实施（v0.6.5）**（决策于「待办功能升级」设计讨论，2026-09-21；实现见 `src-tauri/src/todo_recurrence.rs` + `repo/todo.rs` 的 `complete_recurring`/`undo_recurring`。术语见 `CONTEXT.md` 的「待办」一节。）
 
 ## 问题
 

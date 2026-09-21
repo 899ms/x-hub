@@ -390,7 +390,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    // 待办升级（v0.5.0）：描述 / 置顶 / 周期规则列。全部可空或带 DEFAULT，
+    // 待办 v1（标签 / 置顶 / 周期）：描述 / 置顶 / 周期规则列。全部可空或带 DEFAULT，
     // 老库启动即补齐，零数据改造（与 v0.3.4 补列的既有模式一致）。
     if !todo_cols.iter().any(|c| c == "description") {
         conn.execute(
@@ -467,10 +467,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_todo_tag_links_tag ON todo_tag_links(tag_id)",
         [],
     )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_todos_repeat ON todos(repeat_mode)",
-        [],
-    )?;
+    // 曾建的 idx_todos_repeat 已移除：全工程没有按 repeat_mode 等值过滤的查询
+    // （周期展开用 `repeat_mode <> 'once'`，SQLite 不走索引），它只让每次写 todos
+    // 多维护一棵 B 树。老库在这里顺手删掉。
+    conn.execute("DROP INDEX IF EXISTS idx_todos_repeat", [])?;
 
     Ok(())
 }

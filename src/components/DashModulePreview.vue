@@ -36,7 +36,7 @@ import {
 import { accentOf, iconSrc, isImageIcon, CATEGORY_ICONS } from '../composables/useResourceIcon'
 import { dashModuleTitle } from '../composables/useDashboardLayout'
 import { dashPreviewData } from '../composables/useDashPreviewData'
-import { calendarGrid, isoKey } from '../utils/todoSchedule'
+import { calendarGrid } from '../utils/todoSchedule'
 import type { Resource } from '../api/tauri'
 
 /**
@@ -65,6 +65,7 @@ const props = defineProps<{
 }>()
 
 const {
+  previewDate,
   timeText,
   timeHM,
   secText,
@@ -95,6 +96,7 @@ const {
   countdownList,
   snippetList,
   todoGroups,
+  todoDayMarks,
   pendingCount,
   doneCount,
   recentList,
@@ -156,17 +158,11 @@ function fileIconOf(r: Resource) {
 const stickySlot = computed(() => (props.modId === 'sticky2' ? 2 : 1))
 // 缩印里的模块名：一律取模块注册表标题（扩展 = manifest.name），不要用 ext: 后面的 id
 const extName = computed(() => dashModuleTitle(props.modId))
-/** 日历模块缩印：当月 6×7 网格 + 有截止的待办分布（真实卡片同源 utils/todoSchedule） */
-const calCells = computed(() => calendarGrid(new Date(), new Date()))
-const calMarked = computed(() => {
-  const map = new Map<string, number>()
-  for (const t of todoGroups.value.flatMap((g) => g.items)) {
-    if (t.due_at == null) continue
-    const key = isoKey(new Date(t.due_at))
-    map.set(key, (map.get(key) ?? 0) + 1)
-  }
-  return map
-})
+/** 日历模块缩印：当月 6×7 网格 + 有截止的待办分布。
+ *  网格与标记都走与真卡同源的派生数据（previewDate 由分钟 tick 推进、
+ *  todoDayMarks 是全量口径），缩印里不另算一套。 */
+const calCells = computed(() => calendarGrid(previewDate.value, previewDate.value))
+const calMarked = todoDayMarks
 const kind = computed(() => {
   const id = props.modId
   if (id.startsWith('ext:')) return 'ext'
@@ -465,7 +461,7 @@ const kind = computed(() => {
       </div>
     </template>
 
-    <!-- ===== 最近使用 ===== -->
+    <!-- ===== 日历（待办分布） ===== -->
     <template v-else-if="kind === 'calendar'">
       <h3 v-if="!hideTitle" class="hd-title">
         <CalendarDays class="ic" /><span>{{ title ?? '日历' }}</span>
@@ -479,6 +475,7 @@ const kind = computed(() => {
       </div>
     </template>
 
+    <!-- ===== 最近使用 ===== -->
     <template v-else-if="kind === 'recent'">
       <header class="hd hd-split" :class="{ 'hd-float': hideTitle }">
         <h3 v-if="!hideTitle" class="hd-title"><Flame class="ic" /><span>{{ title ?? '最近使用' }}</span></h3>
@@ -553,9 +550,10 @@ const kind = computed(() => {
   align-items: center;
   justify-content: flex-start;
   gap: calc(1 * var(--u));
-  padding: calc(2 * var(--u));
+  /* 尺寸照抄真卡 .tc-cell（padding 2px 3px / 圆角 5px），只把 px 换成 var(--u) */
+  padding: calc(2 * var(--u)) calc(3 * var(--u));
   border: 1px solid var(--border-soft);
-  border-radius: calc(4 * var(--u));
+  border-radius: calc(5 * var(--u));
   background: var(--bg-card-soft);
   overflow: hidden;
 }

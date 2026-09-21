@@ -192,7 +192,7 @@ pub fn toggle(conn: &Connection, id: i64) -> Result<Todo> {
     get(conn, id)
 }
 
-// ---------- 待办升级：描述 / 置顶 / 周期（v0.5.0） ----------
+// ---------- 待办 v1：描述 / 置顶 / 周期 ----------
 
 /// 设置描述（轻量 Markdown）
 pub fn set_description(conn: &Connection, id: i64, description: &str) -> Result<Todo> {
@@ -355,15 +355,20 @@ fn complete_recurring_inner(
         return Err(format!("INVALID_STATE: 周期待办 {id} 缺少截止时刻，无法滚动"));
     };
     let rule = RepeatRule::from_todo(&t);
-    let next = todo_recurrence::next_occurrence(&rule, due, now_ms);
+    // Err = 迭代预算耗尽（计算失败），必须原样上报；只有 Ok(None) 才是规则真的用尽，
+    // 可以转一次性——把两者混为一谈会静默取消还在生效的周期。
+    let next = todo_recurrence::next_occurrence(&rule, due, now_ms)?;
     let ended = match next {
         None => true,
         Some(n) => todo_recurrence::reached_end(&rule, n, t.repeat_done_count),
     };
     let ts = now();
+    // 父行滚动与子待办复位放同一事务：否则复位失败会留下
+    // 「父已滚到下一轮、子项仍标记完成」的半写状态。
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let affected = if ended {
         // 规则用尽：转普通待办并保留该行，due_at 不动（过期即按逾期处理）
-        conn.execute(
+        tx.execute(
             "UPDATE todos SET repeat_mode = 'once',
                repeat_done_count = repeat_done_count + 1, repeat_last_done_at = ?1,
                updated_at = ?2, version = version + 1
@@ -374,7 +379,7 @@ fn complete_recurring_inner(
         let new_due = next.unwrap();
         let shift = new_due - due;
         let new_remind = t.remind_at.map(|r| r + shift);
-        conn.execute(
+        tx.execute(
             "UPDATE todos SET due_at = ?1, remind_at = ?2, remind_fired = 0,
                repeat_done_count = repeat_done_count + 1, repeat_last_done_at = ?3,
                sort_order = CASE WHEN pinned = 1 THEN sort_order ELSE NULL END,
@@ -388,8 +393,9 @@ fn complete_recurring_inner(
         return Err(not_found_or_conflict(conn, id, "待办"));
     }
     if !ended {
-        reset_children(conn, id).map_err(|e| e.to_string())?;
+        reset_children(&tx, id).map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
     get(conn, id).map_err(|e| e.to_string())
 }
 
@@ -439,6 +445,18 @@ fn undo_recurring_inner(
         return Err(not_found_or_conflict(conn, id, "待办"));
     }
     get(conn, id).map_err(|e| e.to_string())
+}
+
+/// 日历展开周期实例用的候选集：只取「顶级 + 未完成 + 周期 + 有截止」的行。
+/// 用 `list()` 全表读 26 列再在内存里过滤，翻月/切周时每次都要付一遍这个成本。
+pub fn list_recurring_candidates(conn: &Connection) -> Result<Vec<Todo>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM todos
+         WHERE done = 0 AND parent_id IS NULL AND repeat_mode <> 'once' AND due_at IS NOT NULL
+         ORDER BY due_at ASC"
+    ))?;
+    let rows = stmt.query_map([], row_to_todo)?;
+    rows.collect()
 }
 
 /// 删除待办。子待办经外键 ON DELETE CASCADE 一并删除。

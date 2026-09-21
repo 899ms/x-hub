@@ -5,7 +5,9 @@ import { useStore } from '../stores/workbench'
 import type { Todo } from '../api/tauri'
 import { parseTodoItems } from '../utils/todoParse'
 import { useTodoChildren } from '../composables/useTodoChildren'
+import { useTodoDrag } from '../composables/useTodoDrag'
 import TodoRow from './TodoRow.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import AppSelect from './AppSelect.vue'
 import {
   addDays,
@@ -130,144 +132,38 @@ provide('todoChildren', childrenMap)
 // 当前视图：子待办拖拽仅待办视图开放（同顶级行的约束）
 provide('todoView', view)
 
+// ---- 子行确认弹窗（宿主层单实例）----
+// 每行各挂一个 ConfirmDialog 会随行数线性增长（50 行 = 50 个组件 + 50 个挂载点），
+// 上移到卡片层：子行只管发请求，弹窗由这里唯一一份渲染。
+const rowConfirm = ref<{ todo: Todo; kids: number; onConfirm: () => void } | null>(null)
+provide('todoRowConfirm', (todo: Todo, kids: number, onConfirm: () => void) => {
+  rowConfirm.value = { todo, kids, onConfirm }
+})
+
+function onRowConfirm() {
+  const c = rowConfirm.value
+  rowConfirm.value = null
+  c?.onConfirm()
+}
+
 // ---- 组内上下拖动排序 ----
-// 指针实现而非 HTML5 DnD：Tauri 主窗口的原生拖放拦截（dragDropEnabled）与
-// WebView 内 HTML5 拖拽互斥，dragstart 后收不到 dragover/drop（同笔记块拖拽的处理）。
-// 语义：仅限同一分组内上下移动（分组由截止日期决定，跨组移动没有排序意义）；
-// 落点后把整组 id 顺序写入 sort_order（组内未排序时保持创建时间倒序不动它）。
-const todoDragId = ref<number | null>(null)
+// 指针实现而非 HTML5 DnD：Tauri 主窗口的原生拖放拦截与 WebView 内 HTML5 拖拽互斥
+// （dragstart 后收不到 dragover/drop，同笔记块拖拽的处理）。
+// 具体逻辑抽在 useTodoDrag —— 待办视图复用同一份，避免两套拖拽实现各改一处。
+const bodyRef = ref<HTMLElement | null>(null)
+const {
+  dragId: todoDragId,
+  lineTop: dragLineTop,
+  onRowPointerDown,
+} = useTodoDrag({
+  bodyRef,
+  groups: pendingGroups,
+  labelOf: (t) => GROUP_META[groupOf(t, new Date())].label,
+  enabled: () => view.value === 'pending',
+  reorder: (ids) => void store.reorderTodos(ids),
+})
 provide('todoDragStart', onRowPointerDown)
 provide('todoDragId', todoDragId)
-
-const bodyRef = ref<HTMLElement | null>(null)
-/** 插入指示线：相对 .todo-body 内容的 y 坐标；null = 不显示（拖出组外） */
-const dragLineTop = ref<number | null>(null)
-let dragState: {
-  id: number
-  /** 被拖项在组内可见行中的下标 */
-  fromIndex: number
-  groupLabel: string
-  groupEl: HTMLElement
-  /** 插入下标（相对含被拖项的可见数组）；null = 拖出组外 */
-  insert: number | null
-} | null = null
-
-/** TodoRow 顶级行 pointerdown 上报入口；捕获指针，移动超阈值才进入拖拽 */
-function onRowPointerDown(t: Todo, e: PointerEvent) {
-  if (e.button !== 0 || view.value !== 'pending') return
-  const target = e.target as HTMLElement | null
-  // 勾选/优先级/徽标/删除等交互控件上按下不启动拖拽
-  if (target?.closest('button, textarea, input, a, [data-no-drag]')) return
-  const el = e.currentTarget as HTMLElement
-  const startX = e.clientX
-  const startY = e.clientY
-  let active = false
-  let dead = false
-  // 不在 pointerdown 就捕获指针：捕获会把后续 click/dblclick 重定向到行元素，
-  // 行内标题的双击编辑收不到事件。改为拖拽激活（超阈值）后再捕获。
-  el.addEventListener('pointermove', onMove)
-  el.addEventListener('pointerup', onUp)
-  el.addEventListener('pointercancel', onUp)
-  // window 兜底：激活前未捕获指针，快速甩动时第一个 pointermove 可能已在行外、
-  // up 也不落在行上——仅靠 el 监听会永久残留（闭包泄漏，且残留的旧坐标 onMove
-  // 会在该行下次按下移动时误触发拖拽）。window 监听保证任何松开路径都能清理。
-  window.addEventListener('pointerup', onUp)
-  window.addEventListener('pointercancel', onUp)
-
-  function begin(): boolean {
-    // 捕获指针：拖出窗口松开也能收到 pointerup，不会悬挂在拖拽态
-    try {
-      el.setPointerCapture(e.pointerId)
-    } catch {
-      /* 指针已释放时忽略，window 监听兜底场景极少 */
-    }
-    const label = GROUP_META[groupOf(t, new Date())].label
-    const groupEl =
-      bodyRef.value?.querySelector<HTMLElement>(`[data-group="${CSS.escape(label)}"]`) ?? null
-    if (!groupEl) return false
-    const g = pendingGroups.value.find((x) => x.label === label)
-    const fromIndex = g ? g.items.findIndex((x) => x.id === t.id) : -1
-    if (fromIndex < 0) return false
-    dragState = { id: t.id, fromIndex, groupLabel: label, groupEl, insert: null }
-    todoDragId.value = t.id
-    document.body.classList.add('todo-row-dragging')
-    document.getSelection()?.removeAllRanges()
-    return true
-  }
-
-  function onMove(ev: PointerEvent) {
-    if (dead) return
-    if (!active) {
-      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 5) return
-      if (!begin()) {
-        dead = true
-        return
-      }
-      active = true
-    }
-    updateDragLine(ev.clientY)
-  }
-
-  function onUp() {
-    el.removeEventListener('pointermove', onMove)
-    el.removeEventListener('pointerup', onUp)
-    el.removeEventListener('pointercancel', onUp)
-    window.removeEventListener('pointerup', onUp)
-    window.removeEventListener('pointercancel', onUp)
-    // 捕获成功时同一 pointerup 会先到 el（目标阶段）、再冒泡到 window，可能触发两次；
-    // 归零 active 保证 finishDrag 只执行一次
-    if (!active) return
-    active = false
-    finishDrag()
-  }
-}
-
-/** 指针所在位置 → 插入指示线 y（组内容坐标）+ 记录插入下标 */
-function updateDragLine(clientY: number) {
-  const ds = dragState
-  const body = bodyRef.value
-  if (!ds || !body) return
-  const groupRect = ds.groupEl.getBoundingClientRect()
-  const rows = Array.from(ds.groupEl.querySelectorAll<HTMLElement>(':scope > .todo-row'))
-  let insert: number | null = null
-  let edgeY: number | null = null
-  if (clientY >= groupRect.top && clientY <= groupRect.bottom && rows.length) {
-    edgeY = groupRect.bottom
-    insert = rows.length
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i].getBoundingClientRect()
-      if (clientY < r.top + r.height / 2) {
-        edgeY = r.top
-        insert = i
-        break
-      }
-      edgeY = r.bottom
-      insert = i + 1
-    }
-  }
-  ds.insert = insert
-  dragLineTop.value =
-    edgeY == null ? null : edgeY - body.getBoundingClientRect().top + body.scrollTop
-}
-
-/** 松开落点：换算目标顺序，整组写回 sort_order */
-function finishDrag() {
-  const ds = dragState
-  document.body.classList.remove('todo-row-dragging')
-  todoDragId.value = null
-  dragState = null
-  dragLineTop.value = null
-  if (!ds || ds.insert == null || ds.fromIndex < 0) return
-  const g = pendingGroups.value.find((x) => x.label === ds.groupLabel)
-  if (!g) return
-  const ids = g.items.map((x) => x.id)
-  // 插入下标相对「含被拖项」的数组；先移除再插入需换算
-  const final = ds.insert > ds.fromIndex ? ds.insert - 1 : ds.insert
-  if (final === ds.fromIndex) return
-  const without = ids.filter((_, i) => i !== ds.fromIndex)
-  without.splice(final, 0, ds.id)
-  void store.reorderTodos(without)
-}
 
 function flashHighlight(id: number) {
   highlight.value = id
@@ -603,6 +499,7 @@ watch(
             <div class="sp-time-wrap">
               <AppSelect
                 class="sp-select"
+                compact
                 :model-value="String(selHour)"
                 :options="hourSelectOptions"
                 aria-label="截止小时"
@@ -611,6 +508,7 @@ watch(
               <span class="sp-colon">:</span>
               <AppSelect
                 class="sp-select"
+                compact
                 :model-value="String(selMin)"
                 :options="selMinSelectOptions"
                 aria-label="截止分钟"
@@ -635,6 +533,7 @@ watch(
             <div class="sp-time-wrap">
               <AppSelect
                 class="sp-select"
+                compact
                 :model-value="String(remindHour)"
                 :options="hourSelectOptions"
                 aria-label="提醒小时"
@@ -643,6 +542,7 @@ watch(
               <span class="sp-colon">:</span>
               <AppSelect
                 class="sp-select"
+                compact
                 :model-value="String(remindMin)"
                 :options="remindMinSelectOptions"
                 aria-label="提醒分钟"
@@ -657,6 +557,17 @@ watch(
         </div>
       </template>
     </Teleport>
+
+    <!-- 子行确认弹窗：宿主层单实例（每行各挂一个会随行数线性增长） -->
+    <ConfirmDialog
+      :visible="rowConfirm != null"
+      title="还有子待办未完成"
+      :message="`「${rowConfirm?.todo.title ?? ''}」下还有 ${rowConfirm?.kids ?? 0} 条子待办未完成，是否确认完成？`"
+      hint="确认后会一并勾选这些子待办；取消则本条待办保持未完成。"
+      confirm-text="确认并勾选子项"
+      @confirm="onRowConfirm"
+      @cancel="rowConfirm = null"
+    />
   </section>
 </template>
 
@@ -1014,20 +925,9 @@ watch(
   align-items: center;
   gap: 6px;
 }
-/* 时分下拉：AppSelect（系统通用下拉组件）的紧凑档，覆盖其默认 38px 高度。
-   AppSelect 的根是 fragment（触发器 + Teleport），父级 scoped class 落不到触发器上
-   （Vue 只把父 scope id 给单一根元素），内部样式必须用 :deep() 穿透，见 DESIGN.md §5。 */
+/* 时分下拉：尺寸走 AppSelect 的紧凑档，这里只管宽度与聚焦环 */
 .sp-time-wrap :deep(.sp-select) {
-  min-height: 0;
-  padding: 3px 6px;
-  font-size: 0.75em;
   width: 4.6em;
-  justify-content: center;
-  gap: 4px;
-}
-/* 默认 label 是 flex:1，会把数字顶到左边缘；收缩成内容宽，让「数字 + 箭头」整体居中 */
-.sp-time-wrap :deep(.sp-select .app-select-label) {
-  flex: 0 1 auto;
 }
 .sp-time-wrap :deep(.sp-select:focus-visible) {
   border-color: var(--brand-500);

@@ -10,6 +10,7 @@
 //! - 停止：卸载时调用 `stop_service`（卸载 UI 在 §12.7 接入）。
 
 use crate::extension::{read_manifest, BackendSpec, ExtensionManifest};
+use crate::process::NoConsoleWindow;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
@@ -237,11 +238,7 @@ pub fn start_service(
             Err(e) => log::warn!("后端日志文件打开失败（{ext_id}）：{e}（后端输出将被丢弃）"),
         }
     }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    cmd.no_console_window();
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -377,7 +374,6 @@ fn firewall_rule_name(ext_id: &str) -> String {
 pub(crate) fn remove_firewall_rule(ext_id: &str) {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         let rule_name = firewall_rule_name(ext_id);
         let out = std::process::Command::new("netsh")
             .args([
@@ -387,7 +383,7 @@ pub(crate) fn remove_firewall_rule(ext_id: &str) {
                 "rule",
                 &format!("name={rule_name}"),
             ])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .no_console_window()
             .output();
         match out {
             Ok(o) if o.status.success() => {
@@ -413,7 +409,6 @@ pub(crate) fn remove_firewall_rule(ext_id: &str) {
 fn ensure_firewall_rule(ext_id: &str, port: u16, program: &str) {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         let rule_name = firewall_rule_name(ext_id);
         // netsh add rule 对同名规则是「叠加」而非覆盖：先删后加保证幂等，
         // 避免动态端口每次启动都新增一条规则无限累积
@@ -425,7 +420,7 @@ fn ensure_firewall_rule(ext_id: &str, port: u16, program: &str) {
                 "rule",
                 &format!("name={rule_name}"),
             ])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .no_console_window()
             .output();
         let out = std::process::Command::new("netsh")
             .args([
@@ -441,7 +436,7 @@ fn ensure_firewall_rule(ext_id: &str, port: u16, program: &str) {
                 &format!("program={program}"),
                 "profile=private",
             ])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .no_console_window()
             .output();
         match out {
             Ok(o) if o.status.success() => {

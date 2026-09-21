@@ -45,6 +45,10 @@ const showToast = inject<(msg: string, action?: { label: string; onClick: () => 
   'showToast',
   () => {},
 )
+/** 宿主层单实例确认弹窗（TodoCard 提供）；浮窗等宿主没有时回退到本行自带的那一个 */
+const requestRowConfirm = inject<
+  ((t: Todo, kids: number, onConfirm: () => void) => void) | null
+>('todoRowConfirm', null)
 /** 排期弹层（卡片层提供）：浮窗等宿主没有弹层时为 null，日期徽标转只读展示、隐藏「日期」按钮 */
 const openSchedule = inject<((t: Todo, el: HTMLElement) => void) | null>('todoOpenSchedule', null)
 const canSchedule = openSchedule != null
@@ -100,7 +104,10 @@ function onBadgeClick(e: MouseEvent) {
 
 /** 点击图钉立即取消置顶（置顶与日期无关，取消后回到按日期分组的位置） */
 function unpin() {
-  void store.setTodoPinned(props.todo.id, false).then(() => showToast(`「${props.todo.title}」已取消置顶`))
+  void store
+    .setTodoPinned(props.todo.id, false)
+    .then(() => showToast(`「${props.todo.title}」已取消置顶`))
+    .catch(() => showToast('取消置顶失败，请重试'))
 }
 
 function onRowPointerDown(e: PointerEvent) {
@@ -116,12 +123,21 @@ function onRowPointerDown(e: PointerEvent) {
   dragStart(props.todo, e)
 }
 
+/** 提交中标记：快速双击会让同一条连续翻转两次（视觉上「勾了又弹回」） */
+const busy = ref(false)
+
 async function toggle() {
   const wasDone = props.todo.done
   // 勾父带子：父待办标记完成时，未完成的子待办一并勾上（取消完成不连带走子待办，保留各自进度）。
   // 有未完成子项时先确认——静默连勾用户看不见，容易误以为只勾了父条目。
   if (!wasDone && kids.value.some((k) => !k.done)) {
-    confirmKids.value = kids.value.filter((k) => !k.done).length
+    const n = kids.value.filter((k) => !k.done).length
+    if (requestRowConfirm) {
+      // 宿主（卡片/视图）有单实例弹窗就用它，本行不再各挂一个
+      requestRowConfirm(props.todo, n, () => void applyToggle())
+      return
+    }
+    confirmKids.value = n
     showKidsConfirm.value = true
     return
   }
@@ -129,24 +145,32 @@ async function toggle() {
 }
 
 async function applyToggle() {
-  const wasDone = props.todo.done
-  // 周期待办：勾选 = 「完成本轮」，日期滚到下一轮（不置 done、不进已完成列表）。
-  // 就地滚动后给一条可撤销提示，否则用户会以为点了没反应。
-  if (!wasDone && props.todo.repeat_mode !== 'once') {
-    const updated = await store.completeTodoRecurring(props.todo.id)
-    if (updated) {
-      const next = updated.repeat_mode === 'once' ? '周期已结束' : `已滚到 ${nextLabel(updated)}`
-      showToast(next, {
-        label: '撤销',
-        onClick: () => void store.undoTodoRecurring(props.todo.id),
-      })
+  if (busy.value) return
+  busy.value = true
+  try {
+    const wasDone = props.todo.done
+    // 周期待办：勾选 = 「完成本轮」，日期滚到下一轮（不置 done、不进已完成列表）。
+    // 就地滚动后给一条可撤销提示，否则用户会以为点了没反应。
+    if (!wasDone && props.todo.repeat_mode !== 'once') {
+      const updated = await store.completeTodoRecurring(props.todo.id)
+      if (updated) {
+        const next = updated.repeat_mode === 'once' ? '周期已结束' : `已滚到 ${nextLabel(updated)}`
+        showToast(next, {
+          label: '撤销',
+          onClick: () => void store.undoTodoRecurring(props.todo.id),
+        })
+      }
+      return
     }
-    return
-  }
-  await store.toggleTodo(props.todo.id)
-  if (wasDone) return
-  for (const k of kids.value) {
-    if (!k.done) await store.toggleTodo(k.id)
+    await store.toggleTodo(props.todo.id)
+    if (wasDone) return
+    for (const k of kids.value) {
+      if (!k.done) await store.toggleTodo(k.id)
+    }
+  } catch {
+    showToast('待办状态没能保存，请重试')
+  } finally {
+    busy.value = false
   }
 }
 
@@ -410,6 +434,7 @@ function hideTip() {
       class="todo-check"
       :class="{ checked: todo.done, sub: isSub }"
       type="button"
+      :disabled="busy"
       :title="todo.done ? '取消完成' : '标记完成'"
       :aria-label="todo.done ? '取消完成' : '标记完成'"
       @click="toggle"

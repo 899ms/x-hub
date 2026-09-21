@@ -8,6 +8,7 @@ import {
   dueBadge,
   GROUP_META,
   groupOf,
+  isoKey,
   type DueBadge,
 } from '../utils/todoSchedule'
 import type { Countdown, Note, Resource } from '../api/tauri'
@@ -229,6 +230,22 @@ const todoGroups = computed<PreviewTodoGroup[]>(() => {
 const pendingCount = computed(() => topTodos.value.filter((t) => !t.done).length)
 const doneCount = computed(() => topTodos.value.filter((t) => t.done).length)
 
+/**
+ * 日历模块缩印的「每天几条」标记：口径照抄真卡 `TodoCalendarCard.realByDay`——
+ * **全量**顶级未完成待办按 due_at 落格，不能走上面 todoGroups 的软上限截断
+ * （截断会让某些日子在预览里少了点，与真卡不符）。
+ * 周期待办的虚拟实例真卡是异步展开的，缩印不做（保持同步渲染，差异已知）。
+ */
+const todoDayMarks = computed(() => {
+  const map = new Map<string, number>()
+  for (const t of topTodos.value) {
+    if (t.done || t.due_at == null) continue
+    const key = isoKey(new Date(t.due_at))
+    map.set(key, (map.get(key) ?? 0) + 1)
+  }
+  return map
+})
+
 // ---- 最近使用（有启动记录 → last_launched_at 倒序，同 RecentBar）----
 const recentList = computed<Resource[]>(() =>
   store.state.resources
@@ -273,6 +290,7 @@ export const dashPreviewData = {
   countdownList,
   snippetList,
   todoGroups,
+  todoDayMarks,
   pendingCount,
   doneCount,
   recentList,

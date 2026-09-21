@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, watch } from 'vue'
+import { onBeforeUnmount, ref, toRef, watch } from 'vue'
+import { useFocusTrap } from '../composables/useFocusTrap'
 
 /**
  * 通用确认弹窗（全局样式 .modal-mask / .modal-card）。
@@ -27,6 +28,10 @@ const props = withDefaults(
 
 const emit = defineEmits<{ confirm: []; cancel: [] }>()
 
+/** 焦点陷阱：Tab 循环留在弹窗内（与其它弹窗同一口径，键盘用户不会 Tab 穿到后台） */
+const cardRef = ref<HTMLElement | null>(null)
+useFocusTrap(toRef(props, 'visible'), cardRef)
+
 function onKeydown(e: KeyboardEvent) {
   if (!props.visible) return
   if (e.key === 'Escape') {
@@ -45,6 +50,8 @@ watch(
     if (on) window.addEventListener('keydown', onKeydown)
     else window.removeEventListener('keydown', onKeydown)
   },
+  // immediate：挂载时 visible 已为 true 也要挂上监听（通用组件不能假设初始必为 false）
+  { immediate: true },
 )
 
 onBeforeUnmount(() => {
@@ -55,7 +62,7 @@ onBeforeUnmount(() => {
 <template>
   <Teleport to="body">
     <div v-if="visible" class="modal-mask" @click.self="emit('cancel')">
-      <div class="modal-card confirm-card" role="dialog" aria-modal="true">
+      <div ref="cardRef" class="modal-card confirm-card" role="dialog" aria-modal="true">
         <h2 class="confirm-title">{{ title }}</h2>
         <p class="confirm-msg">{{ message }}</p>
         <p v-if="hint" class="confirm-hint">{{ hint }}</p>

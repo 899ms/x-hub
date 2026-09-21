@@ -228,6 +228,38 @@ impl RepeatRule {
                 return Err("INVALID_ARGUMENT: endMode=count 需要 count > 0".to_string());
             }
         }
+        // 数值列范围校验。扩展是不可信输入源，而非法值在引擎里会静默改变语义：
+        // monthNth=0 算不出锚点 → 规则被当成「已用尽」→ 周期静默转一次性；
+        // weekdays 越界（如 1<<40）会被 weekday_from_index 兜底成周日。
+        // every 上限同时防 chrono 的 Duration::days 溢出 panic（极大间隔的 custom）。
+        if let Some(day) = self.month_day {
+            if day != -1 && !(1..=31).contains(&day) {
+                return Err(format!(
+                    "INVALID_ARGUMENT: repeat.monthDay 取值非法: {day}（1..31 或 -1）"
+                ));
+            }
+        }
+        if let Some(nth) = self.month_nth {
+            if nth != -1 && !(1..=5).contains(&nth) {
+                return Err(format!(
+                    "INVALID_ARGUMENT: repeat.monthNth 取值非法: {nth}（1..5 或 -1）"
+                ));
+            }
+        }
+        if let Some(mask) = self.weekdays {
+            if !(1..=0b111_1111).contains(&mask) {
+                return Err(format!(
+                    "INVALID_ARGUMENT: repeat.weekdays 位掩码非法: {mask}（bit0=周一 … bit6=周日）"
+                ));
+            }
+        }
+        if let Some(every) = self.every {
+            if !(1..=999).contains(&every) {
+                return Err(format!(
+                    "INVALID_ARGUMENT: repeat.every 取值非法: {every}（1..999）"
+                ));
+            }
+        }
         if self.mode == "custom" {
             if self.every.unwrap_or(0) <= 0 {
                 return Err("INVALID_ARGUMENT: custom 需要 every > 0".to_string());
@@ -240,11 +272,18 @@ impl RepeatRule {
         if self.mode == "weekly" && self.weekdays.unwrap_or(0) == 0 {
             return Err("INVALID_ARGUMENT: weekly 需要选择星期几".to_string());
         }
-        if self.mode == "monthly"
-            && self.month_day.is_none()
-            && self.month_nth.is_none()
-        {
-            return Err("INVALID_ARGUMENT: monthly 需要指定每月第几天或第几个星期几".to_string());
+        if self.mode == "monthly" {
+            if self.month_day.is_none() && self.month_nth.is_none() {
+                return Err(
+                    "INVALID_ARGUMENT: monthly 需要指定每月第几天或第几个星期几".to_string()
+                );
+            }
+            // 「第几个星期几」必须带掩码，否则 month_anchor 取不到星期几 → 规则静默用尽
+            if self.month_nth.is_some() && self.weekdays.unwrap_or(0) == 0 {
+                return Err(
+                    "INVALID_ARGUMENT: monthly 的「第几个星期几」需要 weekdays".to_string()
+                );
+            }
         }
         Ok(())
     }

@@ -12,6 +12,7 @@ import {
   DatePickerGridHead,
   DatePickerGridRow,
   DatePickerHeadCell,
+  DatePickerHeader,
   DatePickerHeading,
   DatePickerInput,
   DatePickerNext,
@@ -46,7 +47,10 @@ const emit = defineEmits<{ 'update:modelValue': [number | null] }>()
 
 const dateVal = shallowRef<DateValue | null>(null)
 const timeVal = shallowRef<TimeValue | null>(null)
-/** 回填与回写互斥：避免 watch(modelValue) → watch(date/time) → emit 的抖动 */
+/** 回填与回写互斥：避免 watch(modelValue) → watch(date/time) → emit 的抖动。
+ *  两个 watch 都必须 `flush: 'sync'` 这个标志才有效：默认的 pre-flush 回调是异步执行的，
+ *  等它跑起来时 syncing 早已复位，父值回填会被当成用户改动回写一遍——
+ *  而 combine 会把秒/毫秒规范化，于是 23:59:59.999 被静默改写成 23:59:00.000。 */
 let syncing = false
 
 function split(ms: number): { date: DateValue; time: TimeValue } {
@@ -80,18 +84,22 @@ watch(
     }
     syncing = false
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
 
-watch([dateVal, timeVal], () => {
-  if (syncing) return
-  const d = dateVal.value
-  if (d == null) {
-    emit('update:modelValue', null)
-    return
-  }
-  emit('update:modelValue', combine(d, timeVal.value))
-})
+watch(
+  [dateVal, timeVal],
+  () => {
+    if (syncing) return
+    const d = dateVal.value
+    if (d == null) {
+      emit('update:modelValue', null)
+      return
+    }
+    emit('update:modelValue', combine(d, timeVal.value))
+  },
+  { flush: 'sync' },
+)
 
 const hasValue = computed(() => props.modelValue != null)
 

@@ -1,9 +1,30 @@
 use std::process::Command;
 
+/// 让子进程不弹控制台窗口（链式：`Command::new("x").no_console_window()`）。
+///
+/// 宿主是 GUI 子系统进程（`main.rs` 的 `windows_subsystem = "windows"`），自身没有控制台；
+/// 此时拉起控制台子系统程序（`node.exe` / `cmd` / `powershell` / `netsh` / `reg`）若不带
+/// `CREATE_NO_WINDOW`，Windows 会**为子进程新建一个控制台窗口**——表现为「闪一下黑窗」。
+///
+/// **全工程唯一实现**：`autostart` / `runtime` / `service` / `commands` 都从这里取，
+/// 新增子进程调用点直接挂 `.no_console_window()`，不要再抄一份 `creation_flags(0x08000000)`。
+pub(crate) trait NoConsoleWindow {
+    fn no_console_window(&mut self) -> &mut Self;
+}
+
 #[cfg(target_os = "windows")]
-fn no_console_window(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+impl NoConsoleWindow for Command {
+    fn no_console_window(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.creation_flags(0x08000000) // CREATE_NO_WINDOW
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl NoConsoleWindow for Command {
+    fn no_console_window(&mut self) -> &mut Self {
+        self
+    }
 }
 
 pub fn launch_program(path: &str, args: Option<&str>) -> Result<(), String> {
@@ -16,8 +37,7 @@ pub fn launch_program(path: &str, args: Option<&str>) -> Result<(), String> {
         }
         // 宿主是 GUI 子系统进程（无控制台），直接启动 CLI 工具/bat 时若不指定
         // CREATE_NO_WINDOW，Windows 会为子进程新建控制台窗口（闪黑窗）
-        #[cfg(target_os = "windows")]
-        no_console_window(&mut c);
+        c.no_console_window();
         c
     } else {
         #[cfg(target_os = "windows")]
@@ -26,7 +46,7 @@ pub fn launch_program(path: &str, args: Option<&str>) -> Result<(), String> {
         {
             // 引号包裹路径，兼容含空格路径；隐藏控制台窗口
             c.arg("/C").arg(format!("\"{}\"", path));
-            no_console_window(&mut c);
+            c.no_console_window();
         }
         #[cfg(not(target_os = "windows"))]
         let mut c = Command::new("sh");
@@ -63,8 +83,7 @@ fn launch_elevated(path: &str, args: Option<&str>) -> Result<(), String> {
     let mut cmd = std::process::Command::new("powershell");
     cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
         .env("XHUB_PATH", path);
-    #[cfg(target_os = "windows")]
-    no_console_window(&mut cmd);
+    cmd.no_console_window();
     if has_args {
         cmd.env("XHUB_ARGS", args.unwrap_or(""));
     }
@@ -107,8 +126,7 @@ pub fn open_with_browser(browser_exe: &str, url: &str) -> Result<(), String> {
     }
     let mut cmd = Command::new(path);
     cmd.arg(url);
-    #[cfg(target_os = "windows")]
-    no_console_window(&mut cmd);
+    cmd.no_console_window();
     match cmd.spawn() {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("启动浏览器失败「{}」: {}", browser_exe, e)),

@@ -4,6 +4,7 @@
 //! 管理员权限进程无法从资源管理器接收文件拖放（速达拖拽导入失效），该模式已移除。
 //! `apply` 时会顺带清理旧版残留的计划任务。
 
+use crate::process::NoConsoleWindow;
 use std::process::Command;
 
 /// 自启动在命令行里追加的隐藏启动参数（主窗不弹出、直接驻留托盘）
@@ -48,13 +49,6 @@ fn exe_path() -> String {
 #[cfg(target_os = "windows")]
 fn launch_command_line() -> String {
     format!("\"{}\" {}", exe_path(), HIDDEN_ARG)
-}
-
-/// 隐藏控制台窗口（reg / schtasks 是命令行工具，避免闪黑框）
-#[cfg(target_os = "windows")]
-fn no_console_window(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 }
 
 // ---------- 普通模式：注册表 Run 键 ----------
@@ -176,7 +170,7 @@ pub fn ensure_registered() -> Result<bool, String> {
 fn run_cmd_line(line: &str) -> bool {
     let mut cmd = Command::new("cmd");
     cmd.args(["/C", line]);
-    no_console_window(&mut cmd);
+    cmd.no_console_window();
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
@@ -189,7 +183,7 @@ fn run_bat_elevated(bat_path: &std::path::Path, log_tag: &str) -> bool {
     );
     let mut cmd = Command::new("powershell");
     cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]);
-    no_console_window(&mut cmd);
+    cmd.no_console_window();
     let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
     if ok {
         log::info!("[自启动] {} 提权操作完成", log_tag);
@@ -204,7 +198,7 @@ fn run_bat_elevated(bat_path: &std::path::Path, log_tag: &str) -> bool {
 fn legacy_task_exists() -> bool {
     let mut cmd = Command::new("schtasks");
     cmd.args(["/Query", "/TN", LEGACY_TASK_NAME]);
-    no_console_window(&mut cmd);
+    cmd.no_console_window();
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 

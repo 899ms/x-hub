@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { marked, Renderer } from 'marked'
+import DOMPurify from 'dompurify'
 import { ChevronDown, MessageSquare, PanelRightClose, Plus, Send, Settings2, X } from 'lucide-vue-next'
 import { PLATFORM_ENTRY_NAME, isPlatformModel, isTauri, tauriApi, type ChatMessage, type ChatModelConfig, type ChatSession, type ChatStreamEvent } from '../api/tauri'
 import AppSelect from './AppSelect.vue'
@@ -422,10 +423,15 @@ mdRenderer.code = ({ text, lang }) => {
   )
 }
 
-// 大模型输出可能是 Markdown，用 marked 渲染为 HTML（含代码块/列表/引用等）
+// 大模型输出可能是 Markdown，用 marked 渲染为 HTML（含代码块/列表/引用等）。
+// ⚠️ 必须过 DOMPurify：模型输出是**不可信内容**，marked 默认不过滤内联 HTML，
+// 而主窗口没有 CSP —— 直接 v-html 时，回复里的 `<img onerror>` / `<svg onload>`
+// 就能执行任意脚本并调用应用的本地命令（启动程序 / 写配置 / 开网址）。
+// 用户消息走插值渲染，不经这里。
 function renderMd(text: string): string {
   if (!text) return ''
-  return marked.parse(text, { async: false, renderer: mdRenderer }) as string
+  const html = marked.parse(text, { async: false, renderer: mdRenderer }) as string
+  return DOMPurify.sanitize(html)
 }
 
 // assistant 消息的 Markdown 渲染缓存（按消息 id 惰性缓存）。
