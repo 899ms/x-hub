@@ -299,3 +299,28 @@ todo_attachments (
 改动：换成同一个 `TodoDateTimeField`（`dateOnly` 模式），落库值改为**所选当天 23:59:59.999（本地）**，与 Rust 测试口径一致。`repeat_end_at` 只是前端写入的值，Rust 无改动。
 
 
+## 13. 第三轮反馈：下拉换成 AppSelect 后边距变挤（2026-09-21 22:41）
+
+反馈：「改成应用类的组件下拉之后，有一些样式的边距需要去优化一下，靠得太近了」。
+
+**根因不是边距，是样式根本没生效。** `AppSelect` 的模板根是 **fragment**（触发器 `<button>` + `<Teleport>`）。Vue 只把父组件的 scope id 加到**单一根元素**上（`runtime-core` 的 `setScopeId` 仅在 `vnode === parentComponent.subTree` 时向上递归），fragment 根不满足，所以：
+
+- `TodoCard.vue` 的 `.sp-select { … }`、`TodoEditDialog.vue` 的 `.te-select { … }`、`SudaFormDialog.vue` 的 `.scheme-select { width: 92px }`、`ChatPanel.vue` 的 `.model-app-select { … !important }` —— **全是死规则**（`!important` 也救不了，因为选择器压根没匹配）。
+- 结果：换用 AppSelect 后这些下拉仍按**默认档**渲染（`min-height: 38px`、`padding: 8px 10px`、`font-size: 0.8125rem`、`background: var(--input-bg)`），夹在 `padding: 6px 9px` / 12.5px 的输入框行里就显得又高又挤。
+
+**处置**：内部样式改用 `:deep()` 穿透（父级容器做前缀，穿透部分不受 scoped 限制），并顺带放宽行内边距。
+
+| 位置 | 改法 | 边距 |
+|---|---|---|
+| `TodoCard.vue` 排期弹层时分 | `.sp-select` → `.sp-time-wrap :deep(.sp-select)`，恢复 24px 紧凑档；`.app-select-label` 由 `flex:1` 改为 `flex: 0 1 auto`，让「数字 + 箭头」整体居中（原来数字被顶到左边缘） | `.sp-time-row` gap 8→10、`.sp-time-wrap` gap 4→6 |
+| `TodoEditDialog.vue` 周期区 5 个下拉 | `.te-select` → `.te-row2 :deep(.te-select)`；去掉失效的 `te-input` 类 | `.te-row2` gap 8→10、`.te-inline` gap 6→8 |
+| `ChatPanel.vue` 模型下拉 | `.model-app-select` → `.model-sel :deep(.model-app-select)`，去掉 6 个 `!important` | 无 |
+| `SudaFormDialog.vue` 协议下拉 | `.scheme-select` → `.web-input-row :deep(.scheme-select)`（`height: 38px` 与默认档同高，删掉） | 无 |
+
+**规则已写入 `DESIGN.md` §5「表单控件」**：改 `AppSelect` 内部样式必须用 `:deep()`，并在 `AppSelect.vue` 触发器样式上方留了同一句提示。
+
+**验证**：`npx vue-tsc -b` EXIT=0；`npm run build` 通过；并核对产物 CSS，确认穿透选择器已生成且能命中（`.sp-time-wrap[data-v-…] .sp-select` 等）。纯样式改动，Rust 未动。
+
+**commit**：`917c075`（待办两处 + 规则）、`2efe524`（ChatPanel / SudaFormDialog 同根因，可单独 revert）。
+
+
