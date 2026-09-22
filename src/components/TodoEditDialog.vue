@@ -34,6 +34,8 @@ const cardRef = ref<HTMLElement | null>(null)
 useFocusTrap(toRef(props, 'visible'), cardRef)
 
 const title = ref('')
+/** 描述长度上限：与后端 repo::todo::MAX_DESCRIPTION_LEN 对齐（超了后端会报错拒写） */
+const DESC_MAX = 200
 const description = ref('')
 const pinned = ref(false)
 const tagIds = ref<number[]>([])
@@ -215,6 +217,10 @@ function toggleWeekday(i: number) {
 const canSave = computed(() => title.value.trim() !== '' && !busy.value)
 
 const repeatInvalid = computed(() => {
+  // 周期规则的基准时刻就是「截止」的时分（Rust 侧按它滚动）。没有截止时间时后端
+  // 既算不出下一轮、也拒绝「完成本轮」——勾选会永远失败，所以这里先拦住。
+  if (repeatMode.value !== 'once' && dueMs.value == null)
+    return '周期待办需要先设置「截止」时间（作为重复的基准时刻）'
   if (repeatMode.value === 'weekly' && weekdayMask.value === 0) return '每周至少要选一天'
   if (repeatMode.value === 'custom' && repeatEvery.value < 1) return '间隔至少为 1'
   if (repeatMode.value === 'custom' && repeatUnit.value === 'week' && weekdayMask.value === 0)
@@ -313,8 +319,20 @@ async function remove() {
         </label>
 
         <label class="te-field">
-          <span class="te-lab">描述 <i class="te-opt">轻量 Markdown · 勾选一律用子待办</i></span>
-          <textarea v-model="description" class="te-input te-textarea" rows="3" placeholder="补充说明（可选）"></textarea>
+          <span class="te-lab">
+            描述 <i class="te-opt">轻量 Markdown · 勾选一律用子待办</i>
+            <!-- 超长会被后端拒（最多 20k 字），这里直接卡住并给出计数 -->
+            <i v-if="description.length > DESC_MAX * 0.8" class="te-count">
+              {{ description.length }}/{{ DESC_MAX }}
+            </i>
+          </span>
+          <textarea
+            v-model="description"
+            class="te-input te-textarea"
+            rows="3"
+            :maxlength="DESC_MAX"
+            placeholder="补充说明（可选，鼠标移到列表里的这一行可查看）"
+          ></textarea>
         </label>
 
         <div class="te-field">
@@ -527,6 +545,14 @@ async function remove() {
   font-style: normal;
   font-weight: 400;
   color: var(--text-4);
+}
+/* 描述接近上限时的计数（接近才显示，平时不占视觉） */
+.te-count {
+  float: right;
+  font-style: normal;
+  font-weight: 500;
+  color: var(--text-4);
+  font-variant-numeric: tabular-nums;
 }
 .te-sub {
   font-size: 0.72rem;

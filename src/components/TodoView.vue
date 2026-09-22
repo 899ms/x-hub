@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, ListTodo, Plus, X } from 'lucide-vue-next'
 import { useStore } from '../stores/workbench'
 import type { Todo, TodoOccurrence, TodoTag } from '../api/tauri'
 import { useTodoDrag } from '../composables/useTodoDrag'
+import { useTodoRestore } from '../composables/useTodoRestore'
 import {
   VIEW_GROUP_META,
   addDays,
@@ -186,7 +187,17 @@ async function loadOccurrences() {
   }
 }
 
-watch([cursor, calUnit, today], () => void loadOccurrences())
+/** 周期规则签名：勾掉一轮（due_at 前移）/ 改规则 / 新建周期待办之后，
+ *  日历上的虚线虚拟实例必须重算——它们是按 due_at 现算的，不重算会留下错位的旧实例
+ *  （与工作台日历卡 TodoCalendarCard 同一口径）。 */
+const repeatSignature = computed(() =>
+  store.state.todos
+    .filter((t) => t.parent_id == null && !t.done && t.repeat_mode !== 'once')
+    .map((t) => `${t.id}:${t.due_at}:${t.repeat_mode}:${t.repeat_done_count}`)
+    .join('|'),
+)
+
+watch([cursor, calUnit, today, repeatSignature], () => void loadOccurrences())
 
 onMounted(() => {
   void loadOccurrences()
@@ -259,9 +270,13 @@ function onRowConfirm() {
 }
 
 // ---- 删除（父条目级联删子）+ 撤销恢复，由 TodoRow 经 provide 调用 ----
-// 与 TodoCard 同一套语义：删除是不可逆操作，给一条可撤销提示兜住误点。
+// 与 TodoCard 同一套语义（同一份 useTodoRestore）：删除是不可逆操作，给一条可撤销提示兜住误点。
+const restoreTodo = useTodoRestore()
+
 async function removeTodo(t: Todo) {
   const kids = store.state.todos.filter((x) => x.parent_id === t.id)
+  // 标签关联是 ON DELETE CASCADE，删除后查不回来 → 删前先抓快照
+  const tagIds = store.todoTagIds(t.id)
   try {
     await store.deleteTodo(t.id)
   } catch {
@@ -270,27 +285,11 @@ async function removeTodo(t: Todo) {
   }
   showToast(
     kids.length ? `已删除「${t.title}」及 ${kids.length} 条子待办` : `已删除「${t.title}」`,
-    { label: '撤销', onClick: () => void restoreTodo(t, kids) },
+    {
+      label: '撤销',
+      onClick: () => void restoreTodo(t, kids, tagIds).catch(() => showToast('恢复失败，请重试')),
+    },
   )
-}
-
-/** 重建父条目后再挂回子待办，恢复创建时间/优先级/排期/完成状态 */
-async function restoreTodo(parent: Todo, kids: readonly Todo[]) {
-  const p = await store.createTodo(parent.title, null, parent.created_at)
-  if (parent.priority !== 0) await store.updateTodo(p.id, parent.title, parent.priority)
-  if (parent.due_at != null || parent.remind_at != null) {
-    await store.scheduleTodo(p.id, parent.due_at, parent.remind_at)
-  }
-  if (parent.done) await store.toggleTodo(p.id)
-  for (const k of kids) {
-    const c = await store.createTodo(k.title, p.id, k.created_at)
-    if (k.priority !== 0) await store.updateTodo(c.id, k.title, k.priority)
-    if (k.due_at != null || k.remind_at != null) {
-      await store.scheduleTodo(c.id, k.due_at, k.remind_at)
-    }
-    if (k.done) await store.toggleTodo(c.id)
-  }
-  showToast('已恢复待办')
 }
 
 // ---- 行渲染全部交给 TodoRow（与卡片/浮窗同一份），这里只提供宿主能力 ----
@@ -836,130 +835,7 @@ function onVirtualDown(e: PointerEvent) {
   height: 1px;
   background: var(--border-soft);
 }
-.tv-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 7px 9px;
-  margin-bottom: 4px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: var(--bg-card-solid);
-  flex-wrap: wrap;
-}
-.tv-row.pinned {
-  border-color: var(--brand-500);
-  background: var(--brand-50);
-}
-.tv-row.done .tv-label {
-  color: var(--text-4);
-  text-decoration: line-through;
-}
-.tv-check {
-  flex-shrink: 0;
-  width: 15px;
-  height: 15px;
-  margin-top: 2px;
-  border-radius: 50%;
-  border: 1.6px solid var(--border-strong);
-  background: transparent;
-  cursor: pointer;
-}
-.tv-check.small {
-  width: 12px;
-  height: 12px;
-  margin-top: 1px;
-}
-.tv-check.on {
-  background: var(--brand-500);
-  border-color: var(--brand-500);
-}
-.tv-main {
-  flex: 1;
-  min-width: 0;
-}
-.tv-line {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-}
-.tv-pin {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--brand-500);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.tv-pin:hover {
-  color: var(--c-red-ink);
-}
-.tv-label {
-  font-size: 0.8rem;
-  color: var(--text-1);
-  cursor: text;
-}
-.tv-badge {
-  padding: 0 7px;
-  border-radius: var(--radius-pill);
-  font-size: 0.62rem;
-  font-weight: 600;
-  background: var(--bg-card-soft);
-  color: var(--text-4);
-}
-.tv-badge.over {
-  background: var(--c-red-soft);
-  color: var(--c-red-ink);
-}
-.tv-badge.today {
-  background: var(--c-orange-soft);
-  color: var(--c-orange-ink);
-}
-.tv-badge.repeat {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  background: var(--c-blue-soft);
-  color: var(--c-blue-ink);
-}
-.tv-rowtag {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 0 6px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border-soft);
-  font-size: 0.62rem;
-  font-weight: 600;
-  color: var(--text-3);
-}
-.tv-kids {
-  margin-top: 4px;
-  padding-left: 2px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.tv-kid {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.72rem;
-  color: var(--text-2);
-}
-.tv-kid .done {
-  color: var(--text-4);
-  text-decoration: line-through;
-}
-.tv-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
+/* 行渲染全部在 TodoRow 里（.todo-* 命名空间），此处只保留本视图自身的样式 */
 .tv-icon {
   display: inline-flex;
   align-items: center;
@@ -975,21 +851,6 @@ function onVirtualDown(e: PointerEvent) {
 .tv-icon:hover {
   background: var(--bg-card-soft);
   color: var(--text-1);
-}
-.tv-child-input {
-  flex: 1 0 100%;
-  padding-left: 24px;
-}
-.tv-input {
-  width: 100%;
-  padding: 5px 8px;
-  font-size: 0.75rem;
-  font-family: inherit;
-  color: var(--text-1);
-  background: var(--bg-card-soft);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  outline: none;
 }
 .tv-cal {
   display: flex;

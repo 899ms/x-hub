@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, ref, type ComputedRef, type ComponentPublicInstance, type Ref } from 'vue'
+import { computed, inject, nextTick, ref, shallowRef, type ComputedRef, type ComponentPublicInstance, type Ref } from 'vue'
 import {
   AlertTriangle,
+  AlignLeft,
   Bell,
   CalendarDays,
   Check,
@@ -403,7 +404,9 @@ function onSubBlur() {
   else addingSub.value = false
 }
 
-// ---- 长内容悬浮全文（超过 5 行截断时） ----
+// ---- 悬浮卡片：标题被截断时补全文案 + 展示描述（Markdown 渲染） ----
+// 描述在 0.6.5 只有编辑弹层能写、列表里没有任何展示位（用户写了看不到），
+// 这里用「鼠标挪到行上悬浮展示」补齐：不占行高，也不打断列表排布。
 const tip = ref<{ visible: boolean; title: string; x: number; y: number }>({
   visible: false,
   title: '',
@@ -411,11 +414,35 @@ const tip = ref<{ visible: boolean; title: string; x: number; y: number }>({
   y: 0,
 })
 
-function showTip(e: MouseEvent) {
-  const el = e.currentTarget as HTMLElement
-  if (!el || el.scrollHeight <= el.clientHeight + 2) return
-  const rect = el.getBoundingClientRect()
-  tip.value = { visible: true, title: props.todo.title, x: rect.left, y: rect.bottom + 6 }
+// marked + DOMPurify 按需加载：浮窗是独立窗口（只用到 TodoRow），
+// 静态引入会把这两个库塞进浮窗首屏包；首次悬浮时才拉，之后常驻。
+const md = shallowRef<typeof import('../utils/markdownHtml') | null>(null)
+let mdLoading = false
+function ensureMd() {
+  if (md.value || mdLoading) return
+  mdLoading = true
+  void import('../utils/markdownHtml').then((m) => {
+    md.value = m
+  })
+}
+const descHtml = computed(() => (md.value ? md.value.renderMarkdown(props.todo.description) : ''))
+
+function onRowEnter(e: MouseEvent) {
+  const row = e.currentTarget as HTMLElement | null
+  if (!row) return
+  const label = row.querySelector<HTMLElement>('.todo-label')
+  // 标题被 5 行截断时才有必要补全文案（否则与行内文字重复）
+  const clamped = label != null && label.scrollHeight > label.clientHeight + 2
+  const hasDesc = props.todo.description.trim() !== ''
+  if (!clamped && !hasDesc) return
+  if (hasDesc) ensureMd()
+  const rect = row.getBoundingClientRect()
+  tip.value = {
+    visible: true,
+    title: clamped ? props.todo.title : '',
+    x: rect.left,
+    y: rect.bottom + 6,
+  }
 }
 
 function hideTip() {
@@ -429,6 +456,8 @@ function hideTip() {
     :class="{ done: todo.done, sub: isSub, highlight: todo.id === highlightId, dragging: todo.id === dragId || dragging }"
     :data-todo-id="todo.id"
     @pointerdown="onRowPointerDown"
+    @mouseenter="onRowEnter"
+    @mouseleave="hideTip"
   >
     <button
       class="todo-check"
@@ -478,11 +507,17 @@ function hideTip() {
         </button>
         <span
           class="todo-label"
-          :data-tip="todo.title"
           @dblclick="startEdit"
-          @mouseenter="showTip"
-          @mouseleave="hideTip"
         >{{ todo.title }}</span>
+        <!-- 有补充说明的行给一个小标记：否则「写了描述」在列表里完全看不出来 -->
+        <span
+          v-if="todo.description.trim()"
+          class="todo-desc-mark"
+          title="有补充说明（鼠标移到这一行查看）"
+          aria-hidden="true"
+        >
+          <AlignLeft :size="10" :stroke-width="2.2" />
+        </span>
 
         <!-- 徽标与标题同一 flex 行：短标题尾随同行，长标题放不下自动换行兜底 -->
         <div v-if="!todo.done" class="todo-badges">
@@ -635,7 +670,8 @@ function hideTip() {
         :style="{ left: tip.x + 'px', top: tip.y + 'px' }"
         role="tooltip"
       >
-        {{ tip.title }}
+        <div v-if="tip.title" class="todo-tip-title">{{ tip.title }}</div>
+        <div v-if="descHtml" class="todo-tip-md" v-html="descHtml"></div>
       </div>
     </Transition>
   </Teleport>
@@ -772,6 +808,14 @@ function hideTip() {
   text-decoration: line-through;
   opacity: 0.6;
   color: var(--text-3);
+}
+/* 有补充说明的行标记：只做提示，不可点（点击/双击语义留给标题本身） */
+.todo-desc-mark {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--text-4);
+  cursor: default;
 }
 
 .todo-edit {
@@ -1100,6 +1144,72 @@ function hideTip() {
   white-space: pre-wrap;
   word-break: break-word;
   pointer-events: none;
+}
+/* 有描述时放宽一点：Markdown 列表/引用在 340px 里换行太碎 */
+.todo-tip:has(.todo-tip-md) {
+  max-width: 420px;
+}
+.todo-tip-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+/* 描述正文（v-html 注入，标记不在本组件作用域内 → 必须 :deep） */
+.todo-tip-md {
+  white-space: normal;
+}
+.todo-tip-md :deep(p) {
+  margin: 0 0 6px;
+}
+.todo-tip-md :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.todo-tip-md :deep(ul),
+.todo-tip-md :deep(ol) {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+.todo-tip-md :deep(li) {
+  margin: 2px 0;
+}
+.todo-tip-md :deep(blockquote) {
+  margin: 0 0 6px;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-2);
+}
+.todo-tip-md :deep(code) {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bg-card-soft);
+  font-size: 0.92em;
+}
+.todo-tip-md :deep(pre) {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-soft);
+  overflow-x: auto;
+}
+.todo-tip-md :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+.todo-tip-md :deep(a) {
+  color: var(--brand-500);
+}
+.todo-tip-md :deep(h1),
+.todo-tip-md :deep(h2),
+.todo-tip-md :deep(h3) {
+  margin: 0 0 4px;
+  font-size: 0.8125rem;
+}
+.todo-tip-md :deep(hr) {
+  margin: 6px 0;
+  border: none;
+  border-top: 1px solid var(--border-soft);
+}
+.todo-tip-md :deep(img) {
+  max-width: 100%;
 }
 .tip-enter-active,
 .tip-leave-active {

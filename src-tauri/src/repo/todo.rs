@@ -194,11 +194,23 @@ pub fn toggle(conn: &Connection, id: i64) -> Result<Todo> {
 
 // ---------- 待办 v1：描述 / 置顶 / 周期 ----------
 
+/// 单条描述最大字符数：超过即截断（防扩展桥/粘贴把几 MB 文本写进 app.db，同剪贴板 MAX_ITEM_LEN 口径）。
+/// 入口层（宿主命令 / 扩展桥）会先按这个上限报错，这里是兜底——任何新调用点都不会写爆数据库。
+pub const MAX_DESCRIPTION_LEN: usize = 200;
+
+/// 截断到 MAX_DESCRIPTION_LEN 个字符（按字符而非字节，避免截断多字节字符）
+fn clamp_description(s: &str) -> String {
+    if s.chars().count() <= MAX_DESCRIPTION_LEN {
+        return s.to_string();
+    }
+    s.chars().take(MAX_DESCRIPTION_LEN).collect()
+}
+
 /// 设置描述（轻量 Markdown）
 pub fn set_description(conn: &Connection, id: i64, description: &str) -> Result<Todo> {
     conn.execute(
         "UPDATE todos SET description = ?1, updated_at = ?2, version = version + 1 WHERE id = ?3",
-        params![description, now(), id],
+        params![clamp_description(description), now(), id],
     )?;
     get(conn, id)
 }
@@ -213,7 +225,7 @@ pub fn set_description_with_version(
         .execute(
             "UPDATE todos SET description = ?1, updated_at = ?2, version = version + 1
              WHERE id = ?3 AND (?4 IS NULL OR version = ?4)",
-            params![description, now(), id, expected_version],
+            params![clamp_description(description), now(), id, expected_version],
         )
         .map_err(|e| e.to_string())?;
     if affected == 0 {
@@ -887,6 +899,19 @@ mod tests {
         assert_eq!(p.version, 2);
         // 描述不被置顶写入抹掉
         assert_eq!(p.description, "转账给房东");
+    }
+
+    #[test]
+    fn set_description_truncates_over_limit() {
+        let conn = setup();
+        let t = create(&conn, "超长描述", None, None).unwrap();
+        let long = "字".repeat(MAX_DESCRIPTION_LEN + 500);
+        let d = set_description(&conn, t.id, &long).unwrap();
+        assert_eq!(d.description.chars().count(), MAX_DESCRIPTION_LEN);
+        // 上限内原样写入
+        let ok = "x".repeat(MAX_DESCRIPTION_LEN);
+        let d2 = set_description(&conn, t.id, &ok).unwrap();
+        assert_eq!(d2.description.chars().count(), MAX_DESCRIPTION_LEN);
     }
 
     #[test]

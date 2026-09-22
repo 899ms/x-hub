@@ -388,6 +388,9 @@ pub fn set_todo_description(
     id: i64,
     description: String,
 ) -> Result<Todo, String> {
+    if description.chars().count() > todo::MAX_DESCRIPTION_LEN {
+        return Err(format!("描述过长（最多 {} 字）", todo::MAX_DESCRIPTION_LEN));
+    }
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let t = todo::set_description(&conn, id, &description).map_err(err_str)?;
     drop(conn);
@@ -499,6 +502,8 @@ pub fn expand_todo_occurrences(
     from_ms: i64,
     to_ms: i64,
 ) -> Result<Vec<TodoOccurrence>, String> {
+    // 先校验区间再取锁：超长区间直接拒绝，不白占数据库互斥锁
+    todo_recurrence::validate_range(from_ms, to_ms)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let todos = todo::list_recurring_candidates(&conn).map_err(err_str)?;
     let mut out = Vec::new();

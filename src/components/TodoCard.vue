@@ -6,6 +6,7 @@ import type { Todo } from '../api/tauri'
 import { parseTodoItems } from '../utils/todoParse'
 import { useTodoChildren } from '../composables/useTodoChildren'
 import { useTodoDrag } from '../composables/useTodoDrag'
+import { useTodoRestore } from '../composables/useTodoRestore'
 import TodoRow from './TodoRow.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import AppSelect from './AppSelect.vue'
@@ -98,32 +99,21 @@ function onAddKeydown(e: KeyboardEvent) {
 }
 
 // ---- 删除（父条目级联删子）+ 撤销恢复，由 TodoRow 经 provide 调用 ----
+/** 撤销恢复（与待办视图共用一份，见 useTodoRestore）：描述/置顶/标签/周期规则都会回填 */
+const restoreTodo = useTodoRestore()
+
 async function removeTodo(t: Todo) {
   const kids = store.state.todos.filter((x) => x.parent_id === t.id)
+  // 标签关联是 ON DELETE CASCADE，删除后查不回来 → 删前先抓快照
+  const tagIds = store.todoTagIds(t.id)
   await store.deleteTodo(t.id)
   showToast(
     kids.length ? `已删除「${t.title}」及 ${kids.length} 条子待办` : `已删除「${t.title}」`,
-    { label: '撤销', onClick: () => void restoreTodo(t, kids) },
+    {
+      label: '撤销',
+      onClick: () => void restoreTodo(t, kids, tagIds).catch(() => showToast('恢复失败，请重试')),
+    },
   )
-}
-
-/** 重建父条目后再挂回子待办，恢复创建时间/优先级/排期/完成状态 */
-async function restoreTodo(parent: Todo, kids: readonly Todo[]) {
-  const p = await store.createTodo(parent.title, null, parent.created_at)
-  if (parent.priority !== 0) await store.updateTodo(p.id, parent.title, parent.priority)
-  if (parent.due_at != null || parent.remind_at != null) {
-    await store.scheduleTodo(p.id, parent.due_at, parent.remind_at)
-  }
-  if (parent.done) await store.toggleTodo(p.id)
-  for (const k of kids) {
-    const c = await store.createTodo(k.title, p.id, k.created_at)
-    if (k.priority !== 0) await store.updateTodo(c.id, k.title, k.priority)
-    if (k.due_at != null || k.remind_at != null) {
-      await store.scheduleTodo(c.id, k.due_at, k.remind_at)
-    }
-    if (k.done) await store.toggleTodo(c.id)
-  }
-  showToast('已恢复待办')
 }
 
 provide('todoOpenSchedule', openSchedule)

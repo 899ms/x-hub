@@ -1206,6 +1206,12 @@ fn data_todos_set_description(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "INVALID_ARGUMENT: 缺少 description".to_string())?
         .to_string();
+    if description.chars().count() > repo::todo::MAX_DESCRIPTION_LEN {
+        return Err(format!(
+            "INVALID_ARGUMENT: 描述过长（最多 {} 字）",
+            repo::todo::MAX_DESCRIPTION_LEN
+        ));
+    }
     let expected = expect_opt_i64(&args, "expectedVersion")?;
     data_write(app, state, Some("todos-changed"), |conn| {
         let todo =
@@ -1413,6 +1419,8 @@ fn data_todos_expand_occurrences(
         .get("toMs")
         .and_then(|v| v.as_i64())
         .ok_or_else(|| "INVALID_ARGUMENT: 缺少 toMs".to_string())?;
+    // 区间上限：扩展能传任意大区间，而展开全程持着数据库互斥锁（见 validate_range 注释）
+    crate::todo_recurrence::validate_range(from_ms, to_ms)?;
     data_read(state, |conn| {
         let todos = repo::todo::list_recurring_candidates(conn).map_err(|e| e.to_string())?;
         let mut out = Vec::new();

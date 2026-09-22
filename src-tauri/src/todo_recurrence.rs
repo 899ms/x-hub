@@ -22,6 +22,25 @@ pub const MAX_ITER: usize = 100_000;
 const ERR_ITER_LIMIT: &str =
     "RECURRENCE_ITER_LIMIT: 周期规则在迭代预算内没有推进到目标时刻（规则或截止时刻异常）";
 
+/// 单次展开区间的上限（天）。区间越长迭代越多，而展开全程**持着数据库互斥锁**：
+/// 扩展传「今天 → 100 年后」时，一条「每天」的待办就要迭代 3.65 万次，主界面这段时间
+/// 点什么都像卡死。宿主日历只查 42 天，正常用碰不到；超限直接报错，要求调用方分段查。
+pub const MAX_RANGE_DAYS: i64 = 366;
+
+const ERR_RANGE_LIMIT: &str = "RECURRENCE_RANGE_TOO_LARGE: 展开区间过大，请分段查询（上限 {} 天）";
+
+/// 校验展开区间。`to < from` 是空区间，交给 `expand_occurrences` 返回空列表；
+/// 这里只拦「跨度过大」，`i64` 极值用 saturating 运算避免溢出。
+pub fn validate_range(from_ms: i64, to_ms: i64) -> Result<(), String> {
+    if to_ms <= from_ms {
+        return Ok(());
+    }
+    if to_ms.saturating_sub(from_ms) / 86_400_000 > MAX_RANGE_DAYS {
+        return Err(ERR_RANGE_LIMIT.replace("{}", &MAX_RANGE_DAYS.to_string()));
+    }
+    Ok(())
+}
+
 /// 位掩码 bit0=周一 … bit6=周日
 fn mask_has(mask: i64, wd: Weekday) -> bool {
     mask & (1 << wd.num_days_from_monday()) != 0
@@ -120,11 +139,13 @@ fn month_anchor(year: i32, month: u32, rule: &RepeatRule) -> Option<NaiveDate> {
     }
 }
 
-/// 从 base 时刻所在「周」的周一 0 点（仅用于 custom+week 的周计数）
-fn week_start_ms(ms: i64) -> Option<i64> {
+/// 某时刻所在「周」的周一（仅用于 custom+week 的周计数）。
+/// 周差必须按**日历日**算，不能用毫秒差除以 7 天：跨夏令时切换的那一周只有 167 小时，
+/// 整除后周序号少 1，「每 2 周的周一」会整周漏掉（中国无夏令时，但用户可能在别的时区）。
+fn week_monday(ms: i64) -> Option<NaiveDate> {
     let dt = Local.timestamp_millis_opt(ms).single()?;
-    let date = dt.date_naive() - Duration::days(dt.weekday().num_days_from_monday() as i64);
-    at_time(date, NaiveTime::from_hms_opt(0, 0, 0)?)
+    dt.date_naive()
+        .checked_sub_signed(Duration::days(dt.weekday().num_days_from_monday() as i64))
 }
 
 /// 下一个实例（严格晚于 prev）。规则用尽（如 monthly 无合法日）返回 None。
@@ -180,13 +201,13 @@ fn advance(rule: &RepeatRule, prev: i64, base_time: NaiveTime) -> Option<i64> {
                         return at_time(date + Duration::weeks(every), base_time);
                     }
                     // 位掩码 + 每 N 周：逐日找掩码内的星期几，且周序号差是 N 的倍数
-                    let base_week = week_start_ms(prev)?;
+                    let base_week = week_monday(prev)?;
                     let mut d = date + Duration::days(1);
                     for _ in 0..(every * 7) {
                         if mask_has(mask, d.weekday()) {
                             if let Some(ms) = at_time(d, base_time) {
-                                let ws = week_start_ms(ms)?;
-                                let weeks = (ws - base_week) / (7 * 24 * 3600 * 1000);
+                                let ws = week_monday(ms)?;
+                                let weeks = (ws - base_week).num_days() / 7;
                                 if weeks.rem_euclid(every) == 0 {
                                     return Some(ms);
                                 }
@@ -267,13 +288,13 @@ fn retreat(rule: &RepeatRule, cur: i64, base_time: NaiveTime) -> Option<i64> {
                     if mask == 0 {
                         return at_time(date - Duration::weeks(every), base_time);
                     }
-                    let base_week = week_start_ms(cur)?;
+                    let base_week = week_monday(cur)?;
                     let mut d = date - Duration::days(1);
                     for _ in 0..(every * 7) {
                         if mask_has(mask, d.weekday()) {
                             if let Some(ms) = at_time(d, base_time) {
-                                let ws = week_start_ms(ms)?;
-                                let weeks = (base_week - ws) / (7 * 24 * 3600 * 1000);
+                                let ws = week_monday(ms)?;
+                                let weeks = (base_week - ws).num_days() / 7;
                                 if weeks.rem_euclid(every) == 0 {
                                     return Some(ms);
                                 }
@@ -365,7 +386,7 @@ pub fn reached_end(rule: &RepeatRule, next: i64, done_count: i64) -> bool {
 /// 展开 [from_ms, to_ms] 内的**虚拟实例**（不含库里那一行当前实例本身）。
 /// count 结束条件按剩余次数截断——当前行是第 `done_count + 1` 个实例，
 /// 所以未来还剩 `count - done_count - 1` 个（不是 `count - done_count`）。
-/// `Err` = 迭代预算耗尽（历史区间过长），报错而不是返回残缺列表。
+/// `Err` = 迭代预算耗尽（历史区间过长）或区间超限，报错而不是返回残缺列表。
 pub fn expand_occurrences(
     rule: &RepeatRule,
     due_at: i64,
@@ -373,6 +394,8 @@ pub fn expand_occurrences(
     from_ms: i64,
     to_ms: i64,
 ) -> Result<Vec<i64>, String> {
+    // 区间上限在这里兜底：无论宿主命令还是扩展桥，都不可能传一个超长区间进来
+    validate_range(from_ms, to_ms)?;
     let mut out = Vec::new();
     if rule.is_once() || to_ms < from_ms {
         return Ok(out);
@@ -442,6 +465,32 @@ mod tests {
 
     fn expand_at(rule: &RepeatRule, due: i64, done: i64, from: i64, to: i64) -> Vec<i64> {
         expand_occurrences(rule, due, done, from, to).unwrap()
+    }
+
+    /// 区间上限：超限报错而不是傻算；边界值（正好 366 天）放行
+    #[test]
+    fn validate_range_rejects_over_limit() {
+        let day = 86_400_000i64;
+        let from = ts(2026, 1, 1, 0, 0);
+        assert!(validate_range(from, from + MAX_RANGE_DAYS * day).is_ok());
+        let err = validate_range(from, from + (MAX_RANGE_DAYS + 1) * day).unwrap_err();
+        assert!(err.starts_with("RECURRENCE_RANGE_TOO_LARGE"), "{err}");
+        // 100 年区间：正是扩展最容易传的那种
+        assert!(validate_range(from, from + 36_500 * day).is_err());
+        // 空区间 / 逆序区间不算超限，交给展开逻辑返回空列表
+        assert!(validate_range(from, from).is_ok());
+        assert!(validate_range(from, from - day).is_ok());
+        // i64 极值不 panic（saturating）
+        assert!(validate_range(i64::MIN, i64::MAX).is_err());
+    }
+
+    /// 超长区间必须在引擎层就被拒绝（宿主命令与扩展桥都走这里）
+    #[test]
+    fn expand_occurrences_rejects_huge_range() {
+        let due = ts(2026, 9, 21, 9, 0);
+        let r = rule("daily");
+        let err = expand_occurrences(&r, due, 0, due, due + 100 * 365 * 86_400_000).unwrap_err();
+        assert!(err.starts_with("RECURRENCE_RANGE_TOO_LARGE"), "{err}");
     }
 
     #[test]
@@ -522,6 +571,26 @@ mod tests {
         r.unit = Some("day".into());
         let due = ts(2026, 9, 21, 9, 0);
         assert_eq!(next_at(&r, due, due).unwrap(), ts(2026, 9, 24, 9, 0));
+    }
+
+    /// custom + week + 掩码：周序号差必须按日历周算（每 N 周只在第 N 周的星期几出现），
+    /// 用毫秒差除以 7 天会在跨夏令时的周少数一周、整周漏掉。
+    #[test]
+    fn custom_every_n_weeks_with_mask() {
+        let mut r = rule("custom");
+        r.every = Some(2);
+        r.unit = Some("week".into());
+        r.weekdays = Some(0b0000101); // 周一 + 周三
+        let due = ts(2026, 9, 21, 8, 0); // 周一
+        let wed = next_at(&r, due, due).unwrap();
+        assert_eq!(wed, ts(2026, 9, 23, 8, 0)); // 同一周的周三
+        let mon = next_at(&r, wed, wed).unwrap();
+        assert_eq!(mon, ts(2026, 10, 5, 8, 0)); // 隔一周后的周一
+        let wed2 = next_at(&r, mon, mon).unwrap();
+        assert_eq!(wed2, ts(2026, 10, 7, 8, 0));
+        // 撤销：严格回到上一轮
+        assert_eq!(previous_occurrence(&r, mon).unwrap(), ts(2026, 9, 23, 8, 0));
+        assert_eq!(previous_occurrence(&r, wed).unwrap(), ts(2026, 9, 21, 8, 0));
     }
 
     #[test]

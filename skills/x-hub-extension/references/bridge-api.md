@@ -80,6 +80,20 @@ await window.xhub.data.todos.toggle({ id, expectedVersion? })
 await window.xhub.data.todos.delete({ id, expectedVersion? })
 await window.xhub.data.todos.schedule({ id, dueAt?, remindAt?, expectedVersion? })  // 毫秒时间戳，null 清除
 
+// 待办 v1（描述 / 置顶 / 周期 / 标签）
+await window.xhub.data.todos.setDescription({ id, description, expectedVersion? })   // 轻量 Markdown 正文，最长 200 字（超限报 INVALID_ARGUMENT）
+await window.xhub.data.todos.setPinned({ id, pinned, expectedVersion? })             // 置顶：脱离日期分组
+await window.xhub.data.todos.setRepeat({ id, repeat, expectedVersion? })             // 周期规则，mode:'once' 取消
+await window.xhub.data.todos.setTags({ id, tagIds })                                 // 全量替换该待办的标签
+await window.xhub.data.todos.completeRecurring({ id, expectedVersion? })             // 周期「完成本轮」
+await window.xhub.data.todos.undoRecurring({ id, expectedVersion? })                 // 撤销「完成本轮」
+await window.xhub.data.todos.expandOccurrences({ fromMs, toMs })                     // → [{ todo_id, at_ms }]；区间上限 366 天，超了报 RECURRENCE_RANGE_TOO_LARGE，需分段查
+
+// 待办标签（**与笔记标签 data.tags 是两套独立定义**，见 ADR 0010）
+await window.xhub.data.todoTags.list() / links()                                     // 定义列表 / 全部待办-标签关联
+await window.xhub.data.todoTags.create({ name, color? })                             // 同名返回既有（不覆盖颜色）
+await window.xhub.data.todoTags.update({ id, name, color? }) / delete({ id })
+
 // 便签（slot 1-2）
 await window.xhub.data.stickies.list() / save({ slot, content?, expectedVersion? })   // upsert
 await window.xhub.data.detachedStickies.list() / save({ slot, content?, expectedVersion? })  // 仅更新已脱离的浮窗便签
@@ -104,14 +118,28 @@ await window.xhub.data.tags.setNoteTags({ noteId, tagIds })   // 全量替换语
 1. **`update` 是全量覆盖**——可省字段缺省会被写成空值（`notes.update` 不传 `content` 会清空正文）。**改前先 `get` 合并再提交**。
 2. **乐观锁**：`todos` / `stickies` / `detachedStickies` 的写方法支持 `expectedVersion`（= 上次读到的 `version`）。与他人（含宿主 UI）并发修改冲突时 reject `VERSION_CONFLICT`；缺省不校验。
 
+**周期待办（`setRepeat` / `completeRecurring`）三条语义**：
+
+1. **规则只实现于宿主**（Rust `todo_recurrence.rs`）。扩展只负责收集参数落库、用 `expandOccurrences` 取展开结果渲染；**不要在前端重写一套规则**，否则与宿主日历/勾选行为漂移。
+2. **勾选周期待办 = 「完成本轮」**：`due_at` 滚到下一个**未来**时刻（逾期不补历史）、`remind_at` 按同一偏移平移并重新武装、`repeat_done_count +1`、子待办全部复位；**不置 `done`**（周期条目永不进已完成列表）。规则用尽（`until` 越界 / `count` 用尽）时自动转回 `once` 并保留该行。
+3. **`setRepeat` 要求该待办已有 `due_at`**：基准时刻取 `due_at` 的时分。没有截止时间的周期待办既算不出下一轮、也拒绝 `completeRecurring`，属于无效状态——先 `schedule` 设截止再 `setRepeat`。
+
+**待办相关上限（超限直接报错，不静默截断）**：
+
+1. **`expandOccurrences` 单次区间上限 366 天**：超限报 `RECURRENCE_RANGE_TOO_LARGE`（展开要迭代并全程持有数据库锁，宿主日历自己只查 42 天）。画长跨度日历请分段调用后合并。
+2. **`setDescription` 正文上限 200 字**：超限报 `INVALID_ARGUMENT`。它是卡面/浮层展示的短说明，不是长文档——长内容请用笔记（`notes`）。
+
 ### 数据模型字段（snake_case）
 
 - `Note { id, title, content, created_at, updated_at }`
-- `Todo { id, title, done, priority(0/1/2), created_at, updated_at, completed_at }`
+- `Todo { id, title, done, priority(0/1/2), created_at, updated_at, completed_at, due_at, remind_at, parent_id, sort_order, version, description, pinned, repeat_mode, repeat_every, repeat_unit, repeat_weekdays, repeat_month_day, repeat_month_nth, repeat_end_mode, repeat_end_at, repeat_count, repeat_done_count, repeat_last_done_at }`
+- `TodoTag { id, name, color, sort_order, created_at }`（`color: ''` = 用默认色，否则 `#rrggbb`）
+- `TodoTagLink { todo_id, tag_id }`
+- `TodoOccurrence { todo_id, at_ms }`（虚拟实例，不落库）
 - `Resource { id, kind(app/web/file), name, target, category, icon, args, sort_order, last_launched_at, created_at, updated_at }`
 - `Sticky / DetachedSticky { id, slot, content, version }`（Detached 另有 `x` / `y`）
 - `Snippet { id, title, content, version }`
-- `Tag { id, name }`
+- `Tag { id, name }`（笔记标签；待办标签见 `TodoTag`）
 
 ## 未实现（planned，勿依赖）
 

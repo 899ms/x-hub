@@ -39,7 +39,7 @@ interface XHubNote {
   updated_at: string
 }
 
-/** 待办（写接口带乐观锁：update/toggle/delete/schedule 可选传 expectedVersion） */
+/** 待办（写接口带乐观锁：update/toggle/delete/schedule 等可选传 expectedVersion） */
 interface XHubTodo {
   id: number
   title: string
@@ -58,6 +58,75 @@ interface XHubTodo {
   sort_order: number | null
   /** 每次写操作 +1；作为 expectedVersion 传回可实现并发冲突检测 */
   version: number
+  /** 轻量 Markdown 正文（勾选一律用子待办） */
+  description: string
+  /** 置顶：脱离日期分组，固定排在列表最顶部「置顶」区 */
+  pinned: boolean
+  /** 周期规则总开关；'once' = 一次性 */
+  repeat_mode: XHubRepeatMode
+  /** custom：每 N 个 repeat_unit */
+  repeat_every: number | null
+  /** custom：day / week / month / year */
+  repeat_unit: XHubRepeatUnit | null
+  /** 位掩码 bit0=周一 … bit6=周日（weekly 多选、custom+week 用） */
+  repeat_weekdays: number | null
+  /** monthly：1..31，-1 = 月末 */
+  repeat_month_day: number | null
+  /** monthly：第几个（1..5，-1 = 最后一个） */
+  repeat_month_nth: number | null
+  /** 结束条件：never / until / count */
+  repeat_end_mode: XHubRepeatEndMode | null
+  /** until：截止日（毫秒时间戳，含当天） */
+  repeat_end_at: number | null
+  /** count：共 N 次 */
+  repeat_count: number | null
+  /** 累计完成次数（统计用，不逐次留历史） */
+  repeat_done_count: number
+  /** 上次完成本轮的时间 */
+  repeat_last_done_at: string | null
+}
+
+/** 周期规则总开关 */
+type XHubRepeatMode = 'once' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'weekdays' | 'custom'
+/** custom 的重复单位 */
+type XHubRepeatUnit = 'day' | 'week' | 'month' | 'year'
+/** 周期结束条件 */
+type XHubRepeatEndMode = 'never' | 'until' | 'count'
+
+/** 写入用的周期规则（setRepeat 参数；非 'once' 时该待办必须有 due_at 作为基准时刻） */
+interface XHubRepeatRuleInput {
+  mode: XHubRepeatMode
+  every?: number | null
+  unit?: XHubRepeatUnit | null
+  weekdays?: number | null
+  monthDay?: number | null
+  monthNth?: number | null
+  endMode?: XHubRepeatEndMode | null
+  endAt?: number | null
+  count?: number | null
+}
+
+/** 待办标签定义（**与笔记标签 XHubTag 是两套独立定义**，互不同步） */
+interface XHubTodoTag {
+  id: number
+  name: string
+  /** '' = 用默认色；否则 #rrggbb */
+  color: string
+  sort_order: number
+  created_at: string
+}
+
+/** 待办-标签关联对（构建筛选映射用） */
+interface XHubTodoTagLink {
+  todo_id: number
+  tag_id: number
+}
+
+/** 周期待办在区间内的虚拟实例（日历渲染用；不落库） */
+interface XHubTodoOccurrence {
+  todo_id: number
+  /** 实例时刻（毫秒时间戳） */
+  at_ms: number
 }
 
 /** 速达资源 */
@@ -237,6 +306,35 @@ interface XHubData {
       remindAt?: number | null
       expectedVersion?: number
     }): Promise<XHubTodo>
+    /** 需 data:write；轻量 Markdown 正文（全量覆盖）。最长 200 字，超限报 INVALID_ARGUMENT */
+    setDescription(opts: { id: number; description: string; expectedVersion?: number }): Promise<XHubTodo>
+    /** 需 data:write；置顶开关（置顶条目脱离日期分组，固定在最顶部「置顶」区） */
+    setPinned(opts: { id: number; pinned: boolean; expectedVersion?: number }): Promise<XHubTodo>
+    /** 需 data:write；整组写入周期规则（mode:'once' 即取消周期）。非法取值 fail-fast（INVALID_ARGUMENT） */
+    setRepeat(opts: { id: number; repeat: XHubRepeatRuleInput; expectedVersion?: number }): Promise<XHubTodo>
+    /** 需 data:write；全量替换该待办的标签 */
+    setTags(opts: { id: number; tagIds: number[] }): Promise<void>
+    /** 需 data:write；周期待办「完成本轮」：due_at 滚到下一个未来时刻、计数 +1、子待办复位（不置 done） */
+    completeRecurring(opts: { id: number; expectedVersion?: number }): Promise<XHubTodo>
+    /** 需 data:write；撤销「完成本轮」：计数 −1、due_at 滚回上一轮 */
+    undoRecurring(opts: { id: number; expectedVersion?: number }): Promise<XHubTodo>
+    /**
+     * 需 data:read；展开区间内的周期虚拟实例（规则只实现于宿主 Rust 侧，扩展不要自己算）。
+     * **区间上限 366 天**：超了报 RECURRENCE_RANGE_TOO_LARGE，请分段查询（宿主日历本身只查 42 天）。
+     */
+    expandOccurrences(opts: { fromMs: number; toMs: number }): Promise<XHubTodoOccurrence[]>
+  }
+  todoTags: {
+    /** 需 data:read */
+    list(): Promise<XHubTodoTag[]>
+    /** 需 data:read；全部待办-标签关联 */
+    links(): Promise<XHubTodoTagLink[]>
+    /** 需 data:write；同名已存在则直接返回既有标签（不覆盖颜色） */
+    create(opts: { name: string; color?: string }): Promise<XHubTodoTag>
+    /** 需 data:write；改名/改色（重名会报错） */
+    update(opts: { id: number; name: string; color?: string }): Promise<XHubTodoTag>
+    /** 需 data:write；标签与所有关联一并删除 */
+    delete(opts: { id: number }): Promise<void>
   }
   stickies: {
     /** 需 data:read */

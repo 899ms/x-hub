@@ -164,8 +164,15 @@ export function viewGroupOf(
 /** 时间范围视图（horizon）筛选：今天 / 本周 / 本月 / 全部 */
 export type Horizon = 'today' | 'week' | 'month' | 'all'
 
-export function inHorizon(t: { due_at: number | null }, horizon: Horizon, today: Date): boolean {
+export function inHorizon(
+  t: { due_at: number | null; pinned?: boolean },
+  horizon: Horizon,
+  today: Date,
+): boolean {
   if (horizon === 'all') return true
+  // 置顶条目与日期无关（固定排在列表最顶部「置顶」区），任何时间范围下都必须可见：
+  // 否则「置顶 + 未来日期」的条目在「今天/本周」视图里会整条消失，与置顶语义冲突。
+  if (t.pinned) return true
   // 无截止日期的条目不属于任何时间范围，但必须**始终可见**：
   // 待办视图里新建待办默认不设截止，若这里返回 false，新条目保存后会立刻从列表消失
   // （只有切到「全部」才看得见），用户会以为没建成功。
