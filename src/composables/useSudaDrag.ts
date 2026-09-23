@@ -50,8 +50,13 @@ export function useSudaDrag(opts: {
   let blockClick = false
 
   const LONG_PRESS_MS = 300
-  /** 起拖阈值：移动超过它即视为拖拽意图（鼠标直接拎起；触摸/笔放弃长按，当作滑动列表） */
+  /** 触摸/笔的抖动容差：超过即放弃长按（当作滑动列表） */
   const SLOP_PX = 8
+  /**
+   * 鼠标起拖阈值，刻意比触摸小：鼠标没有「滑动列表」冲突，阈值越小卡片越早开始跟手。
+   * 阈值过大时，卡片要等指针移开一段距离才被摆到指针处，看起来像「凭空闪现」而不是被拎起来。
+   */
+  const MOUSE_SLOP_PX = 4
 
   /** 卡片 @click 入口：返回 true 表示这次 click 应吞掉 */
   function swallowClick(): boolean {
@@ -80,9 +85,10 @@ export function useSudaDrag(opts: {
       armed = true
     }, LONG_PRESS_MS)
 
-    // window 兜底：起拖前未捕获指针，快速甩动时 move/up 可能已不落在卡片上——
-    // 仅靠 el 监听会残留闭包（同 useTodoDrag 的处理）
-    el.addEventListener('pointermove', onMove)
+    // 三个监听一律挂 window：不能只靠 setPointerCapture —— 一旦捕获没生效（或被 WebView2
+    // 忽略），指针移出卡片后 pointermove 就再也不触发，表现为「拖到一半冻住、落点虚线框
+    // 停在原地不动」，快速拖动时尤其明显。捕获成功时事件仍会冒泡到 window，双保险不冲突。
+    window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
     window.addEventListener('pointercancel', onUp)
 
@@ -91,7 +97,7 @@ export function useSudaDrag(opts: {
       try {
         el.setPointerCapture(e.pointerId)
       } catch {
-        /* 指针已释放时忽略，window 监听兜底场景极少 */
+        /* 指针已释放时忽略；移动与松开都由 window 监听兜底 */
       }
       draggingId.value = r.id
       // 先量原位再起拖：此时卡片还在文档流里，offsetLeft/Top 就是网格中的真实位置
@@ -112,10 +118,11 @@ export function useSudaDrag(opts: {
       }
       const dx = ev.clientX - startX
       const dy = ev.clientY - startY
+      const isMouse = ev.pointerType === 'mouse'
       if (!armed) {
-        if (Math.hypot(dx, dy) < SLOP_PX) return
+        if (Math.hypot(dx, dy) < (isMouse ? MOUSE_SLOP_PX : SLOP_PX)) return
         // 移动超过起拖阈值
-        if (ev.pointerType === 'mouse') {
+        if (isMouse) {
           // 鼠标：按住就拖同样是拖拽意图，不必等长按计时。此前这里一律「放弃长按」，
           // 于是习惯「按住直接拖」的用户永远拎不起卡片（第一帧移动就超阈值），
           // 表现就是「拖不动」——只有先按住不动 300ms 才拖得动。
@@ -143,14 +150,14 @@ export function useSudaDrag(opts: {
       dead = true
       cleanup()
       if (!armed) return
-      // 长按过就算「拖拽过」：吞掉随后的 click，原地松开也不会误启动
+      // 拎起过就算「拖拽过」：吞掉随后的 click，原地松开也不会误启动
       blockClick = true
       finishDrag()
     }
 
     function cleanup() {
       window.clearTimeout(armTimer)
-      el.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
     }
