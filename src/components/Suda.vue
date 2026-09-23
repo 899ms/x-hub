@@ -224,13 +224,15 @@ function onReorderVisible(visibleIds: number[]) {
   void store.reorderResources(result)
 }
 
-/** 被拖卡片跟手飞行的 transform；非拖拽态不给 inline transform，让位给 hover 位移。
- *  卡片拖拽时是 absolute（脱离流，见 .suda-card.is-dragging），所以要先平移到原位再叠加位移。 */
+/** 被拖卡片跟手飞行的位移；非拖拽态不给 inline 样式，让位给 hover 位移。
+ *  卡片拖拽时是 absolute（脱离流，见 .suda-card.is-dragging），所以要先平移到原位再叠加位移。
+ *  这里刻意用独立的 `translate` 属性而不是 `transform`：位移必须即时跟手（不能进过渡列表），
+ *  而「浮起」的放大交给独立 `scale` 属性做短过渡 —— 两者分开，才能一个即时、一个柔和。 */
 function dragStyleOf(r: Resource) {
   if (draggingId.value !== r.id) return {}
   const x = dragOrigin.value.x + dragOffset.value.x
   const y = dragOrigin.value.y + dragOffset.value.y
-  return { transform: `translate(${x}px, ${y}px) scale(1.04)` }
+  return { translate: `${x}px ${y}px` }
 }
 
 function onCardClick(r: Resource) {
@@ -876,10 +878,18 @@ function cardAccentStyle(r: Resource) {
   position: absolute;
   top: 0;
   left: 0;
-  transition: none;
+  /* 位移走独立 translate 属性（inline），不进过渡列表 —— 跟手必须即时。
+     只有「浮起」的放大与阴影走短过渡：否则卡片会在指针处瞬间变大，
+     看起来像凭空冒出来（用户反馈的「从右下角飘出来」）。 */
+  transition: scale 0.12s ease-out, box-shadow 0.12s ease-out;
+  scale: 1.04;
   z-index: 60;
   cursor: grabbing;
   box-shadow: var(--shadow-dock);
+}
+.suda-card.is-dragging:hover {
+  /* 拖拽中不再叠加 hover 的上浮位移，位置完全由指针决定 */
+  transform: none;
 }
 .suda-drop-slot {
   width: 124px;
