@@ -548,7 +548,7 @@ fn add_dir_to_zip<W: Write + std::io::Seek>(
         if is_link {
             return Err(format!("打包已中止：不允许符号链接或 junction（{name}）"));
         }
-        if sensitive_package_file(&name) || (metadata.is_dir() && matches!(name.to_ascii_lowercase().as_str(), "data" | "logs" | "backups")) {
+        if sensitive_package_file(&name) || (metadata.is_dir() && name.eq_ignore_ascii_case("backups")) {
             return Err(format!("打包已中止：发现可能包含私有数据的文件或目录 {name}，请在干净发布目录中打包"));
         }
         let rel = path
@@ -574,7 +574,7 @@ pub(crate) fn sensitive_package_file(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let stem = name.split('.').next().unwrap_or("");
     matches!(stem, "credentials" | "secrets" | "secret" | "token" | "tokens" | "chat_keys" | "account_token")
-        || [".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3", ".log", ".pem", ".key", ".pfx", ".p12", ".env", ".xhpack", ".zip"]
+        || [".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3", ".pem", ".key", ".pfx", ".p12", ".env", ".xhpack"]
             .iter().any(|suffix| name.ends_with(suffix))
 }
 
@@ -859,13 +859,20 @@ mod tests {
         extract_zip(&std::fs::read(&out).unwrap(), unpack.path()).unwrap();
         assert!(find_manifest_dir(unpack.path()).is_ok());
 
-        for name in ["credentials.json", "history.sqlite", "debug.log", "private.pem"] {
+        for name in ["credentials.json", "history.sqlite", "private.pem", "a.xhpack"] {
             let previous = std::fs::read(&out).unwrap();
             std::fs::write(ext.join(name), "测试私有数据").unwrap();
             assert!(pack_dir_to_archive(&ext, &out).is_err(), "{name} 不得进入发布包");
             assert_eq!(std::fs::read(&out).unwrap(), previous, "失败不能覆盖已有产物");
             std::fs::remove_file(ext.join(name)).unwrap();
         }
+
+        // 2026-09-23 放宽（dckxx 拍板）：data/ 资产与 .zip/.log 不再阻断打包
+        std::fs::create_dir_all(ext.join("data")).unwrap();
+        std::fs::write(ext.join("data").join("seed.json"), "[]").unwrap();
+        std::fs::write(ext.join("demo.zip"), "x").unwrap();
+        std::fs::write(ext.join("debug.log"), "x").unwrap();
+        assert!(pack_dir_to_archive(&ext, &out).is_ok(), "data/ 资产与 .zip/.log 应可打包");
     }
 
     #[test]

@@ -608,12 +608,11 @@ fn serve(app: &tauri::AppHandle, raw_path: &str, referer: Option<&str>) -> Resul
     Ok((mime.to_string(), bytes))
 }
 
-/// 配置、凭据、运行数据与开发元数据不能通过网页资源协议读取。
+/// 配置、凭据与密钥类文件不能通过网页资源协议读取（2026-09-23 放宽：普通目录名与 .zip/.log 不再一刀切）。
 fn public_content_path(parts: &[String]) -> bool {
     parts.iter().all(|p| {
         let p = p.to_ascii_lowercase();
-        !p.starts_with('.') && !matches!(p.as_str(), "backend" | "server" | "node_modules" | "data" | "logs")
-            && !crate::market::sensitive_package_file(&p)
+        !p.starts_with('.') && !crate::market::sensitive_package_file(&p)
     })
 }
 
@@ -797,8 +796,12 @@ mod tests {
         assert!(request_path_for_host(&content_host(a), &format!("{a}/index.html"), None).is_ok());
         assert!(request_path_for_host(&content_host(a), &format!("{b}/index.html"), None).is_err());
         assert!(request_path_for_host("localhost", &format!("{a}/index.html"), None).is_err());
-        for p in [".config.json", ".storage.json", ".env", "app.db", "credentials.json", "server/key.js", "data/cache.json"] {
+        for p in [".config.json", ".storage.json", ".env", "app.db", "chat_keys.json", "credentials.json", "cert.pem", "nested/a.xhpack"] {
             assert!(!public_content_path(&p.split('/').map(String::from).collect::<Vec<_>>()), "{p}");
+        }
+        // 2026-09-23 放宽（dckxx 拍板）：普通目录名与 .zip/.log 不再一刀切
+        for p in ["data/cache.json", "logs/run.log", "assets/demo.zip", "server/app.js", "node_modules/x/y.js"] {
+            assert!(public_content_path(&p.split('/').map(String::from).collect::<Vec<_>>()), "{p}");
         }
         assert!(public_content_path(&vec!["assets".into(), "app.js".into()]));
         assert!(parse_request_path(&format!("{a}/a%2F..%2Fsecret")).is_err());
