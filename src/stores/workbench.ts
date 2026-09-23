@@ -302,6 +302,16 @@ export function useStore() {
     state.resources = state.resources.filter((x) => x.id !== id)
   }
 
+  /** 拖拽排序：整表按传入 id 顺序写 sort_order（ids[i] → i），本地乐观更新 + 后端持久化 */
+  async function reorderResources(ids: number[]) {
+    const rank = new Map(ids.map((id, i) => [id, i]))
+    state.resources = state.resources
+      .map((r) => ({ ...r, sort_order: rank.get(r.id) ?? Number.MAX_SAFE_INTEGER }))
+      .sort((a, b) => a.sort_order - b.sort_order)
+      .map((r, i) => ({ ...r, sort_order: i }))
+    if (isTauri()) await tauriApi.reorderResources(ids)
+  }
+
   async function launchResource(id: number) {
     await tauriApi.launchResource(id)
     const r = state.resources.find((x) => x.id === id)
@@ -1286,6 +1296,7 @@ export function useStore() {
     addResource,
     editResource,
     removeResource,
+    reorderResources,
     launchResource,
     openResourceInBrowser,
     addNote,

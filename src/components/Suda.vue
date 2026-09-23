@@ -17,6 +17,7 @@ import { useStore } from '../stores/workbench'
 import { reportClientError } from '../utils/error-report'
 import { accentOf, fileAccentOf, iconSrc, useResourceIcon } from '../composables/useResourceIcon'
 import { useAdaptivePolling } from '../composables/useAdaptivePolling'
+import { useSudaDrag } from '../composables/useSudaDrag'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import SudaFormDialog from './SudaFormDialog.vue'
 import SudaScanDialog from './SudaScanDialog.vue'
@@ -196,6 +197,43 @@ const emptyTitle = computed(() => {
   }
   return `暂无「${activeFilter.value}」资源`
 })
+
+// ---- 长按拖拽排序（#6）：「常用」按最近使用排序，不开放手动排序 ----
+const gridRef = ref<HTMLElement | null>(null)
+const { draggingId, dragOffset, dropBeforeId, dropAtEnd, onCardPointerDown, swallowClick } =
+  useSudaDrag({
+    gridRef,
+    items: visibleResources,
+    enabled: () => activeFilter.value !== '常用',
+    reorder: (ids) => void onReorderVisible(ids),
+  })
+
+/** 可见项新顺序 → 全表顺序：可见项占住它在全表里的原有槽位，其余项不动 */
+function onReorderVisible(visibleIds: number[]) {
+  const all = store.state.resources
+  const pos = new Set(visibleIds)
+  const slots: number[] = []
+  all.forEach((r, i) => {
+    if (pos.has(r.id)) slots.push(i)
+  })
+  const result = all.map((r) => r.id)
+  visibleIds.forEach((id, k) => {
+    const slot = slots[k]
+    if (slot != null) result[slot] = id
+  })
+  void store.reorderResources(result)
+}
+
+/** 被拖卡片跟手飞行的 transform；非拖拽态不给 inline transform，让位给 hover 位移 */
+function dragStyleOf(r: Resource) {
+  if (draggingId.value !== r.id) return {}
+  return { transform: `translate(${dragOffset.value.x}px, ${dragOffset.value.y}px) scale(1.04)` }
+}
+
+function onCardClick(r: Resource) {
+  if (swallowClick()) return
+  void onOpen(r)
+}
 
 // ---- 右键菜单 ----
 const menu = ref({ visible: false, x: 0, y: 0, items: [] as ContextMenuItem[] })
@@ -432,16 +470,19 @@ function cardAccentStyle(r: Resource) {
 
     <!-- 资源网格（5 列） -->
     <div class="suda-body">
-      <div v-if="visibleResources.length > 0" class="suda-grid">
+      <div v-if="visibleResources.length > 0" ref="gridRef" class="suda-grid">
+        <template v-for="r in visibleResources" :key="r.id">
+          <div v-if="dropBeforeId === r.id" class="suda-drop-slot" aria-hidden="true" />
         <div
-          v-for="r in visibleResources"
-          :key="r.id"
           class="suda-card"
+          :class="{ 'is-dragging': draggingId === r.id }"
+          :data-id="r.id"
           :title="r.target"
           role="button"
           tabindex="0"
-          :style="cardAccentStyle(r)"
-          @click="onOpen(r)"
+          :style="[cardAccentStyle(r), dragStyleOf(r)]"
+          @click="onCardClick(r)"
+          @pointerdown="onCardPointerDown(r, $event)"
           @keydown.enter="onOpen(r)"
           @keydown.space.prevent="onOpen(r)"
           @contextmenu="onResourceContext($event, r)"
@@ -509,6 +550,8 @@ function cardAccentStyle(r: Resource) {
                 <span class="suda-name-text" :title="r.name">{{ r.name }}</span>
           </span>
         </div>
+        </template>
+        <div v-if="dropAtEnd" class="suda-drop-slot" aria-hidden="true" />
       </div>
 
       <div v-else class="empty-state">
@@ -819,5 +862,25 @@ function cardAccentStyle(r: Resource) {
 .drop-enter-from,
 .drop-leave-to {
   opacity: 0;
+}
+
+/* 长按拖拽排序（#6）：跟手飞行 + 落点虚线插槽 */
+.suda-card.is-dragging {
+  transition: none;
+  z-index: 60;
+  cursor: grabbing;
+  box-shadow: var(--shadow-dock);
+}
+.suda-drop-slot {
+  width: 124px;
+  min-height: 104px;
+  border: 2px dashed var(--brand-500);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--brand-500) 6%, transparent);
+}
+:global(body.suda-dragging) {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
 }
 </style>
