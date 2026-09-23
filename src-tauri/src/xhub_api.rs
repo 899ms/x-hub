@@ -52,7 +52,7 @@ pub struct Capability {
 /// 全部桥 API 能力表。新增能力只改这里 + 补 handler 函数。
 pub(crate) static CAPABILITIES: &[Capability] = &[
     Capability {
-        namespace: "runtime", method: "openExternal", permission: Some("network"),
+        namespace: "runtime", method: "openExternal", permission: Some("system"),
         handler: CapabilityHandler::Sync(runtime_open_external),
     },
     Capability {
@@ -2212,6 +2212,17 @@ mod tests {
                 c.method
             );
         }
+    }
+
+    #[test]
+    fn open_external_requires_system_permission() {
+        // 语义对齐：打开外链归「system：打开应用 / 网页 / 本地路径」，
+        // 不归「network：访问网络」——否则任何带 network 的扩展都能往默认浏览器弹任意 https 页面钓鱼。
+        let cap = CAPABILITIES
+            .iter()
+            .find(|c| c.namespace == "runtime" && c.method == "openExternal")
+            .expect("runtime.openExternal 必须在能力表中");
+        assert_eq!(cap.permission, Some("system"));
     }
 
     #[test]
