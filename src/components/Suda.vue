@@ -488,6 +488,7 @@ function cardAccentStyle(r: Resource) {
           :style="[cardAccentStyle(r), dragStyleOf(r)]"
           @click="onCardClick(r)"
           @pointerdown="onCardPointerDown(r, $event)"
+          @dragstart.prevent
           @keydown.enter="onOpen(r)"
           @keydown.space.prevent="onOpen(r)"
           @contextmenu="onResourceContext($event, r)"
@@ -525,6 +526,7 @@ function cardAccentStyle(r: Resource) {
               class="suda-img"
               :src="iconSrc(r.icon!)"
               alt=""
+              draggable="false"
               @error="onIconError(r)"
             />
             <Globe
