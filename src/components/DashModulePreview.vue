@@ -1187,13 +1187,14 @@ html[data-theme='dark'] .dpv {
 
 /* ---- 倒计时 ---- */
 .cc-list {
+  /* 与真卡 CountdownCard 同口径：撑满 + 行等分（1fr），格子高度变化时条目跟着变 */
   flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-auto-rows: minmax(calc(48 * var(--u)), auto);
+  grid-auto-rows: minmax(calc(48 * var(--u)), 1fr);
   gap: calc(8 * var(--u));
-  align-content: start;
+  align-content: stretch;
   overflow: hidden;
 }
 .cc-item {

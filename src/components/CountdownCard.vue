@@ -728,17 +728,18 @@ async function onToggleFloat(c: Countdown) {
 
 /* 列表：两列自适应行数（上限 6 个 = 3 行），每行最小 48px 保证条目内容完整（icon 32 + padding 8×2），
    行数随条目数量变化，不存在空行占位；已结束条目仍在同一列表内按到点时间占原位，只是灰态显示。
-   列表高度随内容自适应（不撑满剩余空间），多余高度留在卡片底部。 */
+   列表撑满卡片剩余高度、行等分，因此卡片（格子）调高调矮时条目自动跟着变，底部不留空白。 */
 .cc-list {
-  /* flex: 0 1 auto = 内容自适应（不撑满剩余空间，多余高度留在卡片底部），但允许被压缩：
-     格子太矮时收缩并出滚动条（滚动兜底），而不是溢出后被卡片 overflow:hidden 裁掉。 */
-  flex: 0 1 auto;
+  /* flex: 1 1 auto = 撑满卡片剩余高度；行用 minmax(48px, 1fr) 等分这块高度。
+     48px 是可读下限：格子太矮时行不再被压缩，改为出滚动条（滚动兜底），
+     而不是溢出后被卡片 overflow:hidden 裁掉。 */
+  flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-auto-rows: auto;
+  grid-auto-rows: minmax(48px, 1fr);
   gap: 8px;
-  align-content: start;
+  align-content: stretch;
   overflow-y: auto;
   overscroll-behavior: contain;
   /* 滚动条（12px，透明轨道）叠在 6px 内缩上，不抢条目宽度 */
