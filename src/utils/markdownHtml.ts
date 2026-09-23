@@ -50,8 +50,9 @@ const HR_STAR = /^[ \t]*(?:\*\*\*|\* \* \*)[ \t]*$/
 const LIST_STAR = /^([ \t]*)\* /
 /** 空列表项里 Crepe 塞的占位 `<br />`，例如 `* [x] <br />`。 */
 const LIST_BR = /^([ \t]*-[ \t]+(?:\[[ xX]\][ \t]+)?)[ \t]*<br\s*\/?\s*>[ \t]*$/i
-/** 会开 HTML 标签的 `<`。`1 < 2` 和自动链接 `<https://…>` 不在此列。 */
-const RAW_TAG = /<\/?[A-Za-z][^>\n]*>/g
+/** 会开 HTML 标签的 `<`。`1 < 2` 与自动链接 `<https://…>`（带 scheme）不在此列——
+ *  后者若被一起转义，实时预览里可点的链接到了分屏就变成死文本，正是本模块要消灭的「左右对不上」。 */
+const RAW_TAG = /<\/?(?![A-Za-z][A-Za-z0-9+.-]*:\/\/)[A-Za-z][^>\n]*>/g
 
 type LineKind = 'fence' | 'math' | 'prose'
 

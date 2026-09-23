@@ -98,7 +98,12 @@ fn token_file() -> std::path::PathBuf {
 }
 
 fn save_token(token: &str) -> Result<(), String> {
-    crate::credentials::migrate_to_keyring(&token_file(), KEYRING_SERVICE, Some(TOKEN_KEY))?;
+    // 旧明文文件的迁移是「尽力而为」：文件损坏 / 删不掉不该阻断新凭据写入，
+    // 否则升级后一个坏掉的 account_token.json 会让登录永远失败（读取侧 load_token 同样只 warn）。
+    // 钥匙串本身不可用时下面的 set_password 仍会报错，不会静默丢 token。
+    if let Err(e) = crate::credentials::migrate_to_keyring(&token_file(), KEYRING_SERVICE, Some(TOKEN_KEY)) {
+        log::warn!("旧账号凭据迁移未完成: {e}");
+    }
     match keyring::Entry::new(KEYRING_SERVICE, TOKEN_KEY) {
         Ok(entry) => entry
             .set_password(token)

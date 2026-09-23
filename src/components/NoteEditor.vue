@@ -83,6 +83,10 @@ onBeforeUnmount(() => {
 async function destroyEditor() {
   detachBlockDrag?.()
   detachBlockDrag = null
+  // 切笔记时 rootEl 是同一个 DOM 元素（v-if 分支没变，Vue 复用），必须在这里解绑：
+  // 否则每切一次就多挂一套 load/click/pointerdown/keydown，而旧的解绑函数已被覆盖、
+  // 再也调不到，表现为「切 N 次笔记后一次回车跑 N 遍」。
+  detachImageListeners()
   const c = crepe
   crepe = null
   mountedOn = null
@@ -282,7 +286,10 @@ watch(
     }
     if (!noteChanged || !props.note || props.note.id !== id) return
     if (isTauri()) {
-      noteTags.value = await tauriApi.getNoteTags(props.note.id)
+      // await 期间用户可能已切到第三篇，回来要再校验一次 id，
+      // 否则标签行会显示上一篇的标签（点「移除」还会改错关系）
+      const tags = await tauriApi.getNoteTags(id)
+      if (props.note?.id === id) noteTags.value = tags
     } else {
       noteTags.value = []
     }
@@ -839,10 +846,14 @@ function scheduleSave() {
   }, 600)
 }
 
+// 只有「同一篇笔记」的 updated_at 变化才是保存成功后的回写，才可以清 dirty。
+// 切笔记时 id 也变了，绝不能在这里清：本 watch 默认 flush:'pre'，会先于下面那个
+// flush:'post' 的切笔记 watch 执行，dirty 被清成 false 后 flushLeavingNote 会直接返回，
+// 最后一整段 600ms 防抖窗口内的编辑就此静默丢失（切笔记丢字）。
 watch(
-  () => props.note?.updated_at,
-  () => {
-    dirty.value = false
+  () => [props.note?.id, props.note?.updated_at] as const,
+  ([id], [prevId]) => {
+    if (id === prevId) dirty.value = false
   },
 )
 

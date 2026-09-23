@@ -32,6 +32,12 @@ export function useSudaDrag(opts: {
   const draggingId = ref<number | null>(null)
   /** 拖拽位移（px，指针相对按下点）；调用方叠加到被拖卡片的 transform 上跟手 */
   const dragOffset = ref({ x: 0, y: 0 })
+  /**
+   * 被拖卡片在网格里的原始左上角（px）。拖拽期间卡片脱离文档流（`position:absolute`），
+   * 腾出的格子由落点插槽补上——这样网格项数恒为 N，不会多占一格把整片网格挤到下一行。
+   * 调用方要先用它把卡片平移回原位，再叠加 `dragOffset`。
+   */
+  const dragOrigin = ref({ x: 0, y: 0 })
   /** 落点插槽：插到该 id 的卡片之前（不含被拖卡片自身） */
   const dropBeforeId = ref<number | null>(null)
   /** 落点插槽：插到全部可见卡片末尾 */
@@ -85,6 +91,8 @@ export function useSudaDrag(opts: {
         /* 指针已释放时忽略，window 监听兜底场景极少 */
       }
       draggingId.value = r.id
+      // 先量原位再起拖：此时卡片还在文档流里，offsetLeft/Top 就是网格中的真实位置
+      dragOrigin.value = { x: el.offsetLeft, y: el.offsetTop }
       dragOffset.value = { x: 0, y: 0 }
       dropBeforeId.value = null
       dropAtEnd.value = false
@@ -103,8 +111,11 @@ export function useSudaDrag(opts: {
       const dy = ev.clientY - startY
       if (!armed) {
         if (Math.hypot(dx, dy) < SLOP_PX) return
-        // 起拖前就拖出抖动范围：放弃本次长按（当作滚动/点选意图）
+        // 起拖前就拖出抖动范围：放弃本次长按（当作滚动/点选意图）。但既然已经移动过，
+        // 这次松手就必须吞掉 click —— 否则浏览器照常派发 click，卡片会直接启动资源
+        // （「想拖动排序，结果打开了程序」）。这与浏览器原生拖动「移动即不算点击」一致。
         dead = true
+        blockClick = true
         cleanup()
         return
       }
@@ -190,5 +201,5 @@ export function useSudaDrag(opts: {
     }
   }
 
-  return { draggingId, dragOffset, dropBeforeId, dropAtEnd, onCardPointerDown, swallowClick }
+  return { draggingId, dragOffset, dragOrigin, dropBeforeId, dropAtEnd, onCardPointerDown, swallowClick }
 }

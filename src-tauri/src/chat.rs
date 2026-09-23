@@ -63,7 +63,11 @@ pub fn platform_base_url() -> String {
 }
 
 pub fn save_api_key(model_id: &str, key: &str) -> Result<(), String> {
-    crate::credentials::migrate_to_keyring(&key_file_path(), KEYRING_SERVICE, None)?;
+    // 迁移失败不阻断写入（理由同 account::save_token）：旧 chat_keys.json 损坏或删不掉时，
+    // 不该连带让用户再也存不进新的 API Key；钥匙串不可用时下面的 set_password 仍会报错。
+    if let Err(e) = crate::credentials::migrate_to_keyring(&key_file_path(), KEYRING_SERVICE, None) {
+        log::warn!("旧 AI 凭据迁移未完成: {e}");
+    }
     let entry = keyring::Entry::new(KEYRING_SERVICE, model_id).map_err(|e| e.to_string())?;
     entry.set_password(key).map_err(|e| format!("钥匙串写入失败，未保存明文: {e}"))
 }

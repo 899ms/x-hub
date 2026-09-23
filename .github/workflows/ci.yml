@@ -32,5 +32,15 @@ jobs:
       - name: Frontend type check & build
         run: npm run build
 
+      # 安全回归（tests/security.test.mjs）：此前只存在于 package.json，CI 从未执行
+      - name: Frontend security tests
+        run: npm run test:security
+
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      # Rust 单测（含扩展内容协议的入口引用改写夹具回归）。必须走这个包装脚本：
+      # 它会给测试 exe 嵌 Common-Controls v6 manifest，否则 Windows 上测试进程
+      # 起不来（STATUS_ENTRYPOINT_NOT_FOUND），表现为「测试静默没跑」。
+      - name: Rust tests
+        run: npm run tauri:test

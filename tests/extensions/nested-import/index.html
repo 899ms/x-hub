@@ -5,13 +5,14 @@
     <title>嵌套 import 回归（验收用）</title>
     <!--
       ⚠️ 这里是**故意**保留的旧 `.xhpack/<surface>.html` 布局写法：入口在扩展根，
-      却用 `../assets/…` 引用资源。0.6.5 起入口 URL 变成 `/<id>/index.html`，
-      浏览器会把 `../assets/entry.js` 规范化成 `/assets/entry.js`（丢掉 `<id>` 段）。
-      宿主靠 Referer 只能救回一层，所以 entry.js 能加载、它内部的 `import("./level1.js")`
-      就 404 —— 修复前本页会停在「加载中」并报 Failed to fetch dynamically imported module。
-      修复后（宿主改写入口 HTML 的引用）本页应显示「全部通过：entry → level1 → level2」。
+      却用 `../assets/…` 引用资源。xhub-ext 协议起（v0.6.0）入口 URL 就是
+      `/<id>/index.html`，浏览器会把 `../assets/entry.js` 规范化成 `/assets/entry.js`
+      （丢掉 `<id>` 段）。宿主靠 Referer 只能救回一层，所以 entry.js 能加载、
+      它内部的 `import("./level1.js")` 就 404 —— 修复前本页会停在「加载中」并报
+      Failed to fetch dynamically imported module。修复后（宿主改写入口 HTML 的引用）
+      本页应显示「全部通过：entry → level1 → level2」。
     -->
-    <meta charset="utf-8" />
+
     <style>
       body { margin: 0; padding: 16px; font: 13px/1.6 system-ui, "Microsoft YaHei", sans-serif; }
       h1 { font-size: 15px; margin: 0 0 4px; }

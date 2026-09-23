@@ -32,20 +32,41 @@ function loadModule(file, replacements, globals = {}, cache = new Map()) {
   return module.exports
 }
 
-test('关闭联网后重新启动监听，不得发起请求或注册定时器', async () => {
+test('关闭联网后不再发请求，并清掉已注册的定时器', async () => {
   let probes = 0
   let timers = 0
+  let cleared = 0
+  let tick = null
   const { useStore } = loadModule('src/stores/workbench.ts', {
     '../api/tauri': { isTauri: () => true, tauriApi: {
-      saveConfig: async () => {}, checkConnectivity: async () => { probes++; return true },
+      saveConfig: async () => {},
+      checkConnectivity: async () => { probes++; return true },
+      getWeather: async () => null,
+      getQuote: async () => null,
     } },
-  }, { setInterval: () => { timers++; return 1 }, clearInterval: () => {} })
+  }, {
+    setInterval: (fn) => { timers++; tick = fn; return timers },
+    clearInterval: () => { cleared++ },
+  })
   const store = useStore()
-  await store.setOnlineEnabled(false)
-  store.startOnlineMonitor()
+
+  // 先真的把联网打开：必须注册定时器并立即探测一次。
+  // （此前的写法是先关开关再启动监听，startOnlineMonitor 的守卫直接 return、tick 从未执行，
+  //   两条断言恒真——既测不到「关开关没清定时器」，也测不到「checkOnline 忘了判开关」。）
+  await store.setOnlineEnabled(true)
   await flush()
-  assert.equal(probes, 0)
-  assert.equal(timers, 0)
+  assert.ok(timers > 0, '联网开启时应注册定时器')
+  assert.ok(probes > 0, '联网开启时应立即探测')
+
+  // 关掉联网：定时器必须被清掉
+  await store.setOnlineEnabled(false)
+  assert.ok(cleared > 0, '关闭联网应清除定时器')
+
+  // 关闭前已排队的那次回调不得再发请求
+  const afterOff = probes
+  await tick()
+  await flush()
+  assert.equal(probes, afterOff, '关闭联网后不得再发起探测')
 })
 
 function bridgeFixture() {

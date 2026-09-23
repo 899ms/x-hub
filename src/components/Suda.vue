@@ -200,7 +200,7 @@ const emptyTitle = computed(() => {
 
 // ---- 长按拖拽排序（#6）：「常用」按最近使用排序，不开放手动排序 ----
 const gridRef = ref<HTMLElement | null>(null)
-const { draggingId, dragOffset, dropBeforeId, dropAtEnd, onCardPointerDown, swallowClick } =
+const { draggingId, dragOffset, dragOrigin, dropBeforeId, dropAtEnd, onCardPointerDown, swallowClick } =
   useSudaDrag({
     gridRef,
     items: visibleResources,
@@ -224,10 +224,13 @@ function onReorderVisible(visibleIds: number[]) {
   void store.reorderResources(result)
 }
 
-/** 被拖卡片跟手飞行的 transform；非拖拽态不给 inline transform，让位给 hover 位移 */
+/** 被拖卡片跟手飞行的 transform；非拖拽态不给 inline transform，让位给 hover 位移。
+ *  卡片拖拽时是 absolute（脱离流，见 .suda-card.is-dragging），所以要先平移到原位再叠加位移。 */
 function dragStyleOf(r: Resource) {
   if (draggingId.value !== r.id) return {}
-  return { transform: `translate(${dragOffset.value.x}px, ${dragOffset.value.y}px) scale(1.04)` }
+  const x = dragOrigin.value.x + dragOffset.value.x
+  const y = dragOrigin.value.y + dragOffset.value.y
+  return { transform: `translate(${x}px, ${y}px) scale(1.04)` }
 }
 
 function onCardClick(r: Resource) {
@@ -673,6 +676,8 @@ function cardAccentStyle(r: Resource) {
   grid-template-columns: repeat(auto-fill, 124px);
   justify-content: space-between;
   gap: 10px;
+  /* 被拖卡片拖拽期间 position:absolute，这里当它的定位上下文 */
+  position: relative;
 }
 .suda-card {
   position: relative;
@@ -866,6 +871,11 @@ function cardAccentStyle(r: Resource) {
 
 /* 长按拖拽排序（#6）：跟手飞行 + 落点虚线插槽 */
 .suda-card.is-dragging {
+  /* 脱离文档流：腾出来的格子由 .suda-drop-slot 补上，网格项数恒为 N。
+     否则插槽会多占一格，把后面的卡片整片挤到下一行（拖拽时网格整体跳动）。 */
+  position: absolute;
+  top: 0;
+  left: 0;
   transition: none;
   z-index: 60;
   cursor: grabbing;
@@ -873,7 +883,10 @@ function cardAccentStyle(r: Resource) {
 }
 .suda-drop-slot {
   width: 124px;
-  min-height: 104px;
+  /* 跟随同行卡片的高度（不写死，避免比卡片高把整行撑起来）；
+     单独占一行时仍保留一个可见的虚线框 */
+  align-self: stretch;
+  min-height: 88px;
   border: 2px dashed var(--brand-500);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--brand-500) 6%, transparent);
