@@ -34,7 +34,7 @@
   产物根目录，默认 <仓库>/dist-market。
 .EXAMPLE
   # 正常流程（推荐）：不要用本脚本，改走服务端审核台
-  ./scripts/publish-extension.ps1 -ExtDir E:\workspace\x-hub-extensions\extensions\hello-web -SignKey E:\workspace\.x-hub-signing\market.key
+  ./scripts/publish-extension.ps1 -ExtDir <扩展源码目录> -SignKey <私钥文件>
 #>
 param(
   [Parameter(Mandatory = $true)][string]$ExtDir,

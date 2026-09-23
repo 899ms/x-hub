@@ -204,7 +204,7 @@ jobs:
       - 打包：cd $ext_dir → Compress-Archive → <id>-<version>.xhpack（manifest.json 在包根；zip 格式，后缀统一 .xhpack）
       - 计算 sha256、读取 manifest 的 id/version/name/description/runtime/author
       - 下载现有 registry.json → upsert 该扩展条目 → 写回（保留其它条目）
-      - 用 secrets.UPDATE_SIGNING_KEY 对 registry.json 派生 Ed25519 签名 → .sig
+      - 用 CI 注入的签名私钥对 registry.json 派生 Ed25519 签名 → .sig
       - rclone 上传 packages/<id>/<v>/<id>-<v>.xhpack、icons/（如新）、registry.json、registry.json.sig
 ```
 
@@ -296,7 +296,7 @@ jobs:
 
 **密钥生成与签名命令（发布侧）**
 ```bash
-# 一次性生成（私钥入 GitHub Secrets: UPDATE_SIGNING_KEY；公钥嵌入 src-tauri/src/keys.rs）
+# 一次性生成（私钥仅存发布侧、绝不入库；公钥嵌入 src-tauri/src/keys.rs）
 openssl genpkey -algorithm ED25519 -out update.key
 openssl pkey -in update.key -pubout -out update.pub
 # 导出 raw 32 字节公钥（base64）→ 嵌入
@@ -311,13 +311,16 @@ base64 -w0 registry.json.sig > registry.json.sig.b64   # 上传 base64 文本
 
 ### 8.1 `release.yml`（应用发版，打 tag 触发）追加
 
+> ⚠️ 本节是 R2 时代的历史方案：R2 通道已退役，应用发版现走 COS / 平台服务端接口，
+> 下面 YAML 中的 R2 环境变量仅作历史记录（相关 CI secret 已全部删除，见 §8.3）。
+
 ```yaml
 - name: Install rclone
   run: |
     winget install --id Rclone.Rclone -e --accept-source-agreements   # 或 choco/直接下 zip
 - name: Configure R2
-  env: { R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET }
-  run: rclone config create r2 s3 provider Cloudflare access_key_id ... endpoint https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+  env: { R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET }   # R2 通道已退役
+  run: rclone config create r2 s3 provider Cloudflare access_key_id ... endpoint https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
 - name: Upload artifacts & write update.json
   shell: pwsh
   run: scripts/publish-release.ps1   # 参数：version、两个 zip 路径、signing key
@@ -334,15 +337,13 @@ base64 -w0 registry.json.sig > registry.json.sig.b64   # 上传 base64 文本
 
 手动 dispatch，输入扩展目录 → 打包 / 合并 registry.json / 签名 / 上传（详见 §5.4 方式 A）。
 
-### 8.3 新增 GitHub Secrets
+### 8.3 新增 GitHub Secrets（**已废弃：相关 secret 已删除**）
 
-| Secret | 用途 |
-|---|---|
-| `R2_ACCOUNT_ID` | R2 账户 ID（endpoint 域名用） |
-| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | S3 兼容 API 凭证（限该桶权限） |
-| `R2_BUCKET` | 桶名 `x-hub-dist` |
-| `UPDATE_SIGNING_KEY` | Ed25519 私钥（base64，仅签名用） |
-| `CDN_BASE_URL` | `https://dist.x-hub.dev`（写进 update.json / registry.json 的 URL） |
+本节曾列出一批 CI secret（R2 凭据、签名私钥、CDN 基址）。R2 通道退役、扩展发布改由
+服务端审核台签发后，这些 secret 已于 2026-09 **全部从仓库 Actions 设置中删除**
+（当前 secrets / variables 均为 0 条，`.github/` 下亦无任何 `secrets.*` 引用）。
+签名私钥只在发布侧保管，不再进入任何 CI 环境。保留本节仅为记录当时的配置项范围，
+后续读者不必再核对仓库 secret 状态。
 
 ## 9. 客户端新增内容一览
 
@@ -424,7 +425,7 @@ docs/r2-distribution-and-updater.md   （本文档）
 | 项 | 实际落地 |
 |---|---|
 | 桶 / 域名 | 桶 `x-hub-dist`（用户已建），自定义域名 **`r2.dckxx.com`** |
-| 密钥对 | Ed25519 已生成：私钥 `E:\workspace\.x-hub-signing\market.key`（**工作区外，妥善保管；未来放 GitHub Secrets `UPDATE_SIGNING_KEY`**）；公钥入库 `src-tauri/keys/market_public.key`（raw 32B base64） |
+| 密钥对 | Ed25519 已生成：私钥仅存发布侧（工作区外，**路径不在此记录**；当时计划入 GitHub Secrets，后因发布改由服务端签发而只在发布侧保管）；公钥入库 `src-tauri/keys/market_public.key`（raw 32B base64） |
 | 验签模块 | `src-tauri/src/signing.rs`（`pub mod`）：`verify_detached(content, sig_b64)` + 5 个单测（已知向量 / 篡改 / 非法 base64 / 长度非法 / 空） |
 | 依赖 | Cargo.toml 新增 `sha2 0.10`、`ed25519-dalek 2`、`base64 0.22`（semver 留给 P2） |
 | 清单 v2 | `market.rs::MarketExtension` 扩展：`sha256/size/icon/minAppVersion/changelog/homepage/required`；顶层 `schemaVersion/updatedAt`；兼容旧 v1 格式 |
@@ -447,7 +448,7 @@ docs/r2-distribution-and-updater.md   （本文档）
 
 **待用户在 Cloudflare 侧完成**
 1. 桶 `x-hub-dist` → Settings → Public Access → **连接自定义域名 `r2.dckxx.com`**（域名需托管在 Cloudflare DNS，自动 CNAME + 免费证书）；等待生效后 `https://r2.dckxx.com/` 可访问。
-2. 创建 API Token（Object Read & Write，**仅限该桶**）→ 预留给 GitHub Secrets：`R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` / `CDN_BASE_URL=https://r2.dckxx.com` / `UPDATE_SIGNING_KEY`（= `E:\workspace\.x-hub-signing\market.key` 内容）。
+2. 创建 API Token（Object Read & Write，**仅限该桶**）→ 供上传脚本使用。（当时另预留了一批 CI secret，见 §8.3 的废弃说明：该通道已停用，secret 已全部删除。）
 3. 本地手动上传（rclone 未配也可先用任意 S3 客户端）：把 `dist-market/` 下 `registry.json`、`registry.json.sig`、`packages/**`、`icons/**` 传到桶根（缓存头：清单 `no-cache`，包/图标 `public, max-age=31536000, immutable`）。
 4. 验证：浏览器打开 `https://r2.dckxx.com/extensions/registry.json` 与 `.sig` → 启动 x-hub 进「扩展中心 → 市场」，应看到 `hello-web` 卡片并可安装（安装走 sha256 校验 + 进度条）。5. 上传命令务必带 `extensions/` 前缀：`rclone copy dist-market r2:x-hub-dist/extensions ...`（否则对象落在桶根，与 registry 里的 URL 前缀不符导致 404）。
 
@@ -500,10 +501,10 @@ docs/r2-distribution-and-updater.md   （本文档）
 
 **已验证**
 - `cargo check` 零警告；`npm run build`（vue-tsc + vite）通过；新增单测（清单解析/未来 schema 拒绝/缺 version 拒绝/`is_newer` 跳级保护，含 4 例）编译通过（本机 `cargo test` harness 0xc0000139 旧环境问题，见附录 A）
-- 发布位端到端可闭环：`publish-release.ps1` 产出双 zip + update.json + sig，`pub-sign.mjs` 与 `signing.rs` 同一密钥对（`E:\workspace\.x-hub-signing\market.key`）
+- 发布位端到端可闭环：`publish-release.ps1` 产出双 zip + update.json + sig，`pub-sign.mjs` 与 `signing.rs` 同一密钥对（私钥在发布侧，路径不记录）
 
 **验收方式（端到端）**
-1. 把 x-hub 发一版更高的版本（如 0.3.0 → 0.4.0 或 0.3.1）：`npm run build` + `npm run tauri:build` → `publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version <新版本> -SignKey E:\workspace\.x-hub-signing\market.key -Notes "…"` → `upload-release.ps1`（需 R2 凭据）。
+1. 把 x-hub 发一版更高的版本（如 0.3.0 → 0.4.0 或 0.3.1）：`npm run build` + `npm run tauri:build` → `publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version <新版本> -SignKey <私钥文件> -Notes "…"` → `upload-release.ps1`（需 R2 凭据）。
 2. 旧版本启动 → 设置 → 关于 → 「检查更新」应命中全局更新弹窗（版本/说明/大小 + 「跳过此版本 / 取消 / 立即更新」）；或自动静默命中 → 「立即更新」→ 弹窗内进度条 → 就绪后「立即重启」→ 重启后 `get_app_info` 显示新版本号。
 3. 便携版验证：exe 同目录放 `portable` 标志 → 更新走 portableUrl 且自替换后数据仍在 exe\data。
 

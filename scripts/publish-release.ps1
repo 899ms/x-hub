@@ -25,7 +25,7 @@
   本地产物目录，默认 <仓库>/dist-release。
 
 .EXAMPLE
-  ./scripts/publish-release.ps1 -ExePath E:\workspace\x-hub\src-tauri\target\release\x-hub.exe -Version 0.4.0 -SignKey E:\workspace\.x-hub-signing\market.key -Notes "v0.4.0: 新增应用自动升级"
+  ./scripts/publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version 0.4.0 -SignKey <私钥文件> -Notes "v0.4.0: 新增应用自动升级"
 #>
 param(
   [Parameter(Mandatory = $true)][string]$ExePath,

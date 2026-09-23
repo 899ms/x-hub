@@ -87,7 +87,7 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 | `COS_SECRET_ID` / `COS_SECRET_KEY` | CAM 子账号密钥 | COS 通道（主） |
 | `COS_BUCKET` / `COS_REGION` | `x-hub-dist-1251402600` / `ap-guangzhou` | COS 通道（主） |
 | `XHUB_DIST_BASE_URL` | `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com` | 发布脚本拼清单内 URL（publish-*.ps1） |
-| `XHUB_SIGNING_KEY` | `E:\workspace\.x-hub-signing\market.key` | Ed25519 签名私钥（不变） |
+| `XHUB_SIGNING_KEY` | 私钥文件路径（由使用者在本机设置，**不在此记录**） | Ed25519 签名私钥 |
 | `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | — | **已作废**（R2 的 `extensions/` 已清空 → 市场侧 404；`releases/` 侧虽仍写得进去但没人再读） |
 
 用法（`-Target cos` 是默认且**现在唯一有效**的通道；`-Target sftp` 属备选 Nginx 方案（不启用）。R2 通道与其 `all` 双写模式已于 2026-09 **从脚本里摘除**——`-Target r2` / `-Target all` 现在会被参数校验直接拒绝，不再有「写了没人读、还静默不报错」的坑）：
@@ -95,7 +95,7 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 ```powershell
 # 应用发版（仍然有效：客户端应用发布不经过扩展市场）
 ./scripts/publish-release.ps1 -ExePath src-tauri\target\release\x-hub.exe -Version 0.6.0 `
-  -SignKey E:\workspace\.x-hub-signing\market.key -Notes "…"
+  -SignKey <私钥文件> -Notes "…"
 ./scripts/upload-release.ps1 -Target cos         # → 只写 COS（R2 通道已从脚本摘除）
 
 # 扩展发布 —— ⛔ 已停用（2026-09）：改走客户端「扩展中心 → 发布」，由服务端审核台签名并推送
@@ -109,16 +109,14 @@ curl -sI $BASE/extensions/registry.json.sig | grep -iE 'HTTP|cache-control'   # 
 
 ## 5. CI 通道（GitHub Actions，扩展发布）
 
-`release-extension.yml` 已从 rsync 改回 **rclone + TencentCOS**。GitHub Secrets：
+`release-extension.yml` 曾从 rsync 改回 **rclone + TencentCOS**，并依赖一批 GitHub Secrets
+（COS 凭据、签名私钥、CDN 基址，以及更早的 R2 凭据与 SSH/DEPLOY 部署密钥）。
 
-| Secret | 值 | 变化 |
-|---|---|---|
-| `COS_SECRET_ID` / `COS_SECRET_KEY` | CAM 子账号密钥 | 新增 |
-| `COS_BUCKET` / `COS_REGION` | 完整桶名 / 地域 | 新增 |
-| `CDN_BASE_URL` | `https://x-hub-dist-1251402600.cos.ap-guangzhou.myqcloud.com` | 原有，改值 |
-| `UPDATE_SIGNING_KEY` | Ed25519 私钥（签名用） | **不变** |
-| `SSH_PRIVATE_KEY` / `DEPLOY_*` | — | **作废可删**（Nginx 备选才需要） |
-| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | — | **已作废**（R2 已退役，CI 与脚本均不再使用） |
+> ⚠️ **该 CI 通道已停用，上述 secret 已全部删除**（2026-09）：扩展发布改由服务端审核台完成
+> 关卡 + 审核 + 服务端签名 + 推送 COS，`release-extension.yml` 现为「触发即失败」的显式记录。
+> 仓库 Actions 的 secrets / variables 当前均为 **0 条**，`.github/` 下无任何 `secrets.*` 引用；
+> 签名私钥只在发布侧保管，不再进入任何 CI 环境。此处不再逐条列举名称。
+> 本机上传通道（§4）与应用发版链路不受影响。
 
 ## 6. 过渡方案：三阶段切换，老用户升级不断链（**历史记录**）
 
