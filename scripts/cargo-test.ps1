@@ -33,6 +33,14 @@ foreach ($exe in $artifacts) {
 }
 Write-Host ("已为 {0} 个测试 exe 嵌入 Common-Controls v6 manifest" -f @($artifacts).Count)
 
-# 3) 运行测试
-cargo test --manifest-path $cargoToml @TestArgs
-exit $LASTEXITCODE
+# 3) 直接运行已嵌好 manifest 的测试 exe —— 这里**不能**再走 `cargo test`：
+#    mt.exe 改过产物会让 cargo 判定输出失效并重新链接，把刚嵌入的 manifest 覆盖掉，
+#    测试进程又变回 STATUS_ENTRYPOINT_NOT_FOUND。CI 是全新编译所以必现，
+#    本地因为有上一次的指纹缓存才偶发不现（不可依赖）。
+$failed = $false
+foreach ($exe in $artifacts) {
+  Write-Host ("运行测试: {0}" -f (Split-Path -Leaf $exe))
+  & $exe @TestArgs
+  if ($LASTEXITCODE -ne 0) { $failed = $true }
+}
+exit $(if ($failed) { 1 } else { 0 })
