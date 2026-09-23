@@ -8,12 +8,15 @@ import type { Resource } from '../api/tauri'
  * 拖拽互斥（同 useTodoDrag / 笔记块拖拽，见 AGENTS.md 约定 14/38）——速达的「拖文件进来
  * 导入」走的就是那套原生通道，卡片排序只能走指针事件，两者才互不干扰。
  *
- * 为什么用长按而不是移动阈值：卡片单击 = 启动资源，按住约 300ms 才拎起卡片，
- * 点按与拖拽互不干扰（待办行是行内元素、无点击语义，才用移动阈值）。
+ * 起拖有两条通道（卡片单击 = 启动资源，所以两条都必须与「点按」区分开）：
+ * - 长按约 300ms：鼠标与触摸/笔都认；
+ * - 鼠标移动超过起拖阈值：按住就拖同样是拖拽意图，不必等长按计时——曾经这里一律
+ *   「放弃长按」，于是习惯「按住直接拖」的用户永远拎不起卡片（第一帧移动就超阈值），
+ *   表现就是「拖不动」。触摸/笔不认这条，避免与列表滑动冲突。
  *
- * 交互：长按后卡片跟手飞起，落点显示虚线插槽（「让位」效果）；松手把可见项的新 id 顺序
- * 交给 `reorder`（调用方负责并回全表顺序并持久化）。长按后原地松开 = 不动顺序；
- * 长按后的那次 click 会被吞掉，避免误启动资源。
+ * 交互：拎起后卡片跟手飞起，落点显示虚线插槽（「让位」效果）；松手把可见项的新 id 顺序
+ * 交给 `reorder`（调用方负责并回全表顺序并持久化）。原地松开 = 不动顺序；
+ * 拎起后的那次 click 会被吞掉，避免误启动资源。
  *
  * 调用方约定：
  * - 网格容器 `gridRef`，卡片 class 为 `.suda-card` 且是容器直接子元素；
@@ -43,11 +46,11 @@ export function useSudaDrag(opts: {
   /** 落点插槽：插到全部可见卡片末尾 */
   const dropAtEnd = ref(false)
 
-  /** 长按后（含原地松开）的那次 click 要吞掉，防止误启动 */
+  /** 拎起后（含原地松开）的那次 click 要吞掉，防止误启动 */
   let blockClick = false
 
   const LONG_PRESS_MS = 300
-  /** 起拖前允许的抖动；超过就视为「按住改主意去滚动/点选」，本次不再起拖 */
+  /** 起拖阈值：移动超过它即视为拖拽意图（鼠标直接拎起；触摸/笔放弃长按，当作滑动列表） */
   const SLOP_PX = 8
 
   /** 卡片 @click 入口：返回 true 表示这次 click 应吞掉 */
@@ -111,13 +114,25 @@ export function useSudaDrag(opts: {
       const dy = ev.clientY - startY
       if (!armed) {
         if (Math.hypot(dx, dy) < SLOP_PX) return
-        // 起拖前就拖出抖动范围：放弃本次长按（当作滚动/点选意图）。但既然已经移动过，
-        // 这次松手就必须吞掉 click —— 否则浏览器照常派发 click，卡片会直接启动资源
-        // （「想拖动排序，结果打开了程序」）。这与浏览器原生拖动「移动即不算点击」一致。
-        dead = true
-        blockClick = true
-        cleanup()
-        return
+        // 移动超过起拖阈值
+        if (ev.pointerType === 'mouse') {
+          // 鼠标：按住就拖同样是拖拽意图，不必等长按计时。此前这里一律「放弃长按」，
+          // 于是习惯「按住直接拖」的用户永远拎不起卡片（第一帧移动就超阈值），
+          // 表现就是「拖不动」——只有先按住不动 300ms 才拖得动。
+          // 必须先清掉长按计时：否则 300ms 后再 begin() 一次会重读 dragOrigin，
+          // 而那时卡片已是 absolute、offsetLeft/offsetTop 为 0，卡片会跳到左上角。
+          window.clearTimeout(armTimer)
+          begin()
+          armed = true
+        } else {
+          // 触摸 / 笔：保留长按语义，避免与列表滑动冲突。既然已经移动过，这次松手必须
+          // 吞掉 click —— 否则浏览器照常派发 click，卡片会直接启动资源
+          // （「想拖动排序，结果打开了程序」）。
+          dead = true
+          blockClick = true
+          cleanup()
+          return
+        }
       }
       dragOffset.value = { x: dx, y: dy }
       updateDrop(ev.clientX, ev.clientY)
