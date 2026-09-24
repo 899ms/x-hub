@@ -43,6 +43,7 @@ export const SETTINGS_INDEX: SettingsIndexEntry[] = [
   { section: 'online', title: '联网功能' },
   { section: 'online', title: '天气城市' },
   { section: 'general', title: '开机自动启动' },
+  { section: 'general', title: '通知驻留时长' },
   { section: 'ball', title: '桌面悬浮球' },
   { section: 'ball', title: '悬浮球贴边自动隐藏' },
   { section: 'ball', title: '与主窗口同时显示' },

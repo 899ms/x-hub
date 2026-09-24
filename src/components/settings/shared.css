@@ -563,6 +563,22 @@
   border-color: var(--brand-500);
   box-shadow: var(--shadow-focus);
 }
+/* 带单位的数值输入（如「通知驻留时长」的「秒」）：排成一行，输入框吃掉剩余宽度 */
+.settings-view .num-edit.with-unit{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-view .num-edit.with-unit .num-input{
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.settings-view .num-unit{
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--text-3);
+}
 .settings-view .data-btn.danger{
   color: var(--c-red-ink);
   border-color: color-mix(in srgb, var(--c-red) 35%, transparent);

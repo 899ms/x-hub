@@ -612,6 +612,12 @@ function onOpenExtensionsView() {
   activeView.value = 'extensions'
 }
 
+/** 扩展中心「我的扩展」→「点击跳转」：跳设置页并定位到 Skills 分区（装扩展开发 Skill 的入口） */
+function onOpenSkillsSettings() {
+  settingsSection.value = 'skills'
+  activeView.value = 'settings'
+}
+
 async function restoreChatPanel() {
   if (!isTauri()) return
   try {
@@ -854,6 +860,7 @@ provide('showToast', showToast)
             @open="onOpenExtension"
             @open-surface="(ext, surface) => openExtensionSurface(ext.id, surface)"
             @changed="onExtensionsChanged"
+            @open-skills="onOpenSkillsSettings"
           />
         </section>
 

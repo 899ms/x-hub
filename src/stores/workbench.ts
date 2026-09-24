@@ -86,6 +86,7 @@ const state = reactive<StoreState>({
     dashboard_layout: '',
     countdown_sound: false,
     clock_quote: '',
+    notice_duration_ms: 5000,
     online_enabled: true,
     weather_city: '',
     weather_lat: 0,
@@ -911,6 +912,13 @@ export function useStore() {
     await tauriApi.saveConfig(state.config)
   }
 
+  /** 右下角通知弹窗驻留时长（毫秒，1–60 秒；通知窗按后端下发的值倒计时） */
+  async function setNoticeDuration(value: number) {
+    state.config.notice_duration_ms = Math.min(60000, Math.max(1000, Math.round(value)))
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+  }
+
   /** 侧边栏展开/收缩功能开关 */
   async function setSidebarToggle(value: boolean) {
     state.config.sidebar_toggle = value
@@ -1355,6 +1363,7 @@ export function useStore() {
     setDashboardMidContent,
     setDashboardLayout,
     setCountdownSound,
+  setNoticeDuration,
   setClockQuote,
   setChatModels,
   setChatPanelOpacity,

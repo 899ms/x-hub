@@ -29,6 +29,8 @@ const emit = defineEmits<{
   open: [ext: ExtensionEntry]
   openSurface: [ext: ExtensionEntry, surface: string]
   changed: []
+  /** 「去安装扩展开发 Skill」：跳设置页的 Skills 分区（宿主里那条安装入口） */
+  openSkills: []
 }>()
 
 function onAction(e: ExtensionEntry, surface: string) {
@@ -772,6 +774,10 @@ function onMore(e: ExtensionEntry) {
         <p class="ec-hint-line">
           这类扩展<b>不复制进「已安装」</b>，也不参与市场更新与卸载；移除目录即撤销，磁盘上的源码不动。
         </p>
+        <p class="ec-hint-line">
+          想<b>快速开发自己的扩展</b>？先去「<b>设置 → 扩展 → Skills</b>」安装<b>扩展开发 Skill</b>，让 AI 助手陪你从零把它做出来。
+          <button class="ec-hint-jump" type="button" @click="emit('openSkills')">点击跳转&gt;&gt;</button>
+        </p>
       </div>
 
       <div v-if="!isTauri()" class="ec-empty">
@@ -1339,6 +1345,25 @@ function onMore(e: ExtensionEntry) {
   border-radius: 4px;
   background: var(--bg-card-soft);
   font-size: 0.72rem;
+}
+/* 「点击跳转 >>」：品牌色文字按钮，跟着说明走一行（不是块级按钮，别抢视线） */
+.ec-hint-jump {
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--brand-500);
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+.ec-hint-jump:hover {
+  color: var(--brand-600, var(--brand-500));
+  text-decoration-thickness: 2px;
 }
 .ec-remove-btn {
   display: inline-flex;

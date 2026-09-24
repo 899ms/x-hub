@@ -18,7 +18,8 @@ interface NoticeItem {
   body: string
 }
 
-const AUTO_DISMISS_MS = 5200
+// 兜底驻留时长（后端每条通知都会带 durationMs，见 notify.rs；这里只防 payload 缺字段）
+const FALLBACK_DISMISS_MS = 5200
 const MAX_VISIBLE = 4 // 超出立即挤掉最旧，限制窗口高度
 
 const items = ref<NoticeItem[]>([])
@@ -49,8 +50,8 @@ async function syncLayout() {
   if (h > 0) void tauriApi.noticeLayout(h).catch(() => {})
 }
 
-function startTimer(uid: number) {
-  timers.set(uid, setTimeout(() => dismiss(uid), AUTO_DISMISS_MS))
+function startTimer(uid: number, ms: number) {
+  timers.set(uid, setTimeout(() => dismiss(uid), ms))
 }
 
 function clearTimer(uid: number) {
@@ -67,7 +68,7 @@ function dismiss(uid: number) {
   items.value = items.value.filter((n) => n.uid !== uid)
 }
 
-function push(item: Omit<NoticeItem, 'uid'>) {
+function push(item: Omit<NoticeItem, 'uid'>, durationMs?: number) {
   const it: NoticeItem = { uid: uidSeq++, ...item }
   items.value.push(it)
   // 超量：立即挤掉最旧（TransitionGroup 会为其播放离场）
@@ -75,7 +76,7 @@ function push(item: Omit<NoticeItem, 'uid'>) {
     const old = items.value.shift()
     if (old) clearTimer(old.uid)
   }
-  startTimer(it.uid)
+  startTimer(it.uid, durationMs && durationMs > 0 ? durationMs : FALLBACK_DISMISS_MS)
   // 新卡片入场后立即量高（入场动画只横向滑入，不影响布局高度）
   void syncLayout()
 }
@@ -90,9 +91,9 @@ onMounted(async () => {
   } catch {
     /* 无后端时保持默认 */
   }
-  unlistenNew = await listen<{ kind?: string; title?: string; body?: string }>('notice-new', (e) => {
+  unlistenNew = await listen<{ kind?: string; title?: string; body?: string; durationMs?: number }>('notice-new', (e) => {
     const p = e.payload ?? {}
-    push({ kind: p.kind || 'info', title: p.title || '通知', body: p.body || '' })
+    push({ kind: p.kind || 'info', title: p.title || '通知', body: p.body || '' }, p.durationMs)
   })
   unlistenTheme = await listen<{ mode?: string; preset?: string; accent?: string | null }>(
     'notice-theme',

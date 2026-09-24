@@ -76,6 +76,10 @@ pub struct AppConfig {
     pub countdown_sound: bool,
     /// 时钟卡片语录（工作台时间卡片下方显示的一句话，空串时回退默认）
     pub clock_quote: String,
+    /// 右下角通知弹窗的驻留时长（毫秒，1000–60000；到点自动淡出）。
+    /// 后端每次推送通知时读当前值随事件下发，改设置立即生效（无需重启通知窗）
+    #[serde(default = "default_notice_duration_ms")]
+    pub notice_duration_ms: i64,
     /// 联网功能总开关（默认开启）：有网显示在线内容、无网自动隐藏；关闭后完全不发起网络请求
     #[serde(default = "default_true")]
     pub online_enabled: bool,
@@ -247,6 +251,11 @@ fn default_paste_method() -> String {
     "auto".to_string()
 }
 
+/// 通知驻留时长默认 5 秒
+fn default_notice_duration_ms() -> i64 {
+    5000
+}
+
 fn default_chat_panel_opacity() -> f64 {
     1.0
 }
@@ -350,6 +359,7 @@ impl Default for AppConfig {
             dashboard_layout: String::new(),
             countdown_sound: false,
             clock_quote: String::new(),
+            notice_duration_ms: default_notice_duration_ms(),
             online_enabled: true,
             weather_city: String::new(),
             weather_lat: 0.0,

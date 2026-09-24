@@ -215,6 +215,7 @@ export interface AppConfig {
   dashboard_layout: string
   countdown_sound: boolean
   clock_quote: string // 时钟卡片语录（可配置，空串回退默认）
+  notice_duration_ms: number // 右下角通知弹窗驻留时长（毫秒，1000–60000）
   online_enabled: boolean // 联网功能总开关（默认开）
   weather_city: string // 天气城市展示名（空串 = 未配置）
   weather_lat: number // 天气纬度缓存

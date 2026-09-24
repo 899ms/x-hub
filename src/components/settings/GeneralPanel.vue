@@ -89,6 +89,26 @@ const {
 void shortcutInputRef
 void clipInputRef
 
+// ---- 右下角通知驻留时长（秒；后端每条通知都带当前值下发，改完立即生效） ----
+const noticeSeconds = ref(5)
+const noticeSaving = ref(false)
+
+function commitNoticeDuration() {
+  const sec = Math.min(60, Math.max(1, Math.round(Number(noticeSeconds.value) || 0)))
+  noticeSeconds.value = sec
+  if (!isTauri() || noticeSaving.value) return
+  const ms = sec * 1000
+  if (ms === (store.state.config.notice_duration_ms ?? 5000)) return
+  noticeSaving.value = true
+  void store
+    .setNoticeDuration(ms)
+    .then(() => showToast(`通知驻留时长已设为 ${sec} 秒`))
+    .catch((e) => showToast(`设置失败：${String(e)}`))
+    .finally(() => {
+      noticeSaving.value = false
+    })
+}
+
 // ---- 开机自启动 ----
 const autostartBusy = ref(false)
 // 系统真实状态探测：区分「用户开了开关」与「登录时是否真的会拉起」
@@ -154,6 +174,8 @@ onMounted(async () => {
 
   clipSavedShortcut.value = clipShortcut.value
 
+  noticeSeconds.value = Math.round((store.state.config.notice_duration_ms ?? 5000) / 1000)
+
   void refreshAutostartStatus()
 
 })
@@ -184,6 +206,26 @@ onMounted(async () => {
             >
               <span class="toggle-knob"></span>
             </button>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">通知驻留时长</span>
+              <span class="setting-desc">右下角提醒弹窗停留多少秒后自动消失（1–60 秒，默认 5 秒）；鼠标点一下可立即关掉</span>
+            </div>
+            <div class="num-edit with-unit">
+              <input
+                v-model.number="noticeSeconds"
+                class="num-input"
+                type="number"
+                min="1"
+                max="60"
+                step="1"
+                aria-label="通知驻留时长（秒）"
+                @change="commitNoticeDuration"
+              />
+              <span class="num-unit">秒</span>
+            </div>
           </div>
         </section>
 

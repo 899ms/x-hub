@@ -146,7 +146,15 @@ pub fn show_notice(app: &AppHandle, kind: &str, title: &str, body: &str) {
         // 首帧：先定位 + 显示（不依赖隐藏 WebView2 处理事件的时序），高度随后校正
         anchor_default_and_show(&win);
     }
-    let payload = serde_json::json!({ "kind": kind, "title": title, "body": body });
+    // 驻留时长随每条通知一起下发（设置 → 常规可调）：通知窗是启动期预创建、常驻不重启的，
+    // 若让前端自己读一次配置，改了设置也得等下次启动才生效
+    let duration_ms = crate::config::load().notice_duration_ms.clamp(1000, 60_000);
+    let payload = serde_json::json!({
+        "kind": kind,
+        "title": title,
+        "body": body,
+        "durationMs": duration_ms
+    });
     if let Err(e) = app.emit_to(NOTICE_LABEL, "notice-new", &payload) {
         log::warn!("通知事件投递失败: {e}");
     }
