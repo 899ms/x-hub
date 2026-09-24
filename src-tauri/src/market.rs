@@ -195,7 +195,8 @@ pub async fn refresh_market_registry() -> Result<MarketStatus, String> {
     let sig_url = format!("{endpoint}.sig");
     log::info!("刷新市场清单: {endpoint}");
 
-    let client = reqwest::Client::builder()
+    // 市场源是平台服务端（国内）：强制直连，别被用户本地代理带沟里（见 crate::net）
+    let client = crate::net::direct()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;

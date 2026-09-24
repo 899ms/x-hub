@@ -152,7 +152,8 @@ fn client() -> Result<reqwest::Client, String> {
             v,
         );
     }
-    reqwest::Client::builder()
+    // 平台服务端在国内：强制直连，别被用户本地代理（Clash/v2rayN）带沟里（见 crate::net）
+    crate::net::direct()
         .redirect(reqwest::redirect::Policy::none())
         .default_headers(headers)
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))

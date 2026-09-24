@@ -287,7 +287,8 @@ pub async fn check_for_update(
 ) -> Result<UpdateInfo, String> {
     let manual = manual.unwrap_or(false);
     let current = current_version(&app);
-    let client = reqwest::Client::builder()
+    // 更新清单来自平台服务端（国内）：强制直连，别被用户本地代理带沟里（见 crate::net）
+    let client = crate::net::direct()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| format!("HTTP 客户端初始化失败: {e}"))?;
@@ -366,7 +367,8 @@ pub async fn download_update(
     let current = current_version(&app);
     // 不设总超时：慢链路（~30KB/s）下载 8.7MB 需数分钟，总超时必然误杀慢而活跃的下载；
     // 改为连接超时 + 空闲读超时（30s 收不到新数据才断），下面的流式读取同样吃 read_timeout
-    let client = reqwest::Client::builder()
+    // 安装包由我们自己的分发（COS 国内）提供：同样强制直连（见 crate::net）
+    let client = crate::net::direct()
         .connect_timeout(Duration::from_secs(15))
         .read_timeout(Duration::from_secs(30))
         .build()

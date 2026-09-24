@@ -18,6 +18,7 @@ mod floating_ball;
 mod float_window;
 pub mod market;
 mod models;
+mod net;
 mod notify;
 mod online;
 mod paths;

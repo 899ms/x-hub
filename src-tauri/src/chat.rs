@@ -122,11 +122,16 @@ where
         format!("模型「{}」未配置 API Key（平台模型需先登录账号）", model.name)
     })?;
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .map_err(|e| format!("HTTP 客户端初始化失败: {}", e))?;
+    // 平台模型走内置服务端（国内）→ 强制直连；用户自配的第三方服务保持跟随系统代理（见 crate::net）
+    let client = if is_platform {
+        crate::net::direct()
+    } else {
+        reqwest::Client::builder()
+    }
+    .redirect(reqwest::redirect::Policy::none())
+    .timeout(std::time::Duration::from_secs(300))
+    .build()
+    .map_err(|e| format!("HTTP 客户端初始化失败: {}", e))?;
 
     // OpenAI 消息格式（role 仅保留 user/assistant 两种）
     let payload_messages: Vec<Value> = messages
