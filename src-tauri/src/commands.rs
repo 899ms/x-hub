@@ -188,17 +188,28 @@ pub fn launch_resource(state: State<'_, DbState>, id: i64) -> Result<(), String>
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let res = resource::get(&conn, id).map_err(err_str)?;
     match res.kind {
-        ResourceKind::App => match process::launch_program(&res.target, res.args.as_deref()) {
-            Ok(()) => {
+        ResourceKind::App => {
+            // 程序已在运行 → 只把已有窗口调度到前台，不再拉起第二个实例。
+            // 带参数的资源仍按原样启动：参数往往就是「这次要打开的东西」（如 --incognito、
+            // 要打开的文件夹），忽略它会丢语义。
+            let no_args = res.args.as_deref().map(|a| a.trim().is_empty()).unwrap_or(true);
+            if no_args && process::activate_existing(&res.target) {
                 let _ = resource::touch(&conn, id);
-                log::info!("启动程序: {} ({})", res.name, res.target);
-                Ok(())
+                log::info!("程序已在运行，已调度到前台: {} ({})", res.name, res.target);
+                return Ok(());
             }
-            Err(e) => {
-                log::error!("启动程序失败: {} ({}) -> {}", res.name, res.target, e);
-                Err(e)
+            match process::launch_program(&res.target, res.args.as_deref()) {
+                Ok(()) => {
+                    let _ = resource::touch(&conn, id);
+                    log::info!("启动程序: {} ({})", res.name, res.target);
+                    Ok(())
+                }
+                Err(e) => {
+                    log::error!("启动程序失败: {} ({}) -> {}", res.name, res.target, e);
+                    Err(e)
+                }
             }
-        },
+        }
         ResourceKind::Web => match process::open_url(&res.target) {
             Ok(()) => {
                 let _ = resource::touch(&conn, id);
