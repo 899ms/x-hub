@@ -144,20 +144,20 @@ src-tauri/
 - **AI 对话**：会话与消息存本地 SQLite；API Key 存入**系统钥匙串**（keyring），界面脱敏展示，**不明文落盘、不上传**
 
 ## 配图
-<img width="1418" height="911" alt="首页-工作台" src="https://github.com/user-attachments/assets/7e3279fc-468c-4cf5-979d-d391e6ba3927" />
-<img width="1408" height="911" alt="1b6dfac7d89ccc73912a22463d8cb2f2" src="https://github.com/user-attachments/assets/0390f712-3fad-4ea5-b916-8340051acbbc" />
-<img width="1418" height="911" alt="速记" src="https://github.com/user-attachments/assets/baf42146-2b24-4be4-b87f-0db405988d67" />
-<img width="1418" height="911" alt="速达" src="https://github.com/user-attachments/assets/406510a0-9673-4d42-8767-2818cd57f66b" />
-<img width="1418" height="911" alt="设置" src="https://github.com/user-attachments/assets/361635cb-8dbb-4528-b604-91f36ce768df" />
-<img width="1920" height="1030" alt="浮窗" src="https://github.com/user-attachments/assets/b8751fb5-0a2f-459b-bc44-64e8247386d5" />
-<img width="1405" height="905" alt="076e394832d4e0feba0d46ef558bd3ea" src="https://github.com/user-attachments/assets/7f911d2a-bbf4-4d14-8b2d-9921928c55f4" />
-
+<img width="1400" height="933" alt="工作台​" src="https://github.com/user-attachments/assets/ffb4358b-8e39-4388-aab6-3827e64ed883" />
+<img width="1400" height="933" alt="workbench" src="https://github.com/user-attachments/assets/aa7323e6-e66b-411e-9c9b-b63f3c057c88" />
+<img width="1400" height="933" alt="todo" src="https://github.com/user-attachments/assets/324cc42f-8e6f-477d-bd2b-aa2d3d38f1ee" />
+<img width="1400" height="933" alt="settings" src="https://github.com/user-attachments/assets/7ea3db47-f5a6-40db-b632-f2fee0ec4215" />
+<img width="1400" height="933" alt="notes" src="https://github.com/user-attachments/assets/8c0bd21e-187d-4117-a098-640c3b95451c" />
+<img width="1400" height="933" alt="launcher" src="https://github.com/user-attachments/assets/c3e827c0-fcb4-4cec-ad5e-789cf8669bff" />
+<img width="1400" height="933" alt="extensions" src="https://github.com/user-attachments/assets/6ddd20ce-b35c-4db0-8a37-cd1c4439dab1" />
 
 ## 💬 交流群
 
 使用中遇到问题、有功能建议，或想交流效率工具心得，欢迎加入 **x-hub 交流群**：
 
-<img width="360" height="544" alt="群聊：x-hub交流群" src="https://github.com/user-attachments/assets/932c1a7a-efbb-4b04-aa9f-9bb5254f93bc" />
+<img width="360" height="544" alt="image" src="https://github.com/user-attachments/assets/40bdd42e-6bba-49bb-b8ba-292f12e04cc2" />
+
 
 
 > 二维码 7 天内有效，过期后重新进入会更新。若二维码失效，请到 [Issues](https://github.com/dckxx/x-hub/issues) 留言获取最新二维码。
