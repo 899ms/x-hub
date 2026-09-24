@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useExtensionFrame } from '../composables/useExtensionFrame'
 import { useTheme } from '../composables/useTheme'
@@ -30,9 +30,26 @@ function decodeExtWindowId(label: string): string {
 const label = getCurrentWindow().label
 const extId = computed(() => decodeExtWindowId(label))
 
+// 独立窗口拿不到主窗 provide 的 `showToast`（跨窗口注入不通用），自带一条最小提示：
+// 扩展开外链失败（最典型 = 未声明 `open-url` 权限）时必须让用户看见原因，
+// 否则表现就是「点了没反应」——正是这次要修的静默失败。
+const toast = ref('')
+let toastTimer: number | undefined
+function showToast(msg: string) {
+  toast.value = msg
+  if (toastTimer !== undefined) clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => {
+    toast.value = ''
+  }, 2600)
+}
+onBeforeUnmount(() => {
+  if (toastTimer !== undefined) clearTimeout(toastTimer)
+})
+
 const { frameRef, loading, error } = useExtensionFrame(
   () => extId.value,
   () => null,
+  showToast,
 )
 // frameRef 仅用于模板 ref 绑定（vue-tsc 不把模板 ref 计为读取，此处显式保留引用通过 noUnusedLocals）
 void frameRef
@@ -53,6 +70,7 @@ void frameRef
       title="扩展窗口"
       sandbox="allow-scripts allow-same-origin allow-downloads"
     />
+    <div v-if="toast" class="ew-toast">{{ toast }}</div>
   </div>
 </template>
 
@@ -84,5 +102,20 @@ void frameRef
 }
 .ew-error {
   color: var(--c-red);
+}
+/* 独立窗口的最小 toast：底部居中浮层，样式对齐宿主主窗 toast 的口径（深底浅字 + 圆角 + 落影） */
+.ew-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 48px));
+  padding: 8px 14px;
+  border-radius: var(--radius-lg, 10px);
+  background: var(--frost-surface, rgba(28, 28, 30, 0.92));
+  color: var(--text-1);
+  font-size: 0.8125rem;
+  box-shadow: var(--shadow-card);
+  z-index: 50;
 }
 </style>

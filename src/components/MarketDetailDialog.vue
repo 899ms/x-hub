@@ -84,7 +84,7 @@ function openHomepage() {
 
 // ---- 安装前显式告知（无沙箱前提下的唯一承诺，见 ADR 0007 / PRD §7.2 ②） ----
 /** 高危能力：审核时逐项批准，需在安装前单独明示 */
-const HIGH_RISK_PERMISSIONS = new Set(['fs', 'network', 'system', 'clipboard'])
+const HIGH_RISK_PERMISSIONS = new Set(['fs', 'network', 'system', 'clipboard', 'open-url'])
 
 /** 权限 → 人话（清单里的 permissions 由服务端发布时从 manifest 写入） */
 const PERMISSION_LABELS: Record<string, string> = {
@@ -93,6 +93,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   fs: '读写你电脑上的文件',
   clipboard: '读取剪贴板内容',
   network: '连接网络',
+  'open-url': '用系统默认浏览器打开网页',
   system: '获取系统信息',
   notify: '弹出通知',
   events: '与其它扩展互通消息',

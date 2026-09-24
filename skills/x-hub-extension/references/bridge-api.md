@@ -10,7 +10,8 @@
 
 | 命名空间 | 权限 |
 |---|---|
-| `runtime.*`、`storage.*`、`config.*`、`theme.*`、`service.request`、`openExternal` | **无需权限** |
+| `runtime.*`（`openExternal` 除外）、`storage.*`、`config.*`、`theme.*`、`service.request` | **无需权限** |
+| `xhub.openExternal`（用默认浏览器开外链） | `open-url` |
 | `data.*` 读方法 | `data:read` |
 | `data.*` 写方法 | `data:write` |
 | `sharedStorage.*` | `shared-storage` |
@@ -30,7 +31,7 @@ await window.xhub.runtime.info()   // { id, name, version, runtime, serviceReady
 window.xhub.runtime.open(surface)  // 打开指定形态（view/window/drawer/module），无需权限
 await window.xhub.runtime.callExtension('com.x-hub.token-stats', 'getData', {})  // 调其它扩展暴露的方法
 
-// 用系统默认浏览器打开外链（无需权限，只放行 http/https）
+// 用系统默认浏览器打开外链（需 manifest 声明 "open-url" 权限；只放行 http/https）
 window.xhub.openExternal('https://example.com')
 // ⚠️ 扩展里**不要**用 target="_blank" 或 window.open 开外链：宿主用 Tauri/wry 承载 iframe，
 // wry 在宿主未注册新窗口处理器时对 WebView2 的 NewWindowRequested 直接 SetHandled(true) 拒绝，

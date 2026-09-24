@@ -51,8 +51,11 @@ pub struct Capability {
 
 /// 全部桥 API 能力表。新增能力只改这里 + 补 handler 函数。
 pub(crate) static CAPABILITIES: &[Capability] = &[
+    // 开外链用**窄权限 `open-url`**：`system` 只被 openExternal 用过，但它将来要留给
+    // `system.*`（openUrl/openPath/openApp），所以拆出一个语义准确的窄权限，
+    // 既避免作者为开个链接去要"系统级"权限，也避免以后 system 真扩权时收不回。
     Capability {
-        namespace: "runtime", method: "openExternal", permission: Some("system"),
+        namespace: "runtime", method: "openExternal", permission: Some("open-url"),
         handler: CapabilityHandler::Sync(runtime_open_external),
     },
     Capability {
@@ -2215,14 +2218,21 @@ mod tests {
     }
 
     #[test]
-    fn open_external_requires_system_permission() {
-        // 语义对齐：打开外链归「system：打开应用 / 网页 / 本地路径」，
-        // 不归「network：访问网络」——否则任何带 network 的扩展都能往默认浏览器弹任意 https 页面钓鱼。
+    fn open_external_requires_open_url_permission() {
+        // 语义对齐：打开外链归**窄权限 `open-url`**，不归「network：访问网络」
+        // （否则任何带 network 的扩展都能往默认浏览器弹任意 https 页面钓鱼），
+        // 也不归「system」（那会逼作者为开个链接去要系统级权限，且以后 system 扩权就收不回）。
         let cap = CAPABILITIES
             .iter()
             .find(|c| c.namespace == "runtime" && c.method == "openExternal")
             .expect("runtime.openExternal 必须在能力表中");
-        assert_eq!(cap.permission, Some("system"));
+        assert_eq!(cap.permission, Some("open-url"));
+        // 其余 runtime.* 仍然无需权限
+        let info = CAPABILITIES
+            .iter()
+            .find(|c| c.namespace == "runtime" && c.method == "info")
+            .expect("runtime.info 必须在能力表中");
+        assert_eq!(info.permission, None);
     }
 
     #[test]

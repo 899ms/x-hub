@@ -66,7 +66,24 @@ fn id_ok(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
-/// 扫描源码里的桥 API 调用，返回**完整标识符链**（如 `data.notes.create`）。
+/// `window.xhub` 上的**顶层方法**（JS 调用链只有一段）→ 运行时能力名（dispatch 的 namespace.method）。
+///
+/// 为什么需要这张表：`scan_bridge_calls` 只收「命名空间.方法」形态的链，而顶层方法的链只有一段
+/// （`window.xhub.openExternal(...)`），于是它**完全消失**在「能力是否实现 / 权限是否申报」两项对账之外——
+/// 运行时从 v0.6.6 起要求 `openExternal` 声明权限，预检却一直判"不需要"，正是这条漏检造成的。
+const TOP_LEVEL_METHODS: &[(&str, &str)] = &[("openExternal", "runtime.openExternal")];
+
+/// 从 `at` 起跳过空白后是否紧跟 `(`（即这是一次**调用**，不是属性访问）。
+fn is_call_at(bytes: &[u8], at: usize) -> bool {
+    let mut k = at;
+    while k < bytes.len() && (bytes[k] as char).is_whitespace() {
+        k += 1;
+    }
+    k < bytes.len() && bytes[k] == b'('
+}
+
+/// 扫描源码里的桥 API 调用，返回**完整标识符链**（如 `data.notes.create`）；
+/// 顶层方法换算成运行时能力名（如 `openExternal` → `runtime.openExternal`）。
 ///
 /// 必须取整条链：`xhub.data.notes.create(...)` 与 `xhub.data.notes.list(...)` 的命名空间相同，
 /// 只有**最后一段**才是方法名 —— 只取两段会把"写"误判成"读"（这个 bug 曾在预检与服务端关卡里同时存在）。
@@ -97,11 +114,18 @@ fn scan_bridge_calls(source: &str) -> Vec<String> {
             }
             break;
         }
-        // 只收「命名空间.方法」形态的真调用链：`window.xhub.storage`（属性访问，后面没有 `(`）
-        // 会扫出一个单段 `storage`，而能力表里是 `storage.get`/`storage.set` ——
-        // 于是被误报成「用到了宿主尚未实现的桥 API」。单段链不是 API 调用，跳过。
-        if j > start && source[start..j].contains('.') {
-            out.push(source[start..j].to_string());
+        if j > start {
+            let chain = &source[start..j];
+            if chain.contains('.') {
+                // 「命名空间.方法」形态：照收
+                out.push(chain.to_string());
+            } else if is_call_at(bytes, j) {
+                // 单段链：`window.xhub.storage` 这类属性访问（后面没有 `(`）不是调用，跳过；
+                // 而 `xhub.openExternal(...)` 是真调用，换算成能力名收进来（见 TOP_LEVEL_METHODS）
+                if let Some((_, cap)) = TOP_LEVEL_METHODS.iter().find(|(m, _)| *m == chain) {
+                    out.push((*cap).to_string());
+                }
+            }
         }
         i = j.max(i + 1);
     }
@@ -126,6 +150,12 @@ fn permission_for(ns: &str, method: &str) -> Option<&'static str> {
     const WRITE_PREFIXES: [&str; 8] = [
         "create", "update", "delete", "set", "toggle", "reorder", "import", "schedule",
     ];
+    // `openExternal` 是**顶层方法**（`window.xhub.openExternal(...)`，不是 `runtime.openExternal`），
+    // 由 `scan_bridge_calls` 按 `TOP_LEVEL_METHODS` 换算成能力名 `runtime.openExternal` 后落到这里。
+    // v0.6.6 把运行时改成需要权限却没同步这里与 gate.ts，于是按文档写的扩展预检能过、装上却点不动链接。
+    if ns == "runtime" && method == "openExternal" {
+        return Some("open-url");
+    }
     match ns {
         "data" => Some(if WRITE_PREFIXES.iter().any(|p| method.starts_with(p)) {
             "data:write"
@@ -358,6 +388,45 @@ mod tests {
     }
 
     #[test]
+    fn scans_top_level_open_external_as_capability() {
+        // 顶层方法（链只有一段）也必须进对账：openExternal → runtime.openExternal
+        assert_eq!(
+            scan_bridge_calls("window.xhub.openExternal('https://example.com')"),
+            vec!["runtime.openExternal".to_string()]
+        );
+        // 属性访问不是调用，仍不收（否则会被误报成「用到了宿主尚未实现的桥 API」）
+        assert!(scan_bridge_calls("const s = window.xhub.storage;").is_empty());
+        // 「命名空间.方法」形态不受影响
+        assert_eq!(
+            scan_bridge_calls("window.xhub.data.notes.list()"),
+            vec!["data.notes.list".to_string()]
+        );
+    }
+
+    #[test]
+    fn precheck_flags_missing_open_url_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"id":"com.example.link","name":"L","version":"1.0.0","entry":{"view":"./index.html"},"permissions":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.html"),
+            "<script>window.xhub.openExternal('https://example.com')</script>",
+        )
+        .unwrap();
+
+        let r = precheck(dir);
+        assert!(
+            !r.clean,
+            "用了 openExternal 却没申报 open-url 应当判为需要修：{:?}",
+            r.items
+        );
+    }
+
+    #[test]
     fn maps_namespaces_to_permissions() {
         // 方法名取链的最后一段：读 vs 写必须区分得开
         assert_eq!(permission_for("data", "list"), Some("data:read"));
@@ -367,6 +436,10 @@ mod tests {
         assert_eq!(permission_for("events", "emit"), Some("events"));
         assert_eq!(permission_for("events", "on"), None);
         assert_eq!(permission_for("storage", "set"), None);
+        // runtime 按方法区分：只有 openExternal 需要权限，其余 runtime.* 不需要
+        assert_eq!(permission_for("runtime", "openExternal"), Some("open-url"));
+        assert_eq!(permission_for("runtime", "info"), None);
+        assert_eq!(permission_for("runtime", "open"), None);
     }
 
     #[test]

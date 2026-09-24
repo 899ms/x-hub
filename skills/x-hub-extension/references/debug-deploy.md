@@ -57,7 +57,8 @@
 
 - `data.*` 中方法名以 `create/update/delete/set/toggle/reorder/import/schedule` 开头 → `data:write`，其余 → `data:read`
 - `ui.*` → `notify`｜`net.*` → `network`｜`system.*` → `system`｜`clipboard.*` → `clipboard`｜`fs.*` → `fs`｜`sharedStorage.*` → `shared-storage`｜`events.emit` → `events`
-- `runtime.*` / `storage.*` / `config.*` / `theme.*` / `service.*` / `expose` → 无需权限
+- **`xhub.openExternal(...)`（顶层方法）→ `open-url`**；其余 `runtime.*` 无需权限
+- `runtime.*`（`openExternal` 除外）/ `storage.*` / `config.*` / `theme.*` / `service.*` / `expose` → 无需权限
 
 ⚠️ 扫描是**纯文本匹配**，所以**注释、字符串、示例代码里写的 `xhub.data.notes.create(...)` 也会被算作「用到了」**——要么补声明，要么别在注释里写这种调用示例。
 

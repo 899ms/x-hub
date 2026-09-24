@@ -7,14 +7,14 @@
 | skill | 用途 |
 |---|---|
 | `x-hub-extension/` | 让助手**生成一个 x-hub 扩展**。以分步对话的方式陪用户走完「需求 → 运行时/形态/权限决策 → 生成 → 校验 → 交付」，规范细节按需从 `references/` 取用 |
-| `xhub.d.ts`（根目录与 skill 内各一份） | `window.xhub` 桥 API 的完整 **TypeScript 类型声明**——给编辑器用的（方法补全、参数提示、每个方法需要什么权限都写在注释里）。扩展本身**不需要 import 它** |
+| `x-hub-extension/xhub.d.ts` | `window.xhub` 桥 API 的完整 **TypeScript 类型声明**——给编辑器用的（方法补全、参数提示、每个方法需要什么权限都写在注释里）。扩展本身**不需要 import 它** |
 
 ### `x-hub-extension/` 内部结构
 
 ```
 x-hub-extension/
 ├── SKILL.md              # 入口：术语铁律 + 文件导航 + 分步引导流程 + 交付要求（小而全）
-├── xhub.d.ts             # 分发副本，保证整个 bundle 可独立复制
+├── xhub.d.ts             # 桥 API 类型声明（全仓唯一一份），保证整个 bundle 可独立复制
 ├── references/           # 按主题拆分的规范细节，助手按阶段按需读取
 │   ├── manifest.md       # manifest.json 全字段表 + 三种示例
 │   ├── bridge-api.md     # window.xhub 能力清单、权限对照、数据模型
@@ -32,7 +32,7 @@ x-hub-extension/
 
 **拆分原则**：`SKILL.md` 只放「助手每次都需要、且不读就会做错」的东西（流程 + 铁律 + 导航）；字段表、变量表、示例代码这些**只在特定阶段需要**的内容下沉到 `references/`，避免每次都把整本规范灌进上下文。
 
-**`xhub.d.ts` 有两份**：`skills/xhub.d.ts` 是仓库内的源，`skills/x-hub-extension/xhub.d.ts` 是随 bundle 分发的副本——**改动桥 API 时两份都要更新**（`Copy-Item .\xhub.d.ts .\x-hub-extension\xhub.d.ts -Force`）。
+**`xhub.d.ts` 只有一份**：`skills/x-hub-extension/xhub.d.ts`（随 bundle 分发）——它同时就是**单一真相源**，改桥 API 只改它。（仓库根曾另有一份 `skills/xhub.d.ts`，约定成「源」、bundle 内当「副本」，但实际没人读、也没人同步，已漂成 9/14 的旧快照，v0.6.6 的 `openExternal` 都没有；已删除。`src-tauri/build.rs` 只扫 `skills/x-hub-extension/`，那份从来没进过二进制。）
 
 ## 拿 `xhub.d.ts` 换编辑器补全
 
@@ -64,7 +64,7 @@ skill 是**自包含**的：不需要额外的脚手架仓库或工具，手写 
 
 这份 skill 会被复制到**只有装好的 x-hub 应用、没有宿主源码、也没有扩展源码仓库（`x-hub-extensions`）**的机器上使用。所以：
 
-- **不要写「见宿主源码 `src-tauri/src/xxx.rs`」或「见脚手架 `scripts/validate.mjs`」这类指路**——读者打不开那些文件，路标等于没有。
+- **不要写「见宿主源码 `src-tauri/src/xxx.rs`」或「见预检实现 `src-tauri/src/precheck.rs`」这类指路**——读者打不开那些文件，路标等于没有。
 - 维护者改 skill 时**应当**去核对宿主源码与扩展仓库（那是维护者独有的优势），但核对的结果要**落成 skill 里的明文**（字段表、格式硬规则、关卡清单），而不是留下一个源码路径。
 - 判断标准：**一条规则如果外部开发者不知道就会踩坑，它就必须写进 skill**。已经这样内联的有——`com.x-hub.*` 是平台保留命名空间、`version` 必须 `x.y.z` 三段纯数字、`id` 的字符集规则、权限会被**静态扫描对账**（用到没声明 = 发布 error）、发布关卡的完整清单。这几条都只存在于源码里，外部用户撞上时无从自查。
 - 反过来，**运行期能自己问出来的事不要硬编码**：桥 API 是否可用让扩展查 `runtime.info().capabilities` 比查文档表更可靠。

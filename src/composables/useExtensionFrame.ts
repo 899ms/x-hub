@@ -167,7 +167,14 @@ export function useExtensionFrame(
       const url = String(m.url ?? '')
       if (/^https?:\/\//i.test(url) && isTauri()) {
         tauriApi.xhubCall(getExtId(), 'runtime', 'openExternal', { url }).catch((err) => {
-          const { message } = parseXHubError(err)
+          const { code, message } = parseXHubError(err)
+          // **必须给可见提示**：以前这里只落日志，于是"点链接没反应"完全查不出原因。
+          // 最典型的触发：扩展没在 manifest 里声明 `open-url` 权限。
+          onError?.(
+            code === 'PERMISSION_DENIED'
+              ? '该扩展未声明 open-url 权限，无法打开外链'
+              : message,
+          )
           void tauriApi.logClientError({ message: '扩展外链打开失败', detail: `extId=${getExtId()} url=${url} | ${message}` })
         })
       }
