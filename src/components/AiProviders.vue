@@ -429,10 +429,19 @@ function collectAll(): ChatModelConfig[] {
 
 async function saveAll() {
   if (!isTauri() || saving.value) return
-  // 供应商名称约束：不能为空、不能重复（无模型的空卡片不参与校验）
+  // ① 每张供应商卡片都必须至少有一个模型。
+  // 关键：以前这类「填了名称/地址却忘了点获取模型」的卡片会被**静默丢弃**——
+  // 保存提示成功，实际什么都没配上；用户以为配好了，回到对话里却还是没模型可选。
+  for (const p of providers.value) {
+    if (p.models.length === 0) {
+      const label = p.providerName.trim() || p.baseUrl.trim() || '未命名供应商'
+      showToast(`供应商「${label}」还没有模型：填好 Base URL 与 API Key 后点「获取模型」勾选添加；不要这个供应商就点右上角删除`)
+      return
+    }
+  }
+  // ② 供应商名称约束：不能为空、不能重复
   const seen = new Set<string>()
   for (const p of providers.value) {
-    if (p.models.length === 0) continue
     const n = p.providerName.trim()
     if (!n) {
       showToast('供应商名称不能为空，请先填写')
@@ -444,8 +453,8 @@ async function saveAll() {
     }
     seen.add(n)
   }
-  // 一个模型都没有就不让保存：空配置会让 AI 对话里没有任何可选模型，
-  // 而「填了供应商名/地址却忘了点获取模型」正是最容易漏的一步（空卡片在上面那条循环里是直接跳过的）
+  // ③ 一个模型都没有也不让保存（一张卡片都没有、平台额度也没开）：
+  // 空配置会让 AI 对话里没有任何可选模型
   const all = collectAll()
   if (all.length === 0) {
     showToast('还没有可用的模型：填好 Base URL 与 API Key 后点「获取模型」勾选添加，或开启上方的「x-hub 平台免费额度」')
