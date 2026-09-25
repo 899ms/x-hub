@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.6.7"
+version = "0.7.0"
 description = "本地个人效率工作台"
 authors = ["you"]
 license = ""
@@ -18,10 +18,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-serde_json = "1.0"
+# preserve_order：发布时回写扩展 manifest.json 必须保持原键序（bump_manifest_in_dir），
+# 否则 serde_json 默认的 BTreeMap 会把键按字母重排，开发者的 manifest diff 一片狼藉
+serde_json = { version = "1.0", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.3", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2.11.3", features = ["protocol-asset", "tray-icon", "unstable"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-log = "2"
 tauri-plugin-global-shortcut = "2"
@@ -59,6 +61,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# WebView2 内存级别联动（webview_mem.rs）：与 tauri/wry 锁定的同版本，保证 COM
+# 类型同源可 cast（ICoreWebView2_19::SetMemoryUsageTargetLevel）
+webview2-com = "0.38.2"
+windows-core = "0.61"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"

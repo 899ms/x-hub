@@ -21,6 +21,16 @@ export default defineConfig({
     // 分包：速记编辑器依赖（Milkdown/ProseMirror/KaTeX）单独成 chunk——仅打开速记时按需加载，
     // 且这些库版本稳定，独立 chunk 可长期命中缓存
     rolldownOptions: {
+      // 多页入口（内存优化 P1/P2）：chrome / 悬浮球 / 通知窗三个常驻壳窗口走轻量
+      // 入口（chrome.html / ball.html / notice.html + src/light/*.ts），只挂自己的
+      // 组件、不加载完整 SPA 的活堆——隐藏窗口 renderer 从 ~100MB 降到 ~20-30MB。
+      // index.html 仍是主窗/对话/剪贴板/浮窗等完整 UI 的入口。
+      input: {
+        main: 'index.html',
+        chrome: 'chrome.html',
+        ball: 'ball.html',
+        notice: 'notice.html',
+      },
       output: {
         codeSplitting: {
           groups: [

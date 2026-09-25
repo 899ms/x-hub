@@ -935,7 +935,7 @@ fn resolve_paste_method(cfg: &str, target_hwnd: isize) -> &'static str {
 /// 恢复焦点 + 注入 Ctrl+V 依赖窗口激活/焦点时序，实际不可靠，
 /// 改为直接向主窗口 JS 派发内容、由其插回原输入框。
 fn is_main_window(app: &AppHandle, prev_hwnd: isize) -> bool {
-    app.get_webview_window("main")
+    crate::main_window(app)
         .and_then(|w| w.hwnd().ok())
         .map(|h| h.0 as isize == prev_hwnd)
         .unwrap_or(false)
@@ -1212,6 +1212,8 @@ pub fn init_overlay_window(app: &AppHandle) {
 
 /// 显示就绪的浮层：定位到鼠标附近 + 无激活显示 + 热键/钩子 + 通知页面刷新
 fn show_ready_overlay(win: &tauri::WebviewWindow, app: &AppHandle) {
+    // 先恢复内存级别再显示（webview_mem：Low 态缓存已吐，首帧前回 Normal）
+    crate::webview_mem::on_shown(app, CLIPBOARD_WINDOW_LABEL);
     // 每次唤起都重新定位到鼠标附近（窗口可能被拖走过、或显示器布局变化）
     if let Some((px, py)) = cursor_anchor_position() {
         let _ = win
@@ -1284,6 +1286,8 @@ fn hide_overlay_window(win: &tauri::WebviewWindow) {
     if let Ok(mut guard) = OVERLAY_HWND.lock() {
         *guard = None;
     }
+    // 隐藏后把常驻 renderer 的内存目标级别降到 Low（webview_mem，轮询兜底）
+    crate::webview_mem::on_hidden(win.app_handle(), win.label());
     #[cfg(target_os = "windows")]
     {
         if let Ok(hwnd) = win.hwnd() {

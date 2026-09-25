@@ -69,8 +69,12 @@ pub fn setup(app: &tauri::App) -> tauri::Result<()> {
 
     // 悬浮球右键菜单事件（fb- 前缀，见 build_menu / popup_context_menu）
     app.on_menu_event(|app, event| match event.id.as_ref() {
-        "fb-show" => show_window(app),
-        "fb-hide" => hide_window(app),
+        "fb-show" => {
+            show_window(app);
+        }
+        "fb-hide" => {
+            hide_window(app);
+        }
         "fb-quit" => {
             log::info!("悬浮球菜单退出，应用结束");
             app.exit(0);
@@ -90,29 +94,45 @@ pub fn popup_context_menu(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn show_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        MAIN_WINDOW_VISIBLE.store(true, Ordering::SeqCst);
-        crate::floating_ball::sync_with_main(app);
+pub fn show_window(app: &AppHandle) -> bool {
+    match crate::main_window(app) {
+        Some(window) => {
+            // 先恢复内存级别再显示（webview_mem：Low 态 renderer 缓存已吐，首帧前回 Normal）
+            crate::webview_mem::on_shown(app, "main");
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            MAIN_WINDOW_VISIBLE.store(true, Ordering::SeqCst);
+            crate::floating_ball::sync_with_main(app);
+            true
+        }
+        None => {
+            log::warn!("[主窗] show_window: 未找到主窗口");
+            false
+        }
     }
 }
 
-pub fn hide_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-        MAIN_WINDOW_VISIBLE.store(false, Ordering::SeqCst);
-        crate::floating_ball::sync_with_main(app);
+pub fn hide_window(app: &AppHandle) -> bool {
+    match crate::main_window(app) {
+        Some(window) => {
+            let _ = window.hide();
+            MAIN_WINDOW_VISIBLE.store(false, Ordering::SeqCst);
+            crate::webview_mem::on_hidden(app, "main");
+            crate::floating_ball::sync_with_main(app);
+            true
+        }
+        None => {
+            log::warn!("[主窗] hide_window: 未找到主窗口");
+            false
+        }
     }
 }
 
 /// 悬浮球双击主窗开关：主窗「开着」（自维护可见且未最小化）→ 隐藏；否则显示并聚焦。
 /// 与 toggle_window 的区别：被其他窗口盖住时也算「开着」，双击同样收起。
 pub fn toggle_main_window(app: &AppHandle) {
-    let minimized = app
-        .get_webview_window("main")
+    let minimized = crate::main_window(app)
         .and_then(|w| w.is_minimized().ok())
         .unwrap_or(false);
     if is_main_window_visible() && !minimized {
@@ -130,12 +150,13 @@ pub fn toggle_main_window(app: &AppHandle) {
 /// - 窗口可见且已聚焦 → 隐藏
 /// - 窗口可见但被其他窗口盖住（未聚焦）→ 提升到前台，不隐藏
 pub fn toggle_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = crate::main_window(app) {
         if !MAIN_WINDOW_VISIBLE.load(Ordering::SeqCst) {
             log::info!("[快捷键] toggle_window: 显示窗口");
             show_window(app);
         } else if window.is_minimized().unwrap_or(false) {
             log::info!("[快捷键] toggle_window: 取消最小化并聚焦");
+            crate::webview_mem::on_shown(app, "main");
             let _ = window.unminimize();
             let _ = window.set_focus();
             MAIN_WINDOW_VISIBLE.store(true, Ordering::SeqCst);

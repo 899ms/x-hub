@@ -8,6 +8,7 @@ import { LocateFixed, MapPin, Trash2 } from 'lucide-vue-next';
 import { isTauri, tauriApi } from '../../api/tauri';
 import AppSelect from '../AppSelect.vue';
 import AiProviders from '../AiProviders.vue';
+import SudaSubcategoryManager from './SudaSubcategoryManager.vue';
 import { useStore } from '../../stores/workbench';
 import { reportClientError } from '../../utils/error-report';
 
@@ -35,6 +36,22 @@ async function onChatPanelSideChange(value: string) {
 // AI 对话形态：独立小窗 / 主窗内嵌抽屉（互斥）。开关经后端专用命令落地建窗/隐窗
 const chatWindowMode = computed(() => !!store.state.config.chat_window_mode)
 
+// ---- 速达（网页打开方式 + 小类管理，ADR 0011 / 0012）----
+const SUDA_OPEN_MODE_OPTIONS = [
+  { value: 'panel', label: '内嵌面板（主窗口内）' },
+  { value: 'window', label: '独立浏览器窗口' },
+]
+const sudaWebOpenMode = computed(() =>
+  store.state.config.suda_web_open_mode === 'window' ? 'window' : 'panel',
+)
+function onSudaOpenModeChange(v: string | number) {
+  void store.setSudaWebOpenMode(v === 'window' ? 'window' : 'panel')
+}
+
+async function onToggleSudaPanelToolbar() {
+  await store.setSudaPanelToolbar(!store.state.config.suda_panel_toolbar)
+}
+
 async function onToggleChatWindowMode() {
   const next = !chatWindowMode.value
   try {
@@ -54,6 +71,14 @@ async function onToggleOnline() {
   const next = !store.state.config.online_enabled
   await store.setOnlineEnabled(next)
   showToast(next ? '已开启联网功能' : '已关闭联网功能')
+}
+
+// ---- 性能 / 内存 ----
+async function onToggleWebviewMem() {
+  if (!isTauri()) return
+  const next = !store.state.config.webview_mem_low_on_hide
+  await store.setWebviewMemLowOnHide(next)
+  showToast(next ? '已开启：隐藏窗口时释放内存' : '已关闭：隐藏窗口保持全量内存')
 }
 
 async function applyWeatherCity() {
@@ -218,6 +243,48 @@ onMounted(() => {
           <AiProviders />
         </section>
 
+        <section id="sv-sec-suda" class="sv-sec" aria-label="速达">
+          <h3 class="sv-sec-title">速达</h3>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">网页默认打开方式</span>
+              <span class="setting-desc">点击网页条目时的打开位置：内嵌面板在主窗口右侧视图打开（轻量、单页），独立浏览器窗口支持多标签与同地址复用；右键菜单可临时换另一种方式</span>
+            </div>
+            <AppSelect
+              :model-value="sudaWebOpenMode"
+              :options="SUDA_OPEN_MODE_OPTIONS"
+              aria-label="网页默认打开方式"
+              @update:model-value="onSudaOpenModeChange"
+            />
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">内嵌面板显示工具栏</span>
+              <span class="setting-desc">开启后内嵌面板顶部显示地址栏与前进/后退/刷新按钮；默认关闭，整个面板区域只显示网页（返回速达点左侧导航即可）</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.suda_panel_toolbar"
+              :class="{ on: store.state.config.suda_panel_toolbar }"
+              @click="onToggleSudaPanelToolbar"
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">小类管理</span>
+              <span class="setting-desc">大类（应用/网页/文件）下的二级归属，每条资源归入一个小类；行内改名、拖拽排序、点星标设默认，删除后条目自动改挂默认小类</span>
+            </div>
+          </div>
+          <SudaSubcategoryManager />
+        </section>
+
         <section id="sv-sec-clipboard" class="sv-sec" aria-label="剪贴板">
           <h3 class="sv-sec-title">剪贴板</h3>
 
@@ -356,6 +423,27 @@ onMounted(() => {
                 自动定位
               </button>
             </div>
+          </div>
+        </section>
+
+        <section id="sv-sec-mem" class="sv-sec" aria-label="性能">
+          <h3 class="sv-sec-title">性能</h3>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">隐藏窗口时降低内存占用</span>
+              <span class="setting-desc">对话窗、剪贴板、通知、速达浏览器等隐藏窗口常驻后台，开启后它们隐藏时把渲染进程内存尽量交还给系统、显示前自动恢复（脚本与消息照常运行）；关闭后窗口隐藏也保持全量内存</span>
+            </div>
+            <button
+              class="toggle"
+              role="switch"
+              type="button"
+              :aria-checked="store.state.config.webview_mem_low_on_hide"
+              :class="{ on: store.state.config.webview_mem_low_on_hide }"
+              @click="onToggleWebviewMem"
+            >
+              <span class="toggle-knob"></span>
+            </button>
           </div>
         </section>
 </template>

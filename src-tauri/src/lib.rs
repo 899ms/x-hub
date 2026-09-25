@@ -32,24 +32,31 @@ mod service;
 mod shortcut;
 pub mod signing;
 mod skills;
+mod suda_browser;
 mod sticky_window;
 mod sysmon;
 mod todo_reminder;
 mod todo_recurrence;
 mod tray;
 pub mod updater;
+mod webview_mem;
 mod win_taskbar;
 mod xhub_api;
 
-/// WebView2 附加浏览器参数（主窗/倒计时浮窗/便签浮窗必须完全一致，
-/// 同一 user data folder 下不同参数的环境创建会失败）。
+/// WebView2 附加浏览器参数（所有窗口必须完全一致——同一 user data folder 下
+/// 不同参数的环境创建会失败；tauri.conf.json 主窗的 additionalBrowserArgs 与此
+/// 逐字一致，webview_mem.rs 有守卫测试）。
 /// 保留 wry 默认的 --disable-features 前缀；曾带 --disable-background-timer-throttling
 /// （禁用后台定时器节流），已摘除：隐藏窗口里的 JS 定时器交还浏览器自动节流
 /// （钳到 ≥1s、长期隐藏降到每分钟 1 次）兜底，重量级轮询由 useAdaptivePolling
 /// 按可见性/聚焦自行门控。到点类「正事」（倒计时/待办提醒）在 Rust 原生线程，
 /// 不受此参数影响。
+/// 内存优化 P3 追加两项（微软 WebView2 资源优化指南推荐值）：
+/// - --js-flags=--scavenger_max_new_space_capacity_mb=8：压 V8 新生代堆上限，
+///   降低 JS 引擎常驻内存；若主窗/编辑器出现 GC 卡顿可放宽到 16–32
+/// - --disk-cache-size=33554432：磁盘缓存上限 32MB
 pub const ADDITIONAL_BROWSER_ARGS: &str =
-    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --js-flags=--scavenger_max_new_space_capacity_mb=8 --disk-cache-size=33554432";
 
 use commands::DbState;
 use rusqlite::Connection;
@@ -162,10 +169,20 @@ pub(crate) fn is_position_on_screen(x: f64, y: f64) -> bool {
     x >= -10000.0 && x <= 10000.0 && y >= -10000.0 && y <= 10000.0
 }
 
+/// 主窗句柄统一入口（ADR 0011 起必须走这里）：
+/// 主窗自「速达应用内打开网页」起内嵌了子 webview（suda-panel），tauri 的
+/// `get_webview_window` 内部校验 is_webview_window（窗口上所有 webview 的 label
+/// 必须都等于窗口 label），多 webview 窗口一律返回 None——按它找主窗会让托盘/
+/// 快捷键/悬浮球/关闭拦截/几何保存/浮窗定位全部静默失效（实测踩过）。
+/// `get_window` 按窗口注册表查 label，不受窗口上有几个 webview 影响。
+pub fn main_window(app: &tauri::AppHandle) -> Option<tauri::Window<tauri::Wry>> {
+    app.get_window("main")
+}
+
 /// 应用启动时恢复上次保存的窗口位置、尺寸与置顶状态
 fn restore_window_state(app: &tauri::App) {
     let config = config::load();
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = main_window(app.handle()) {
         let ws = &config.window;
         let _ = window.set_size(tauri::LogicalSize::new(ws.width, ws.height));
         if let (Some(x), Some(y)) = (ws.x, ws.y) {
@@ -189,7 +206,7 @@ fn restore_window_state(app: &tauri::App) {
 
 /// 保存窗口位置与尺寸到配置
 fn persist_window_state(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = main_window(app) {
         if window.is_minimized().unwrap_or(false) {
             return;
         }
@@ -221,6 +238,20 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(log::LevelFilter::Info)
+                // 插件默认时间戳取 now_utc（比本地慢 8 小时，曾让人把上午的日志读成凌晨）；
+                // 自带 timezone_strategy(UseLocal) 会把布局改成 [级别][target]，
+                // 这里复刻默认布局 [日期][时间][target][级别]，只换成本地时间
+                .format(|out, message, record| {
+                    let now = chrono::Local::now();
+                    out.finish(format_args!(
+                        "[{}][{}][{}][{}] {}",
+                        now.format("%Y-%m-%d"),
+                        now.format("%H:%M:%S"),
+                        record.target(),
+                        record.level(),
+                        message
+                    ))
+                })
                 .targets([
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
@@ -378,7 +409,7 @@ pub fn run() {
             let mut dark = config.theme_mode == "dark";
             if config.theme_mode == "system" {
                 dark = matches!(
-                    app.get_webview_window("main").and_then(|w| w.theme().ok()),
+                    main_window(app.handle()).and_then(|w| w.theme().ok()),
                     Some(tauri::Theme::Dark)
                 );
             }
@@ -387,8 +418,14 @@ pub fn run() {
             } else {
                 tauri::window::Color(236, 239, 246, 255) // --bg-page 亮色 #eceff6
             };
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = main_window(app.handle()) {
                 let _ = window.set_background_color(Some(bg));
+                // WebviewWindow::set_background_color 原本同时铺窗口与 webview 两侧底色，
+                // Window 版只铺窗口侧，这里补 webview 侧保持原行为（get_webview 按
+                // label 查 webview 表，多 webview 窗口不受影响）
+                if let Some(webview) = app.get_webview("main") {
+                    let _ = webview.set_background_color(Some(bg));
+                }
                 // 启动即前台：避免窗口偶尔出现在其他窗口后面；稍等再补一次焦点，
                 // 绕开 Windows 前台锁定的瞬时限制
                 let _ = window.set_focus();
@@ -445,8 +482,17 @@ pub fn run() {
             // AI 对话独立窗口（无条件预创建隐藏常驻，运行期绝不建窗，详见 chat_window.rs）
             chat_window::init(app.handle());
 
+            // 速达「应用内打开网页」：主窗内嵌面板 webview + 独立浏览器窗口池×1
+            // （全部页面收进 tab；无条件预创建隐藏常驻，运行期只 show/hide/navigate/set_bounds，见 suda_browser.rs）
+            suda_browser::init(app.handle());
+
+            // WebView2 内存级别联动（P0，webview_mem.rs）：窗口隐藏时把常驻 renderer
+            // 的内存目标级别设为 Low（弃缓存换页、脚本照常跑），显示前恢复 Normal。
+            // 快路径接在各显隐函数里，这里起的是 300ms 轮询纠偏兜底线程
+            webview_mem::init(app.handle());
+
             // 关闭事件：拦截默认关闭，改为隐藏至托盘
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = main_window(app.handle()) {
                 let app_handle = app.handle().clone();
                 let win_for_events = window.clone();
                 window.on_window_event(move |event| {
@@ -618,6 +664,34 @@ pub fn run() {
             chat_window::chat_window_set_pinned,
             chat_window::chat_window_save_mode,
             chat_window::chat_window_open_settings,
+            suda_browser::suda_browser_open,
+            suda_browser::suda_browser_open_url,
+            suda_browser::suda_browser_open_tab,
+            suda_browser::suda_browser_activate_tab,
+            suda_browser::suda_browser_close_tab,
+            suda_browser::suda_browser_close,
+            suda_browser::suda_browser_navigate,
+            suda_browser::suda_browser_back,
+            suda_browser::suda_browser_forward,
+            suda_browser::suda_browser_reload,
+            suda_browser::suda_browser_open_system,
+            suda_browser::suda_browser_chrome_height,
+            suda_browser::suda_browser_state,
+            suda_browser::suda_browser_slots,
+            suda_browser::suda_panel_show,
+            suda_browser::suda_panel_bounds,
+            suda_browser::suda_panel_hide,
+            suda_browser::suda_panel_navigate,
+            suda_browser::suda_panel_back,
+            suda_browser::suda_panel_forward,
+            suda_browser::suda_panel_reload,
+            commands::list_subcategories,
+            commands::create_subcategory,
+            commands::rename_subcategory,
+            commands::delete_subcategory,
+            commands::reorder_subcategories,
+            commands::set_default_subcategory,
+            commands::set_suda_web_open_mode,
             commands::get_app_info,
             commands::clipboard_list,
             commands::clipboard_copy,

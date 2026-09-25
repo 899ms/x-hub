@@ -2,6 +2,7 @@
 import { computed, defineAsyncComponent, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import TitleBar from '../components/TitleBar.vue'
+import SudaWebPanel from '../components/SudaWebPanel.vue'
 import TodoCard from '../components/TodoCard.vue'
 import TodoCalendarCard from '../components/TodoCalendarCard.vue'
 import Suda from '../components/Suda.vue'
@@ -9,6 +10,7 @@ import NoteList from '../components/NoteList.vue'
 import NotesOverviewCard from '../components/NotesOverviewCard.vue'
 import TodoOverviewCard from '../components/TodoOverviewCard.vue'
 import ResourcesOverviewCard from '../components/ResourcesOverviewCard.vue'
+import SudaCustomCard from '../components/SudaCustomCard.vue'
 import SysMonitorCard from '../components/SysMonitorCard.vue'
 import PromptBoxCard from '../components/PromptBoxCard.vue'
 import RecentBar from '../components/RecentBar.vue'
@@ -49,6 +51,7 @@ const SettingsView = defineAsyncComponent({
   delay: 0,
 })
 const PromptManageDialog = defineAsyncComponent(() => import('../components/PromptManageDialog.vue'))
+const SudaCustomEditDialog = defineAsyncComponent(() => import('../components/SudaCustomEditDialog.vue'))
 const ChatPanel = defineAsyncComponent(() => import('../components/ChatPanel.vue'))
 const ExtensionCenter = defineAsyncComponent(() => import('../components/ExtensionCenter.vue'))
 const ExtensionView = defineAsyncComponent(() => import('../components/ExtensionView.vue'))
@@ -123,7 +126,13 @@ const visibleNavigation = navigation.filter((item) => item.id !== 'chat')
 
 // 设置不在顶部导航列表，作为独立入口固定在侧栏左下角，但同样是视图切换逻辑
 // 自定义布局编辑器也是独立视图（从设置进入，完成后回主页面）
-type ViewId = (typeof navigation)[number]['id'] | 'settings' | 'layout-editor' | 'extensions' | 'extension'
+type ViewId =
+  | (typeof navigation)[number]['id']
+  | 'settings'
+  | 'layout-editor'
+  | 'extensions'
+  | 'extension'
+  | 'suda-web'
 const activeView = ref<ViewId>('dashboard')
 
 // 对话入口：点击侧栏「对话」即唤起右侧面板（面板是主形态，视图仅占位说明）
@@ -148,6 +157,37 @@ function onOpenExtension(ext: ExtensionEntry) {
   openedExtension.value = { id: ext.id, surface: null, name: ext.name }
   activeView.value = 'extension'
 }
+
+// ---- 速达「应用内打开网页」：主窗内嵌面板（ADR 0011） ----
+// store.launchResource 在网页条目 + panel 模式时派发 CustomEvent（store 不持有视图状态），
+// 这里切到 suda-web 视图渲染 SudaWebPanel（挂载时按内容区矩形调 suda_panel_show）
+const sudaWebPanel = ref<{ id: number; url: string; name: string } | null>(null)
+let viewBeforeSudaWeb: ViewId = 'suda'
+
+function openSudaWebPanel(detail: { id: number; url: string; name: string }) {
+  if (activeView.value !== 'suda-web') viewBeforeSudaWeb = activeView.value
+  sudaWebPanel.value = detail
+  activeView.value = 'suda-web'
+}
+
+function onSudaWebPanelEvent(e: Event) {
+  const detail = (e as CustomEvent<{ id: number; url: string; name: string }>).detail
+  if (detail && typeof detail.id === 'number') openSudaWebPanel(detail)
+}
+
+function closeSudaWebPanel() {
+  void tauriApi.sudaPanelHide().catch(() => {})
+  sudaWebPanel.value = null
+  activeView.value = viewBeforeSudaWeb
+}
+
+// 经侧栏等途径离开面板视图时也要收起子 webview（面板没有侧栏入口，回不去即应隐藏）
+watch(activeView, (now, prev) => {
+  if (prev === 'suda-web' && now !== 'suda-web') {
+    void tauriApi.sudaPanelHide().catch(() => {})
+    sudaWebPanel.value = null
+  }
+})
 
 async function refreshInstalledExtensions() {
   if (!isTauri()) return
@@ -276,6 +316,10 @@ const dashCardComponents: Record<string, Component> = {
   notes: NotesOverviewCard,
   todo_overview: TodoOverviewCard,
   resources: ResourcesOverviewCard,
+  suda1: SudaCustomCard,
+  suda2: SudaCustomCard,
+  suda3: SudaCustomCard,
+  suda4: SudaCustomCard,
   countdown: CountdownCard,
   prompts: PromptBoxCard,
   todo: TodoCard,
@@ -319,6 +363,17 @@ function dashCardProps(p: DashPlacement): Record<string, unknown> {
       return { onOpenDetail: openTodo, ...titleProps(p) }
     case 'resources':
       return { onOpenDetail: openSuda, ...titleProps(p) }
+    case 'suda1':
+    case 'suda2':
+    case 'suda3':
+    case 'suda4':
+      return {
+        slotId: id,
+        ...titleProps(p),
+        onConfigure: () => {
+          sudaCustomEditId.value = id
+        },
+      }
     case 'prompts':
       return { onOpenManage: openPromptManage, ...titleProps(p) }
     case 'todo':
@@ -392,6 +447,8 @@ onMounted(async () => {
   setTimeout(hideBootSplash, BOOT_MAX_MS)
   // 浮窗便签还原/删除后，主窗口实时同步便签与脱离状态
   if (isTauri()) {
+    // 速达网页内嵌面板打开请求（store.launchResource 派发，DOM 事件免视图状态跨层传递）
+    window.addEventListener('suda-open-web-panel', onSudaWebPanelEvent)
     /** 单条监听注册失败（桥未就绪等）不能中断启动流程：
      *  裸 await 的任一 reject 会让其后所有监听与抽屉还原都不再执行。 */
     const on = async <T,>(ev: string, cb: (e: { payload: T }) => void) => {
@@ -497,6 +554,7 @@ onUnmounted(() => {
   unlistenBallAction?.()
   unlistenOpenChatSettings?.()
   unlistenChatMode?.()
+  window.removeEventListener('suda-open-web-panel', onSudaWebPanelEvent)
   window.removeEventListener('keydown', onSearchKeydown)
   window.removeEventListener('keydown', onChatKeydown)
 })
@@ -551,6 +609,8 @@ function onSaveNote(id: number, title: string, content: string) {
 // ---- 全局搜索 / 设置 ----
 const searchVisible = ref(false)
 const promptManageVisible = ref(false)
+// 正在配置内容的工作台「自定义速达」槽位 id（suda1..suda4；null = 弹窗关闭）
+const sudaCustomEditId = ref<string | null>(null)
 const settingsSection = ref('')
 
 function onOpenTodo(t: Todo) {
@@ -854,6 +914,22 @@ provide('showToast', showToast)
           <Suda />
         </section>
 
+        <!-- 速达网页内嵌面板（ADR 0011）：工具栏是 DOM，内容区是预创建子 webview 的空白位 -->
+        <section
+          v-else-if="activeView === 'suda-web'"
+          class="view view-suda-web"
+          tabindex="-1"
+          aria-label="应用内浏览器"
+        >
+          <SudaWebPanel
+            v-if="sudaWebPanel"
+            :resource-id="sudaWebPanel.id"
+            :url="sudaWebPanel.url"
+            :name="sudaWebPanel.name"
+            @close="closeSudaWebPanel"
+          />
+        </section>
+
         <!-- 扩展中心：独立视图 -->
         <section v-else-if="activeView === 'extensions'" class="view view-extensions" tabindex="-1" aria-label="扩展中心">
           <ExtensionCenter
@@ -964,6 +1040,12 @@ provide('showToast', showToast)
     <PromptManageDialog
       :visible="promptManageVisible"
       @close="promptManageVisible = false"
+    />
+    <SudaCustomEditDialog
+      v-if="sudaCustomEditId"
+      :slot-id="sudaCustomEditId"
+      :visible="!!sudaCustomEditId"
+      @close="sudaCustomEditId = null"
     />
 
     <Transition name="toast">

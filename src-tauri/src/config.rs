@@ -37,6 +37,24 @@ impl Default for WindowState {
     }
 }
 
+/// 工作台「自定义速达」槽位的内容配置（槽位 id 固定为 suda1..suda4，同便签 1/2 的池子模式）。
+/// 纯前端读写（用户可编辑项，经 save_config 整体落盘），后端不解释字段含义。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SudaCustomModuleConfig {
+    /// 槽位 id：suda1 / suda2 / suda3 / suda4
+    #[serde(default)]
+    pub id: String,
+    /// 内容来源：pinned(手动挑选,顺序=resource_ids) / app / web / file(整个大类) / subcategory(指定小类)
+    #[serde(default)]
+    pub source: String,
+    /// source = subcategory 时的小类名（resources.category 口径）
+    #[serde(default)]
+    pub subcategory: String,
+    /// source = pinned 时的资源 id 序（勾选顺序即展示顺序；已删除的资源自动跳过）
+    #[serde(default)]
+    pub resource_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -83,6 +101,10 @@ pub struct AppConfig {
     /// 联网功能总开关（默认开启）：有网显示在线内容、无网自动隐藏；关闭后完全不发起网络请求
     #[serde(default = "default_true")]
     pub online_enabled: bool,
+    /// 隐藏窗口降低内存占用（默认开启）：窗口隐藏时把 WebView2 内存目标级别设为
+    /// Low（弃缓存换页、脚本照常运行），显示前恢复 Normal。见 webview_mem.rs
+    #[serde(default = "default_true")]
+    pub webview_mem_low_on_hide: bool,
     /// 天气城市展示名（空串 = 未配置，天气卡不显示）
     #[serde(default)]
     pub weather_city: String,
@@ -137,6 +159,16 @@ pub struct AppConfig {
     /// 粘贴快捷键方式：auto(自动检测终端) / ctrl_v / ctrl_shift_v / shift_insert
     #[serde(default = "default_paste_method")]
     pub clipboard_paste_method: String,
+    /// 速达网页条目默认打开方式：panel(主窗内嵌面板) / window(独立应用内浏览器窗口)
+    #[serde(default = "default_suda_web_open_mode")]
+    pub suda_web_open_mode: String,
+    /// 工作台「自定义速达」槽位内容配置（suda1..suda4，见 struct 注释）
+    #[serde(default)]
+    pub suda_custom_modules: Vec<SudaCustomModuleConfig>,
+    /// 速达内嵌面板是否显示工具栏（地址栏 + 前进/后退/刷新；默认不显示，
+    /// 隐藏时整个面板区域只渲染网页，返回速达走左侧导航）
+    #[serde(default)]
+    pub suda_panel_toolbar: bool,
     /// 记录剪贴板图片（复制图片时落盘快照进历史，默认开启）
     #[serde(default = "default_true")]
     pub clipboard_image_enabled: bool,
@@ -251,6 +283,11 @@ fn default_paste_method() -> String {
     "auto".to_string()
 }
 
+/// 速达网页默认打开方式：内嵌面板（ADR 0011 2026-09-25 拍板：默认落点 = 面板，可设置）
+fn default_suda_web_open_mode() -> String {
+    "panel".to_string()
+}
+
 /// 通知驻留时长默认 5 秒
 fn default_notice_duration_ms() -> i64 {
     5000
@@ -361,6 +398,7 @@ impl Default for AppConfig {
             clock_quote: String::new(),
             notice_duration_ms: default_notice_duration_ms(),
             online_enabled: true,
+            webview_mem_low_on_hide: true,
             weather_city: String::new(),
             weather_lat: 0.0,
             weather_lng: 0.0,
@@ -382,6 +420,9 @@ impl Default for AppConfig {
             clipboard_ttl_days: 7,
             clipboard_paused: false,
             clipboard_paste_method: "auto".to_string(),
+            suda_web_open_mode: "panel".to_string(),
+            suda_custom_modules: Vec::new(),
+            suda_panel_toolbar: false,
             clipboard_image_enabled: true,
             clipboard_file_enabled: true,
             font_scale: 1.0,

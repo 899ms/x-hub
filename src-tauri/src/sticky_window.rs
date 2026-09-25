@@ -15,7 +15,7 @@ pub fn window_label(slot: i64) -> String {
 /// 计算浮窗初始位置：主窗口中心附近错开一点（避免完全盖住来源卡）。
 /// 主窗口不可见或取不到位置时返回 None（交给系统默认位置）。
 fn initial_position(app: &AppHandle) -> Option<(f64, f64)> {
-    let main = app.get_webview_window("main")?;
+    let main = crate::main_window(app)?;
     if !main.is_visible().unwrap_or(false) {
         return None;
     }

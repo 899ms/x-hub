@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import {
   FilePlus,
@@ -8,11 +8,12 @@ import {
   Pencil,
   Plus,
   ScanSearch,
+  Star,
   Trash2,
   Wrench,
 } from 'lucide-vue-next'
 import { isTauri, tauriApi, type InstalledAppInfo, type InstalledBrowser, type Resource } from '../api/tauri'
-import { CATEGORIES, categorize } from '../utils/categories'
+import { categorize } from '../utils/categories'
 import { useStore } from '../stores/workbench'
 import { reportClientError } from '../utils/error-report'
 import { accentOf, fileAccentOf, iconSrc, useResourceIcon } from '../composables/useResourceIcon'
@@ -163,9 +164,35 @@ useAdaptivePolling(refreshRunning, {
 
 // ---- 分类筛选 ----
 type FilterKey = '全部' | '常用' | '应用' | '网页' | '文件'
+type SubFilter = 'all' | 'none' | string
 
 const activeFilter = ref<FilterKey>('全部')
-const activeCategory = ref<string | null>(null)
+/** 大类内的小类筛选：all=全部，none=未归类，其余为小类名（ADR 0012） */
+const activeSub = ref<SubFilter>('all')
+
+// 小类筛选行只在大类视图出现；应用/网页/文件各有自己的小类库（允许同名不同义）
+const SUB_KIND: Partial<Record<FilterKey, 'app' | 'web' | 'file'>> = {
+  应用: 'app',
+  网页: 'web',
+  文件: 'file',
+}
+
+const subTabs = computed(() => {
+  const kind = SUB_KIND[activeFilter.value]
+  if (!kind) return []
+  return store.subcategoriesOf(kind)
+})
+
+// 切大类时重置小类筛选：同名不同义，跨大类沿用旧名会筛出错误集合
+watch(activeFilter, () => {
+  activeSub.value = 'all'
+})
+
+function matchSub(r: Resource): boolean {
+  if (activeSub.value === 'all') return true
+  if (activeSub.value === 'none') return r.category == null
+  return r.category === activeSub.value
+}
 
 const visibleResources = computed<Resource[]>(() => {
   const all = store.state.resources
@@ -179,21 +206,18 @@ const visibleResources = computed<Resource[]>(() => {
           new Date(b.last_launched_at!).getTime() - new Date(a.last_launched_at!).getTime(),
       )
   }
-  if (activeFilter.value === '应用') return all.filter((r) => r.kind === 'app')
-  if (activeFilter.value === '网页') return all.filter((r) => r.kind === 'web')
-  return all.filter(
-    (r) =>
-      r.kind === 'file' &&
-      (activeCategory.value === null || r.category === activeCategory.value),
-  )
+  const kind = SUB_KIND[activeFilter.value]
+  if (kind) return all.filter((r) => r.kind === kind && matchSub(r))
+  return []
 })
 
 const FILTER_TABS: FilterKey[] = ['全部', '常用', '应用', '网页', '文件']
 
 const emptyTitle = computed(() => {
   if (activeFilter.value === '全部') return '还没有速达资源'
-  if (activeFilter.value === '文件' && activeCategory.value) {
-    return `暂无「${activeCategory.value}」分类资源`
+  if (activeSub.value === 'none') return `暂无未归类的${activeFilter.value}`
+  if (typeof activeSub.value === 'string' && activeSub.value !== 'all') {
+    return `暂无「${activeSub.value}」小类资源`
   }
   return `暂无「${activeFilter.value}」资源`
 })
@@ -292,24 +316,31 @@ async function onOpenWithBrowser(r: Resource, b: InstalledBrowser) {
   }
 }
 
+async function onOpenInWindow(r: Resource) {
+  try {
+    await store.openResourceInWindow(r.id)
+  } catch (e) {
+    showToast(String(e))
+  }
+}
+
 async function onResourceContext(e: MouseEvent, r: Resource) {
   e.preventDefault()
   const items: ContextMenuItem[] = [{ label: '打开', onClick: () => onOpen(r) }]
-  let hasBrowsers = false
+  let isWeb = false
   if (r.kind === 'web') {
+    isWeb = true
+    // 显式覆盖默认打开方式（默认方式见 设置 → 功能 → 速达）
+    items.push({ label: '在内嵌面板打开', dividerBefore: true, onClick: () => store.openWebPanel(r.id) })
+    items.push({ label: '在独立窗口打开', onClick: () => void onOpenInWindow(r) })
     const browsers = await installedBrowsers()
-    hasBrowsers = browsers.length > 0
-    for (const [i, b] of browsers.entries()) {
-      items.push({
-        label: `用 ${b.name} 打开`,
-        dividerBefore: i === 0,
-        onClick: () => void onOpenWithBrowser(r, b),
-      })
+    for (const b of browsers) {
+      items.push({ label: `用 ${b.name} 打开`, onClick: () => void onOpenWithBrowser(r, b) })
     }
   }
   items.push({
     label: '编辑',
-    dividerBefore: hasBrowsers,
+    dividerBefore: isWeb,
     onClick: () => {
       editing.value = r
       formVisible.value = true
@@ -394,8 +425,8 @@ async function onScanImported(apps: InstalledAppInfo[]) {
 // ---- 图标渲染（统一在 useResourceIcon composable） ----
 
 function kindLabel(r: Resource): string {
-  if (r.kind === 'file') return r.category ?? '文件'
-  return r.kind === 'app' ? '应用' : '网页'
+  // 有小类显示小类名（应用/网页/文件统一），否则回退大类名
+  return r.category ?? (r.kind === 'app' ? '应用' : r.kind === 'web' ? '网页' : '文件')
 }
 
 function cardAccentStyle(r: Resource) {
@@ -453,25 +484,40 @@ function cardAccentStyle(r: Resource) {
       </button>
     </nav>
 
-    <!-- 文件二级分类（仅文件视图） -->
-    <nav v-if="activeFilter === '文件'" class="filter-tabs suda-cat-tabs" aria-label="文件分类">
-      <button
-        class="filter-tab filter-tab--tag"
-        :class="{ active: activeCategory === null }"
-        @click="activeCategory = null"
-      >
-        全部文件
-      </button>
-      <button
-        v-for="c in CATEGORIES"
-        :key="c"
-        class="filter-tab filter-tab--tag"
-        :class="{ active: activeCategory === c }"
-        @click="activeCategory = c"
-      >
-        {{ c }}
-      </button>
-    </nav>
+<!-- 大类小类筛选（ADR 0012）：应用/网页/文件各有小类库；未归类=category 为空 -->
+<nav v-if="SUB_KIND[activeFilter]" class="filter-tabs suda-cat-tabs" aria-label="小类筛选">
+  <button
+    class="filter-tab filter-tab--tag"
+    :class="{ active: activeSub === 'all' }"
+    @click="activeSub = 'all'"
+  >
+    全部{{ activeFilter }}
+  </button>
+  <button
+    class="filter-tab filter-tab--tag"
+    :class="{ active: activeSub === 'none' }"
+    @click="activeSub = 'none'"
+  >
+    未归类
+  </button>
+  <button
+    v-for="s in subTabs"
+    :key="s.id"
+    class="filter-tab filter-tab--tag"
+    :class="{ active: activeSub === s.name }"
+    @click="activeSub = s.name"
+  >
+    <Star
+      v-if="s.is_default"
+      class="sub-default-star"
+      :size="10"
+      :stroke-width="2.4"
+      title="默认小类：新增资源未指定小类时自动归入；删除小类时条目也改挂到这里（在 设置 → 功能 → 小类管理 更换）"
+      aria-hidden="true"
+    />
+    {{ s.name }}
+  </button>
+</nav>
 
     <!-- 资源网格（5 列） -->
     <div class="suda-body">
@@ -668,6 +714,13 @@ function cardAccentStyle(r: Resource) {
   margin-bottom: 14px;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--border-soft);
+}
+/* 默认小类星标（含义见 tooltip，设置里可改默认）：置于小类名前；Tailwind preflight 把 svg 置为 block，必须恢复行内否则掉到文字下一行 */
+.sub-default-star {
+  display: inline-block;
+  vertical-align: -1px;
+  margin-right: 3px;
+  color: var(--c-yellow);
 }
 
 .suda-body {

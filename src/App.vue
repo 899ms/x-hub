@@ -1,6 +1,10 @@
 <script setup lang="ts">
-// 应用根壳：主窗口渲染完整首页；便签浮窗（sticky-*）、倒计时浮窗（countdown-*）与剪贴板浮层（clipboard）渲染独立小窗
-import { getCurrentWindow } from '@tauri-apps/api/window'
+// 应用根壳：主窗口渲染完整首页；便签浮窗（sticky-*）、倒计时浮窗（countdown-*)与剪贴板浮层（clipboard）渲染独立小窗
+// ⚠️ 路由必须用 webview label 而非 window label（getCurrentWindow().label）：速达独立浏览器
+// 的 chrome 页是池窗口（suda-web-{i}）的子 webview，窗口 label 是 suda-web-{i}、webview label
+// 才是 suda-web-{i}-chrome——用窗口 label 会匹配不上 chrome 正则，落到兜底把整个工作台
+// 渲染进浏览器窗口（实测踩过）。单 webview 窗口两类 label 恒等，统一用 webview label 无副作用。
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { listen } from '@tauri-apps/api/event'
 import { onBeforeUnmount, onMounted } from 'vue'
 import Index from './index/index.vue'
@@ -13,10 +17,11 @@ import TodoFloat from './components/TodoFloat.vue'
 import FloatingBallWindow from './components/FloatingBallWindow.vue'
 import ChatWindow from './components/ChatWindow.vue'
 import NoticeOverlay from './components/NoticeOverlay.vue'
+import BrowserChrome from './components/BrowserChrome.vue'
 import UpdateCheckDialog from './components/UpdateCheckDialog.vue'
 import { isTauri } from './api/tauri'
 
-const label = isTauri() ? getCurrentWindow().label : ''
+const label = isTauri() ? getCurrentWebview().label : ''
 const isMainWindow = label === 'main'
 const isStickyWindow = label.startsWith('sticky-')
 const isCountdownFloat = label.startsWith('countdown-')
@@ -27,6 +32,35 @@ const isTodoFloat = label === 'todo-float'
 const isFloatingBall = label === 'floating-ball'
 const isChatWindow = label === 'chat'
 const isNoticeWindow = label === 'notice'
+// 速达独立应用内浏览器（ADR 0011）：chrome webview 渲染顶栏；content webview 只加载
+// 外站页面，不会加载本 SPA，但万一误加载也渲染空白兜底（绝不能落到 Index 整窗 UI）
+const isSudaBrowserChrome = /^suda-web-\d+-chrome$/.test(label)
+const isSudaBrowserContent = /^suda-web-\d+-content$/.test(label)
+
+// 任务管理器身份：Win11 任务管理器的 WebView2 列表按「页面标题」命名各 renderer，
+// 这些窗口共用 index.html 时全部显示「个人效率工作台」分不清谁是谁——按 label
+// 设置 document.title。只改页面标题，不影响任务栏/Alt+Tab 的原生窗口标题
+// （那来自 tauri 侧的窗口 title，wry 不监听 DocumentTitleChanged）。
+// 悬浮球/通知/chrome 页走轻量入口，各自 html 里已带独立标题，不经这里。
+if (isTauri()) {
+  document.title = isMainWindow
+    ? 'x-hub 主窗'
+    : isChatWindow
+      ? 'x-hub 对话'
+      : isClipboardOverlay
+        ? 'x-hub 剪贴板'
+        : isPromptFloat
+          ? 'x-hub 提示词'
+          : isTodoFloat
+            ? 'x-hub 待办'
+            : isExtensionWindow
+              ? 'x-hub 扩展'
+              : isStickyWindow
+                ? 'x-hub 便签'
+                : isCountdownFloat
+                  ? 'x-hub 倒计时'
+                  : document.title
+}
 
 // 主窗口：记录最后聚焦的可编辑元素。剪贴板浮层粘贴到主窗口输入框时，
 // Rust 侧会派发 clipboard-paste-request（带内容），这里直接把内容插回原输入框。
@@ -140,6 +174,8 @@ onBeforeUnmount(() => {
   <FloatingBallWindow v-else-if="isFloatingBall" />
   <ChatWindow v-else-if="isChatWindow" />
   <NoticeOverlay v-else-if="isNoticeWindow" />
+  <BrowserChrome v-else-if="isSudaBrowserChrome" />
+  <div v-else-if="isSudaBrowserContent" class="suda-content-blank" />
   <Index v-else />
   <UpdateCheckDialog v-if="isMainWindow" />
 </template>

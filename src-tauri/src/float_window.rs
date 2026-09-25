@@ -7,7 +7,7 @@ pub const TODO_FLOAT_LABEL: &str = "todo-float";
 /// 计算浮窗初始位置：主窗口中心（向右下轻微偏移，与便签浮窗一致，避免完全盖住来源）。
 /// 主窗口不可见或取不到位置时返回 None（交给系统默认位置）。
 fn centered_position(app: &AppHandle, width: f64, height: f64) -> Option<(f64, f64)> {
-    let main = app.get_webview_window("main")?;
+    let main = crate::main_window(app)?;
     if !main.is_visible().unwrap_or(false) {
         return None;
     }

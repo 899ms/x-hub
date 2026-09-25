@@ -12,7 +12,8 @@
     "todo-float",
     "floating-ball",
     "chat",
-    "notice"
+    "notice",
+    "suda-web-*-chrome"
   ],
   "permissions": [
     "core:default",

@@ -305,6 +305,32 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    // 速达小类（ADR 0012）：大类（resources.kind）下单归属的小类库。
+    // 文件大类的 7 个内置 category 直接作为初始小类并入（名称与前端 utils/categories.ts
+    // 逐字一致），「其他」暂承接默认小类（细则待用户确认）；应用/网页初始为空、按需新建。
+    // INSERT OR IGNORE + UNIQUE(kind,name) 保证幂等，老库升级与新装库都只补缺、不覆盖。
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS resource_subcategories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL CHECK (kind IN ('app', 'web', 'file')),
+          name TEXT NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_default INTEGER NOT NULL DEFAULT 0,
+          UNIQUE (kind, name)
+        );
+
+        INSERT OR IGNORE INTO resource_subcategories (kind, name, sort_order, is_default) VALUES
+          ('file', '文件夹', 0, 0),
+          ('file', '文档', 1, 0),
+          ('file', '图片', 2, 0),
+          ('file', '视频', 3, 0),
+          ('file', '音频', 4, 0),
+          ('file', '压缩包', 5, 0),
+          ('file', '其他', 6, 1);
+        ",
+    )?;
+
     // 旧 chat_sessions 表缺 token 累计列：逐列补齐（ALTER TABLE ADD COLUMN 幂等）
     let chat_cols: Vec<String> = conn
         .prepare("PRAGMA table_info(chat_sessions)")?

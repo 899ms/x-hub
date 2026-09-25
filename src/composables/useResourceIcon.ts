@@ -55,6 +55,14 @@ export function iconSrc(icon: string): string {
   return isTauri() ? convertFileSrc(icon) : ''
 }
 
+/** 资源图标配色（文件按小类、其余按名称 hash）。ink/text 两套叫法在此归一为 ink，
+ * 独立导出，工作台自定义速达卡与缩印共用 */
+export function accentFor(r: Resource): { soft: string; strong: string; ink: string } {
+  if (r.kind === 'file') return fileAccentOf(r.category ?? '其他')
+  const a = accentOf(r.name)
+  return { soft: a.soft, strong: a.strong, ink: a.text }
+}
+
 export function useResourceIcon() {
   const failedIcons = ref(new Set<number>())
 
@@ -76,11 +84,6 @@ export function useResourceIcon() {
 
   function fileIconOf(r: Resource) {
     return CATEGORY_ICONS[(r.category ?? '其他') as keyof typeof CATEGORY_ICONS] ?? File
-  }
-
-  function accentFor(r: Resource) {
-    if (r.kind === 'file') return fileAccentOf(r.category ?? '其他')
-    return accentOf(r.name)
   }
 
   return {

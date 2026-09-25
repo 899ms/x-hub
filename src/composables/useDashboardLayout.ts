@@ -131,6 +131,32 @@ export const DASH_MODULES: DashModuleDef[] = [
     variants: [v('overview', '概览', 2, 1, 2, 2, '资源计数')],
   },
   {
+    // 自定义速达 1..4：固定槽位（同便签 1/2 池子模式），内容各自配置
+    // （手动挑选 / 整个大类 / 指定小类，存 AppConfig.suda_custom_modules，见 utils/sudaCustom.ts）
+    id: 'suda1',
+    title: '自定义速达 1',
+    defaultVariant: 'grid',
+    variants: [v('grid', '网格', 2, 2, 4, 3, '自定义快捷启动格')],
+  },
+  {
+    id: 'suda2',
+    title: '自定义速达 2',
+    defaultVariant: 'grid',
+    variants: [v('grid', '网格', 2, 2, 4, 3, '自定义快捷启动格')],
+  },
+  {
+    id: 'suda3',
+    title: '自定义速达 3',
+    defaultVariant: 'grid',
+    variants: [v('grid', '网格', 2, 2, 4, 3, '自定义快捷启动格')],
+  },
+  {
+    id: 'suda4',
+    title: '自定义速达 4',
+    defaultVariant: 'grid',
+    variants: [v('grid', '网格', 2, 2, 4, 3, '自定义快捷启动格')],
+  },
+  {
     id: 'countdown',
     title: '倒计时',
     defaultVariant: 'list',

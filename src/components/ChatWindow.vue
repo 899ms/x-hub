@@ -38,6 +38,7 @@ provide('showToast', showToast)
 
 let unlistenTheme: (() => void) | null = null
 let unlistenShown: (() => void) | null = null
+let unlistenHidden: (() => void) | null = null
 
 onMounted(async () => {
   if (!isTauri()) return
@@ -74,6 +75,11 @@ onMounted(async () => {
     panelRef.value?.refresh()
     panelRef.value?.focusInput()
   })
+  // 隐藏时卸载会话活堆（内存优化，ChatPanel.unload）：消息 DOM 随聊天增长，
+  // Low 内存级别吐不掉活数据；会话在 SQLite，唤起时 refresh() 重拉
+  unlistenHidden = await listen('chat-window-hidden', () => {
+    panelRef.value?.unload()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -82,6 +88,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', onWinMouseUp)
   unlistenTheme?.()
   unlistenShown?.()
+  unlistenHidden?.()
 })
 
 // ---- 标题栏：拖动（指针实际位移后才启动，避免点击误触发系统模态拖动） ----

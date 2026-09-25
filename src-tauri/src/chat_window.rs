@@ -130,7 +130,7 @@ fn schedule_persist(app: &AppHandle) {
 /// 主窗不可见或取不到几何时返回 None，交给系统默认级联位置。
 /// 入参为逻辑尺寸，返回物理 px 坐标（与 `set_position(PhysicalPosition)` 对齐）。
 fn initial_center(app: &AppHandle, width: f64, height: f64) -> Option<(i32, i32)> {
-    let main = app.get_webview_window("main")?;
+    let main = crate::main_window(app)?;
     if !main.is_visible().unwrap_or(false) {
         return None;
     }
@@ -243,6 +243,8 @@ pub fn show_window(app: &AppHandle) {
     if win.is_minimized().unwrap_or(false) {
         let _ = win.unminimize();
     }
+    // 先恢复内存级别再显示（webview_mem：Low 态缓存已吐，首帧前回 Normal）
+    crate::webview_mem::on_shown(app, LABEL);
     if !native_visible(&win) {
         let _ = win.show();
     }
@@ -258,6 +260,10 @@ pub fn hide_window(app: &AppHandle) {
     };
     if native_visible(&win) {
         let _ = win.hide();
+        crate::webview_mem::on_hidden(app, LABEL);
+        // 通知窗内页面卸载会话活堆（内存优化）：消息 DOM 随聊天增长，Low 吐不掉
+        // 活数据；会话在 SQLite，chat-window-shown 时 ChatPanel.refresh() 重拉
+        let _ = app.emit_to(LABEL, "chat-window-hidden", ());
         // 落盘投给后台线程：persist 含配置锁 + fsync，CloseRequested 回调在主线程上，
         // 同步等慢盘会有可感卡顿（窗口 hide 先行，几何在隐藏后读取不受影响）
         let handle = app.clone();

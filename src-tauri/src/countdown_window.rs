@@ -21,7 +21,7 @@ fn parse_id(label: &str) -> Option<i64> {
 
 /// 计算浮窗初始位置：主窗口中心附近偏移
 fn initial_position(app: &AppHandle) -> Option<(f64, f64)> {
-    let main = app.get_webview_window("main")?;
+    let main = crate::main_window(app)?;
     if !main.is_visible().unwrap_or(false) {
         return None;
     }

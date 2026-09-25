@@ -639,7 +639,8 @@ fn ensure_window(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     }
     let mut builder =
-        tauri::WebviewWindowBuilder::new(app, LABEL, tauri::WebviewUrl::App("index.html".into()))
+        // 轻量入口 ball.html（P2）：只渲染球体，不加载完整 SPA（内存优化，见 src/light/ball.ts）
+        tauri::WebviewWindowBuilder::new(app, LABEL, tauri::WebviewUrl::App("ball.html".into()))
             .title("悬浮球")
             .inner_size(BALL_SIZE, BALL_SIZE)
             .resizable(false)
@@ -739,12 +740,14 @@ pub fn sync_with_main(app: &AppHandle) {
             apply_geometry(&win, false, None);
             // 显示后必须重新摘掉任务栏按钮（tao 每次 VISIBLE 变化都会重建 ex-style，
             // 把 WS_EX_APPWINDOW 加回来——见 win_taskbar 模块注释）
+            crate::webview_mem::on_shown(app, LABEL);
             crate::win_taskbar::show(&win);
             // 通知页面复位菜单态（几何已在上面收拢）
             use tauri::Emitter;
             let _ = app.emit_to(LABEL, "floating-ball-shown", ());
         } else {
             let _ = win.hide();
+            crate::webview_mem::on_hidden(app, LABEL);
         }
     }
     #[cfg(not(target_os = "windows"))]

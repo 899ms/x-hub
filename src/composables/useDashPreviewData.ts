@@ -11,7 +11,8 @@ import {
   isoKey,
   type DueBadge,
 } from '../utils/todoSchedule'
-import type { Countdown, Note, Resource } from '../api/tauri'
+import { sudaCustomConfigured, sudaCustomItems } from '../utils/sudaCustom'
+import type { Countdown, Note, Resource, SudaCustomModuleConfig } from '../api/tauri'
 
 /**
  * 布局编辑器预览的共享派生数据。
@@ -256,6 +257,18 @@ const recentList = computed<Resource[]>(() =>
     .slice(0, 20),
 )
 
+// ---- 自定义速达槽位（suda1..4）----
+// 槽位数据按 modId 各不相同，做不成模块级共享 computed；这里只提供取数函数，
+// 过滤/排序唯一实现在 utils/sudaCustom.ts（真卡同源），响应式由调用方的 computed 追踪。
+function sudaCustomOf(modId: string): {
+  cfg: SudaCustomModuleConfig | undefined
+  items: Resource[]
+  configured: boolean
+} {
+  const cfg = store.sudaCustomConfigOf(modId)
+  return { cfg, items: sudaCustomItems(cfg, store.state.resources), configured: sudaCustomConfigured(cfg) }
+}
+
 export const dashPreviewData = {
   previewDate,
   previewMinuteTick,
@@ -293,4 +306,5 @@ export const dashPreviewData = {
   pendingCount,
   doneCount,
   recentList,
+  sudaCustomOf,
 }

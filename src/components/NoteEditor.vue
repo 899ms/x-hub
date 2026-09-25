@@ -60,6 +60,9 @@ let mounting = false
 /** 挂载期间又切换了笔记：完成后需按最新笔记重挂一次（否则编辑器停留旧内容、防抖保存会跨笔记污染） */
 let remountQueued = false
 let detachBlockDrag: (() => void) | null = null
+/** 图片监听解绑函数（attachImageListeners 内赋值）。声明必须留在下方 immediate watch 之前：
+ * 源码/分屏模式下首挂载的 immediate 回调会经 destroyEditor 调到它，后置声明触发 TDZ（约定 38 时序陷阱②） */
+let detachImageListeners: () => void = () => {}
 
 const localTitle = ref('')
 const localContent = ref('')
@@ -663,8 +666,6 @@ function onTitleInput() {
 // ratio 沿用 Crepe 的序列化通道（markdown 图片 alt，如 ![0.75](url)），跨会话持久化。
 
 const IMAGE_BLOCK_HANDLE_PX = 26 // 右下角把手命中区边长（与 CSS 视觉一致）
-
-let detachImageListeners: () => void = () => {}
 
 /** 监听图片 load（不冒泡，用捕获）与点击/拖拽把手，随编辑器挂载/销毁配对 */
 function attachImageListeners() {

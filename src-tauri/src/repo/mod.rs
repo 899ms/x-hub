@@ -6,6 +6,7 @@ pub mod note;
 pub mod resource;
 pub mod snippet;
 pub mod sticky;
+pub mod subcategory;
 pub mod tag;
 pub mod todo;
 pub mod todo_tag;

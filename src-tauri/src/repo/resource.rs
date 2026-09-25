@@ -17,7 +17,19 @@ pub fn create(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM resources), ?7, ?7)",
         params![kind_to_str(&kind), name, target, category, icon, args, ts],
     )?;
-    get(conn, conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    // ADR 0012 决策 3：新建未指定小类 → 自动归入该大类的默认小类；
+    // 该大类还没有任何小类时保持 NULL（「未归类」）。编辑时显式置 NULL 不走这里。
+    if category.is_none() {
+        let kind_str = kind_to_str(&kind);
+        if let Some(default_cat) = super::subcategory::default_name(conn, &kind_str)? {
+            conn.execute(
+                "UPDATE resources SET category = ?1 WHERE id = ?2",
+                params![default_cat, id],
+            )?;
+        }
+    }
+    get(conn, id)
 }
 
 pub fn get(conn: &Connection, id: i64) -> Result<Resource> {

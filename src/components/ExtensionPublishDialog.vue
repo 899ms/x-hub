@@ -25,6 +25,10 @@ useFocusTrap(visible, cardRef)
 const changelog = ref('')
 const homepage = ref('')
 const minAppVersion = ref('')
+/** 「发布版本」输入框：非空 = 提交时先把该版本写回扩展的 manifest.json 再打包；留空 = 按 manifest 当前版本发布（重提同一版的路径） */
+const newVersion = ref('')
+/** 本会话跟踪的当前 manifest 版本：props.extension 在提交后是旧值（列表要等 5s stamp 轮询才刷新），提交成功后用 result.version 就地更新 */
+const currentVersion = ref('')
 const submitting = ref(false)
 const result = ref<SubmitResult | null>(null)
 const errorText = ref('')
@@ -137,6 +141,40 @@ function checkSubmittable(): boolean {
     return false
   }
   return true
+}
+
+// ---- 发布版本：写回 manifest 的本地校验（与 Rust bump_manifest_in_dir 同口径） ----
+
+/** x.y.z 三段纯数字（与服务端关卡同口径，1.0.0-beta / 1.2 不合法）；返回 null = 不合法 */
+function parseXyz(v: string): [number, number, number] | null {
+  if (!/^\d+\.\d+\.\d+$/.test(v)) return null
+  const parts = v.split('.')
+  // 拒绝前导零（01.2.3），与 Rust 端 semver 解析口径一致
+  if (parts.some((p) => p.length > 1 && p.startsWith('0'))) return null
+  return [Number(parts[0]), Number(parts[1]), Number(parts[2])]
+}
+
+/** 建议的下一版本（补丁号 +1）；当前版本不是规范 x.y.z 时返回空（留空按当前版本发布） */
+function suggestNextVersion(v: string): string {
+  const p = parseXyz(v)
+  return p ? `${p[0]}.${p[1]}.${p[2] + 1}` : ''
+}
+
+/** 错误文案；null = 通过（含留空：留空是合法路径，按 manifest 当前版本发布） */
+function validateNewVersion(): string | null {
+  const v = newVersion.value.trim()
+  if (!v) return null
+  const p = parseXyz(v)
+  if (!p) return `版本号必须是 x.y.z 三段纯数字（如 0.2.1），当前填的是「${v}」`
+  const c = parseXyz(currentVersion.value)
+  if (c) {
+    const greater =
+      p[0] > c[0] ||
+      (p[0] === c[0] && p[1] > c[1]) ||
+      (p[0] === c[0] && p[1] === c[1] && p[2] > c[2])
+    if (!greater) return `新版本 ${v} 必须大于当前 manifest 版本 ${currentVersion.value}`
+  }
+  return null
 }
 
 // 「我的提交」里被指引的那一行：短暂高亮（配合说明里的可点行动）
@@ -322,6 +360,12 @@ async function submit() {
   // 阻塞判定可能基于几分钟前拉到的列表/配额，提交前再跟服务端核一次（失败不拦，交给服务端兜底）
   await loadAllSubmissions()
   if (!checkSubmittable()) return
+  // 版本号的本地校验放在配额之后：错误就地显示，别等上传完了才被 Rust 打回
+  const versionError = validateNewVersion()
+  if (versionError) {
+    errorText.value = versionError
+    return
+  }
   submitting.value = true
   result.value = null
   errorText.value = ''
@@ -332,8 +376,14 @@ async function submit() {
       minAppVersion.value.trim(),
       homepage.value.trim(),
       screenshots.value,
+      newVersion.value.trim() || undefined,
     )
     quota.value = result.value.quota ?? quota.value
+    // 版本已随提交落盘：就地跟进当前版本（props.extension 是旧值，列表要等 stamp 轮询刷新），
+    // 并预填下一版——「关卡挂了 → 改完源码 → 再点发布」的循环一击直达，不用手填
+    currentVersion.value = result.value.version
+    const next = suggestNextVersion(result.value.version)
+    if (next) newVersion.value = next
     // 提交后刷新：新记录要立刻出现在列表里（它现在也是一条「待处理」）
     await loadAllSubmissions()
   } catch (e) {
@@ -383,6 +433,9 @@ function initDialog() {
   changelog.value = ''
   homepage.value = ''
   minAppVersion.value = ''
+  currentVersion.value = props.extension?.version ?? ''
+  // 预填建议的下一版（补丁号 +1）：改完扩展直接点「打包并发布」，不必再去扩展目录手改版本号
+  newVersion.value = suggestNextVersion(currentVersion.value)
   precheck.value = null
   showDraftDetail.value = false
   submissions.value = []
@@ -423,7 +476,7 @@ onBeforeUnmount(() => {
           <div>
             <h2 class="dialog-title">发布「{{ extension?.name }}」</h2>
             <p class="pub-sub">
-              {{ extension?.id }} · v{{ extension?.version }} ·
+              {{ extension?.id }} · v{{ currentVersion || extension?.version }} ·
               {{ extension?.source === 'dev' ? '开发中（源码直挂）' : '已安装' }}
             </p>
           </div>
@@ -435,7 +488,8 @@ onBeforeUnmount(() => {
         <div class="pub-body">
           <p class="pub-hint">
             打包在本机完成（不含 <code>node_modules</code> 与隐藏文件），上传后由平台跑关卡与人工审核。
-            版本号取自扩展的 manifest。
+            「发布版本」会自动写回扩展的 manifest.json 再打包（须大于当前版本
+            v{{ currentVersion || extension?.version }}），留空则按 manifest 当前版本发布。
           </p>
 
           <!-- 本地预检：只列需要修的问题（ok 项不刷屏），服务端关卡才是最终结论 -->
@@ -463,6 +517,10 @@ onBeforeUnmount(() => {
           </label>
 
           <div class="pub-row">
+            <label class="pub-field pub-field-sm">
+              <span>发布版本</span>
+              <input v-model="newVersion" placeholder="留空 = 按当前版本发布" />
+            </label>
             <label class="pub-field pub-field-sm">
               <span>宿主最低版本</span>
               <input v-model="minAppVersion" placeholder="如 0.5.5" />

@@ -33,9 +33,10 @@ import {
   Sun,
   Timer,
 } from 'lucide-vue-next'
-import { accentOf, iconSrc, isImageIcon, CATEGORY_ICONS } from '../composables/useResourceIcon'
+import { accentFor, accentOf, iconSrc, isImageIcon, CATEGORY_ICONS } from '../composables/useResourceIcon'
 import { dashModuleTitle } from '../composables/useDashboardLayout'
 import { dashPreviewData } from '../composables/useDashPreviewData'
+import { SUDA_CUSTOM_IDS } from '../utils/sudaCustom'
 import { calendarGrid } from '../utils/todoSchedule'
 import type { Resource } from '../api/tauri'
 
@@ -100,6 +101,7 @@ const {
   pendingCount,
   doneCount,
   recentList,
+  sudaCustomOf,
 } = dashPreviewData
 
 // ---- 天气图标映射（与 ClockCard / WeatherCard 同一分支表）----
@@ -154,6 +156,20 @@ function fileIconOf(r: Resource) {
   return CATEGORY_ICONS[(r.category ?? '其他') as keyof typeof CATEGORY_ICONS] ?? FileIcon
 }
 
+// ---- 自定义速达槽位（suda1..4）：取数走 dashPreviewData.sudaCustomOf（过滤/排序与真卡共用
+// utils/sudaCustom 单一实现）；缩印软上限 24 项防超大 DOM——真卡列表可滚动，缩印保持
+// overflow hidden 裁切（裁切本身即「格子不够大」的诚实信号，约定 27）----
+const sudaCustom = computed(() => {
+  const { cfg, items, configured } = sudaCustomOf(props.modId)
+  return { cfg, items: items.slice(0, 24), total: items.length, configured }
+})
+function sudaAccent(r: Resource) {
+  return accentFor(r)
+}
+function sudaImg(r: Resource): string {
+  return r.icon && isImageIcon(r.icon) && !failedIcons.value.has(r.id) ? iconSrc(r.icon) : ''
+}
+
 // ---- 模块分发 ----
 const stickySlot = computed(() => (props.modId === 'sticky2' ? 2 : 1))
 // 缩印里的模块名：一律取模块注册表标题（扩展 = manifest.name），不要用 ext: 后面的 id
@@ -167,6 +183,7 @@ const kind = computed(() => {
   const id = props.modId
   if (id.startsWith('ext:')) return 'ext'
   if (id === 'sticky1' || id === 'sticky2') return 'sticky'
+  if ((SUDA_CUSTOM_IDS as readonly string[]).includes(id)) return 'sudaCustom'
   return id
 })
 </script>
@@ -495,6 +512,40 @@ const kind = computed(() => {
       <div v-else class="empty">
         <p class="empty-title">暂无最近使用</p>
         <p class="empty-sub">启动过的项目会出现在这里</p>
+      </div>
+    </template>
+
+    <!-- ===== 自定义速达（suda1..4）：快捷启动网格，结构/尺寸照抄真卡 SudaCustomCard ===== -->
+    <template v-else-if="kind === 'sudaCustom'">
+      <header class="hd hd-split" :class="{ 'hd-float': hideTitle }">
+        <h3 v-if="!hideTitle" class="hd-title"><Boxes class="ic" /><span>{{ title ?? '自定义速达' }}</span></h3>
+        <span class="hd-btn"><Settings2 class="ic" /></span>
+      </header>
+      <div v-if="sudaCustom.configured && sudaCustom.items.length" class="scc-grid">
+        <div v-for="r in sudaCustom.items" :key="r.id" class="scc-item">
+          <span class="scc-icon" :style="{ background: sudaAccent(r).soft }">
+            <img v-if="sudaImg(r)" :src="sudaImg(r)" class="scc-img" alt="" @error="failedIcons.add(r.id)" />
+            <Globe v-else-if="r.kind === 'web'" class="scc-lg" style="color: var(--c-green-ink)" />
+            <component
+              :is="fileIconOf(r)"
+              v-else-if="r.kind === 'file'"
+              class="scc-lg"
+              :style="{ color: sudaAccent(r).strong }"
+            />
+            <span v-else class="scc-letter" :style="{ color: sudaAccent(r).ink }">{{
+              r.name.charAt(0).toUpperCase()
+            }}</span>
+          </span>
+          <span class="scc-name">{{ r.name }}</span>
+        </div>
+      </div>
+      <div v-else-if="sudaCustom.configured" class="empty">
+        <p class="empty-title">这个来源还没有资源</p>
+        <p class="empty-sub">先在速达里添加，或点设置换个来源</p>
+      </div>
+      <div v-else class="empty">
+        <p class="empty-title">还没配置内容</p>
+        <p class="empty-sub">点卡片右上角设置，挑选内容放进来</p>
       </div>
     </template>
 
@@ -1526,5 +1577,58 @@ html[data-theme='dark'] .dpv {
   border-radius: var(--radius-pill);
   background: var(--bg-card-soft);
   display: block;
+}
+
+/* ---- 自定义速达缩印：结构/尺寸照抄真卡 SudaCustomCard（56px 列宽、34px 图标、11px 名称、6px 间距）---- */
+.scc-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(calc(56 * var(--u)), 1fr));
+  gap: calc(6 * var(--u));
+  align-content: start;
+  overflow: hidden;
+}
+.scc-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(4 * var(--u));
+  padding: calc(6 * var(--u)) calc(2 * var(--u));
+  border-radius: calc(8 * var(--u));
+  min-width: 0;
+}
+.scc-icon {
+  width: calc(34 * var(--u));
+  height: calc(34 * var(--u));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: calc(8 * var(--u));
+  overflow: hidden;
+  flex: none;
+}
+.scc-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.scc-lg {
+  width: calc(18 * var(--u));
+  height: calc(18 * var(--u));
+}
+.scc-letter {
+  font-size: calc(15 * var(--u));
+  font-weight: 700;
+  line-height: 1;
+}
+.scc-name {
+  max-width: 100%;
+  font-size: calc(11 * var(--u));
+  line-height: 1.2;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

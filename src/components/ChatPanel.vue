@@ -607,9 +607,25 @@ defineExpose({
   refreshModels: () => {
     void loadModels()
   },
-  /** 独立窗口唤起时重新拉会话与模型（期间主窗可能新建会话/改动模型配置） */
+  /** 独立窗口唤起时重新拉会话与模型（期间主窗可能新建会话/改动模型配置）；
+   * 隐藏期间 unload() 卸过消息的话，这里把当前会话的消息拉回来 */
   refresh: () => {
-    void Promise.all([loadSessions(), loadModels()])
+    void (async () => {
+      await Promise.all([loadSessions(), loadModels()])
+      if (activeSessionId.value) await openSession(activeSessionId.value)
+    })()
+  },
+  /** 独立窗口隐藏时卸载会话活堆（内存优化）：Low 只吐缓存吐不掉活堆，而消息
+   * DOM + markdown 渲染缓存正是随聊天增长的活数据（隐藏后仍占几十 MB）。
+   * 会话与消息都在 SQLite，唤起时 refresh() 重拉只要几十毫秒。
+   * 流式进行中跳过——等这轮结束后下次隐藏再卸。 */
+  unload: () => {
+    if (sending.value) return
+    messages.value = []
+    streamingContent.value = ''
+    streamHtml.value = ''
+    streamError.value = ''
+    mdCache.clear()
   },
   focusInput,
 })

@@ -23,6 +23,17 @@ pub struct Resource {
     pub updated_at: String,
 }
 
+/// 速达小类（ADR 0012）：大类（resources.kind）下单归属的小类，单归属、非多选标签。
+/// 各大类一套小类库，允许同名不同义；存量资源 category 为 NULL =「未归类」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceSubcategory {
+    pub id: i64,
+    pub kind: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub is_default: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
     pub id: i64,

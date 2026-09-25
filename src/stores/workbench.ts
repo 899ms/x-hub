@@ -12,6 +12,8 @@ import {
   type Note,
   type Quote,
   type Resource,
+  type ResourceSubcategory,
+  type SudaCustomModuleConfig,
   type Snippet,
   type Sticky,
   type SystemInfo,
@@ -45,6 +47,8 @@ interface StoreState {
   todoTags: TodoTag[]
   /** 待办-标签关联（前端构建筛选映射用） */
   todoTagLinks: TodoTagLink[]
+  /** 速达小类定义（ADR 0012：各大类一套、单归属；category 为 null = 未归类） */
+  resourceSubcategories: ResourceSubcategory[]
   config: AppConfig
   systemInfo: SystemInfo | null
   online: boolean
@@ -64,6 +68,7 @@ const state = reactive<StoreState>({
   tags: [],
   todoTags: [],
   todoTagLinks: [],
+  resourceSubcategories: [],
   config: {
     theme_mode: 'light',
     theme_preset: 'indigo',
@@ -88,6 +93,7 @@ const state = reactive<StoreState>({
     clock_quote: '',
     notice_duration_ms: 5000,
     online_enabled: true,
+    webview_mem_low_on_hide: true,
     weather_city: '',
     weather_lat: 0,
     weather_lng: 0,
@@ -109,6 +115,9 @@ const state = reactive<StoreState>({
     clipboard_ttl_days: 7,
     clipboard_paused: false,
     clipboard_paste_method: 'auto',
+    suda_web_open_mode: 'panel',
+    suda_custom_modules: [],
+    suda_panel_toolbar: false,
     clipboard_image_enabled: true,
     clipboard_file_enabled: true,
     font_scale: 1,
@@ -166,6 +175,8 @@ export function useStore() {
     state.loaded = true
     // 待办标签与关联单独拉（不进 get_initial_data：老库/老版本兼容面更小）
     void refreshTodoTags()
+    // 速达小类单独拉（同上）
+    void refreshSubcategories()
   }
 
   // ---- 提示词百宝箱 ----
@@ -313,9 +324,30 @@ export function useStore() {
     if (isTauri()) await tauriApi.reorderResources(ids)
   }
 
+  /**
+   * 打开资源。网页条目按 `suda_web_open_mode` 分流（ADR 0011）：
+   * - panel → 派发 CustomEvent 交 index.vue 切到内嵌面板视图（store 不持有视图状态；
+   *   最近使用由 suda_panel_show 在后端写）
+   * - window → 独立应用内浏览器窗口池（后端 suda_browser_open 写最近使用）
+   * 应用/文件维持系统路径 launch_resource。
+   */
   async function launchResource(id: number) {
-    await tauriApi.launchResource(id)
     const r = state.resources.find((x) => x.id === id)
+    if (r && r.kind === 'web' && isTauri()) {
+      if (state.config.suda_web_open_mode === 'window') {
+        await tauriApi.sudaBrowserOpen(id)
+        r.last_launched_at = new Date().toISOString()
+        return
+      }
+      window.dispatchEvent(
+        new CustomEvent('suda-open-web-panel', { detail: { id, url: r.target, name: r.name } }),
+      )
+      // 与 window 分支同口径：后端 suda_panel_show 落库，这里同步本地时间戳，
+      // 否则「常用」/最近使用要等下次刷新才重排
+      r.last_launched_at = new Date().toISOString()
+      return
+    }
+    await tauriApi.launchResource(id)
     if (r) r.last_launched_at = new Date().toISOString()
   }
 
@@ -324,6 +356,119 @@ export function useStore() {
     await tauriApi.openUrlWithBrowser(id, browserExe)
     const r = state.resources.find((x) => x.id === id)
     if (r) r.last_launched_at = new Date().toISOString()
+  }
+
+  // ---- 速达小类（ADR 0012）----
+  async function refreshSubcategories() {
+    if (!isTauri()) return
+    state.resourceSubcategories = await tauriApi.listSubcategories()
+  }
+
+  function subcategoriesOf(kind: 'app' | 'web' | 'file'): ResourceSubcategory[] {
+    return state.resourceSubcategories.filter((s) => s.kind === kind)
+  }
+
+  /** 大类的默认小类名：is_default 优先，否则排序最前；该大类还没有小类时 null（未归类） */
+  function defaultSubcategoryName(kind: 'app' | 'web' | 'file'): string | null {
+    const subs = subcategoriesOf(kind)
+    if (!subs.length) return null
+    return (subs.find((s) => s.is_default) ?? subs[0]).name
+  }
+
+  async function addSubcategory(kind: 'app' | 'web' | 'file', name: string) {
+    const sub = await tauriApi.createSubcategory(kind, name)
+    state.resourceSubcategories.push(sub)
+    return sub
+  }
+
+  /** 改名级联：后端单事务同步资源条目，本地按同口径推演 */
+  async function editSubcategory(id: number, name: string) {
+    await tauriApi.renameSubcategory(id, name)
+    const sub = state.resourceSubcategories.find((s) => s.id === id)
+    if (!sub) return
+    const old = sub.name
+    sub.name = name
+    for (const r of state.resources) {
+      if (r.kind === sub.kind && r.category === old) r.category = name
+    }
+  }
+
+  /** 删除小类：条目改挂默认小类（删默认时按排序最前晋升，与后端口径一致）；删空回未归类 */
+  async function removeSubcategory(id: number) {
+    const sub = state.resourceSubcategories.find((s) => s.id === id)
+    await tauriApi.deleteSubcategory(id)
+    state.resourceSubcategories = state.resourceSubcategories.filter((s) => s.id !== id)
+    if (!sub) return
+    const subs = subcategoriesOf(sub.kind)
+    const fallback = subs.find((s) => s.is_default) ?? subs[0] ?? null
+    for (const r of state.resources) {
+      if (r.kind === sub.kind && r.category === sub.name) {
+        r.category = fallback ? fallback.name : null
+      }
+    }
+  }
+
+  async function reorderSubcategories(kind: 'app' | 'web' | 'file', ids: number[]) {
+    const rank = new Map(ids.map((id, i) => [id, i]))
+    state.resourceSubcategories = state.resourceSubcategories
+      .map((s) => (s.kind === kind ? { ...s, sort_order: rank.get(s.id) ?? s.sort_order } : s))
+      .sort((a, b) => a.sort_order - b.sort_order)
+    if (isTauri()) await tauriApi.reorderSubcategories(kind, ids)
+  }
+
+  async function setDefaultSubcategory(id: number) {
+    await tauriApi.setDefaultSubcategory(id)
+    const target = state.resourceSubcategories.find((s) => s.id === id)
+    if (!target) return
+    for (const s of state.resourceSubcategories) {
+      if (s.kind === target.kind) s.is_default = s.id === id
+    }
+  }
+
+  /** 网页默认打开方式（ADR 0011：panel=内嵌面板 / window=独立窗口） */
+  async function setSudaWebOpenMode(mode: 'panel' | 'window') {
+    state.config.suda_web_open_mode = mode
+    if (!isTauri()) return
+    // 专属命令自带校验 + 配置锁落盘，不必再 saveConfig 整体写一遍（双写已去）
+    await tauriApi.setSudaWebOpenMode(mode)
+  }
+
+  /** 显式以独立应用内浏览器窗口打开网页资源（右键菜单，绕过默认打开方式） */
+  async function openResourceInWindow(id: number) {
+    await tauriApi.sudaBrowserOpen(id)
+    const r = state.resources.find((x) => x.id === id)
+    if (r) r.last_launched_at = new Date().toISOString()
+  }
+
+  /** 显式以内嵌面板打开网页资源（与 launchResource 的 panel 分流同一条事件通道） */
+  function openWebPanel(id: number) {
+    const r = state.resources.find((x) => x.id === id)
+    if (!r || r.kind !== 'web') return
+    window.dispatchEvent(
+      new CustomEvent('suda-open-web-panel', { detail: { id, url: r.target, name: r.name } }),
+    )
+  }
+
+  /** 工作台「自定义速达」槽位内容配置（suda1..suda4）：未配置过返回 undefined */
+  function sudaCustomConfigOf(id: string): SudaCustomModuleConfig | undefined {
+    return state.config.suda_custom_modules?.find((m) => m.id === id)
+  }
+
+  /** 保存「自定义速达」槽位配置（upsert；用户可编辑项，随 config 整体落盘） */
+  async function saveSudaCustomModule(cfg: SudaCustomModuleConfig) {
+    const list = state.config.suda_custom_modules
+    const i = list.findIndex((m) => m.id === cfg.id)
+    if (i >= 0) list[i] = cfg
+    else list.push(cfg)
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+  }
+
+  /** 内嵌面板工具栏显隐（默认不显示；隐藏时整个面板区域只渲染网页） */
+  async function setSudaPanelToolbar(v: boolean) {
+    state.config.suda_panel_toolbar = v
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
   }
 
   // ---- 笔记 ----
@@ -1223,6 +1368,13 @@ export function useStore() {
     }
   }
 
+  /** 隐藏窗口降低内存占用（webview_mem：隐藏 Low / 显示 Normal） */
+  async function setWebviewMemLowOnHide(value: boolean) {
+    state.config.webview_mem_low_on_hide = value
+    if (!isTauri()) return
+    await tauriApi.saveConfig(state.config)
+  }
+
   /** 应用自动升级总开关 */
   async function setAutoUpdateEnabled(value: boolean) {
     state.config.auto_update_enabled = value
@@ -1307,6 +1459,20 @@ export function useStore() {
     reorderResources,
     launchResource,
     openResourceInBrowser,
+    refreshSubcategories,
+    subcategoriesOf,
+    defaultSubcategoryName,
+    addSubcategory,
+    editSubcategory,
+    removeSubcategory,
+    reorderSubcategories,
+    setDefaultSubcategory,
+    setSudaWebOpenMode,
+    openResourceInWindow,
+    openWebPanel,
+    sudaCustomConfigOf,
+    saveSudaCustomModule,
+    setSudaPanelToolbar,
     addNote,
     saveNote,
     removeNote,
@@ -1392,6 +1558,7 @@ export function useStore() {
     refreshWeather,
     refreshQuote,
     setOnlineEnabled,
+    setWebviewMemLowOnHide,
     setAutoUpdateEnabled,
     setQuoteSource,
     setWeatherCity,

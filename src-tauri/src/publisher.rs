@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cmp::Ordering;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -57,6 +58,51 @@ fn pack_to_temp(app: &tauri::AppHandle, id: &str) -> Result<(std::path::PathBuf,
     let out = std::env::temp_dir().join(format!("xhpack-{}-{}.xhpack", sanitize(id), nanos()));
     let (pack_id, version, _size, _sha) = crate::market::pack_dir_to_archive(&dir, &out)?;
     Ok((out, pack_id, version))
+}
+
+/// 发布版本号校验：`x.y.z` 三段纯数字（与服务端关卡同口径，`1.0.0-beta` / `1.2` 这类不合法），
+/// 且须能被 semver 解析（拒绝 `01.2.3` 这类前导零，保证 manifest 里始终是规范 semver，
+/// 后续 version_cmp 走 semver 路径而不是数字回退）。
+fn validate_new_version(v: &str) -> Result<(), String> {
+    let parts: Vec<&str> = v.split('.').collect();
+    let shape_ok = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if !shape_ok || semver::Version::parse(v).is_err() {
+        return Err(format!("版本号必须是 x.y.z 三段纯数字（如 0.2.1），当前填的是「{v}」"));
+    }
+    Ok(())
+}
+
+/// 把新版本号写回扩展目录的 manifest.json（发布弹窗「发布版本」的落盘动作），返回写回前的旧版本。
+///
+/// - 只改顶层 `version` 字段：serde_json 开了 `preserve_order`（见 Cargo.toml），键序保持原样，
+///   开发者眼里的 diff 只有版本那一行；其余字段（含嵌套对象里碰巧也叫 version 的键）一律不动。
+/// - 必须严格大于当前版本（`version_cmp`，semver 语义）——服务端关卡要求版本递增。
+/// - 原子落盘：先写 `.` 开头的临时文件再改名覆盖——`pack_dir_to_archive` 排除 `.` 开头项、
+///   `dev_extensions_stamp` 的目录树哈希也跳过它们，写一半崩溃既不会把半截文件打进包，也不触发热重载。
+pub fn bump_manifest_in_dir(dir: &Path, new_version: &str) -> Result<String, String> {
+    validate_new_version(new_version)?;
+    let current = crate::extension::read_manifest(dir)?.version;
+    if crate::market::version_cmp(new_version, &current) != Ordering::Greater {
+        return Err(format!("新版本 {new_version} 必须大于当前 manifest 版本 {current}"));
+    }
+    let path = dir.join("manifest.json");
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("IO_ERROR: 读取 manifest.json 失败 {e}"))?;
+    let mut value: Value = serde_json::from_str(&raw).map_err(|e| format!("manifest 解析失败：{e}"))?;
+    match value.get_mut("version") {
+        Some(Value::String(s)) => *s = new_version.to_string(),
+        _ => return Err("manifest.json 缺少 version 字符串字段".into()),
+    }
+    let mut out = serde_json::to_string_pretty(&value).map_err(|e| format!("manifest 序列化失败 {e}"))?;
+    if raw.ends_with('\n') {
+        out.push('\n');
+    }
+    let tmp = dir.join(".manifest.json.bump-tmp");
+    std::fs::write(&tmp, out).map_err(|e| format!("IO_ERROR: 写入 manifest 失败 {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("IO_ERROR: 替换 manifest.json 失败 {e}"))?;
+    Ok(current)
 }
 
 /// 上传打包产物：multipart（package 文件 + 展示字段），返回服务端结论
@@ -126,7 +172,7 @@ async fn upload(
     serde_json::from_str(&text).map_err(|e| format!("INTERNAL: 响应解析失败 {e}"))
 }
 
-/// 发布当前开发中的扩展（打包 → 上传 → 返回关卡结论）
+/// 发布当前开发中的扩展（可选先回写新版本号 → 打包 → 上传 → 返回关卡结论）
 #[tauri::command]
 pub async fn dev_submit(
     app: tauri::AppHandle,
@@ -135,9 +181,19 @@ pub async fn dev_submit(
     min_app_version: Option<String>,
     homepage: Option<String>,
     screenshots: Option<Vec<String>>,
+    // 发布弹窗「发布版本」：非空时先把该版本写回 manifest.json 再打包（须大于当前版本）——
+    // 包内 manifest 带上新版本号，服务端的版本递增关卡才认。空 = 按 manifest 当前版本发布。
+    new_version: Option<String>,
 ) -> Result<SubmitResult, String> {
     let token = crate::account::session_token().ok_or("UNAUTHORIZED: 请先在「设置 → 账号」登录")?;
     let base = crate::account::base_url();
+
+    // 先落盘再打包：打包读的就是 manifest.json，顺序反了包里还是旧版本
+    if let Some(v) = new_version.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let dir = crate::ext_protocol::resolve_ext_dir(&app, &id)?;
+        let old = bump_manifest_in_dir(&dir, v)?;
+        log::info!("发布版本回写: {id} {old} -> {v}");
+    }
 
     let (pkg, pack_id, version) = pack_to_temp(&app, &id)?;
     log::info!("发布打包完成: {pack_id} v{version} -> {}", pkg.display());
@@ -445,5 +501,67 @@ mod tests {
             raw.contains("filename=\"shot1.png\"") && raw.contains("filename=\"shot2.png\""),
             "截图文件名应随请求发出"
         );
+    }
+
+    /// 最小 manifest：键序故意非字母序，且嵌套对象里放一个同名 version 键——
+    /// 回写只许动顶层 version，其余字段与键序必须原样保留。
+    fn write_bump_fixture(dir: &Path, version: &str) {
+        let raw = format!(
+            r#"{{
+  "name": "示例扩展",
+  "version": "{version}",
+  "id": "com.example.dev",
+  "config": {{
+    "version": "internal-marker"
+  }}
+}}
+"#
+        );
+        std::fs::write(dir.join("manifest.json"), raw).unwrap();
+    }
+
+    #[test]
+    fn bump_writes_new_version_preserving_order_and_nested_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        write_bump_fixture(dir.path(), "0.1.0");
+
+        let old = bump_manifest_in_dir(dir.path(), "0.2.0").unwrap();
+        assert_eq!(old, "0.1.0");
+
+        let raw = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["version"], "0.2.0");
+        // 嵌套对象里碰巧同名的键不能被误改
+        assert_eq!(v["config"]["version"], "internal-marker");
+        // 键序保持原样（serde_json preserve_order），开发者的 diff 只有 version 一行
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["name", "version", "id", "config"]);
+        // 末尾换行风格保留；临时文件不残留
+        assert!(raw.ends_with('\n'));
+        assert!(!dir.path().join(".manifest.json.bump-tmp").exists());
+        // 类型化读取（与服务端关卡同一读取口径）拿到新版本
+        let m = crate::extension::read_manifest(dir.path()).unwrap();
+        assert_eq!(m.version, "0.2.0");
+    }
+
+    #[test]
+    fn bump_rejects_non_greater_or_malformed_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        write_bump_fixture(dir.path(), "0.2.0");
+
+        // 相同 / 更小 / 非法格式（非 x.y.z、prerelease、缺段、前导零、带 v 前缀、空串）
+        for bad in ["0.2.0", "0.1.9", "1.0.0-beta", "1.2", "v1.0.1", "01.2.4", ""] {
+            let err = bump_manifest_in_dir(dir.path(), bad).unwrap_err();
+            assert!(!err.is_empty(), "应拒绝「{bad}」");
+        }
+        // 拒绝后 manifest 原样未动
+        let m = crate::extension::read_manifest(dir.path()).unwrap();
+        assert_eq!(m.version, "0.2.0");
+    }
+
+    #[test]
+    fn bump_rejects_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(bump_manifest_in_dir(dir.path(), "1.0.0").is_err());
     }
 }

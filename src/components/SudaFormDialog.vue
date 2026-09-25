@@ -3,10 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { FolderOpen, ImagePlus, Link } from 'lucide-vue-next'
 import { isTauri, tauriApi, type Resource } from '../api/tauri'
-import { CATEGORIES, categorize } from '../utils/categories'
+import { categorize } from '../utils/categories'
 import AppSelect from './AppSelect.vue'
 import { useFocusTrap } from '../composables/useFocusTrap'
+import { useStore } from '../stores/workbench'
 import { deriveFaviconUrl, joinWebTarget, splitWebTarget, type WebScheme } from '../utils/web'
+
+const store = useStore()
 
 const props = defineProps<{
   visible: boolean
@@ -47,7 +50,8 @@ const WEB_SCHEME_OPTIONS: { value: WebScheme; label: string }[] = [
 ]
 const args = ref('')
 const icon = ref('')
-const category = ref<string>(CATEGORIES[0])
+/** 小类名；null = 编辑时「未归类」/ 新建时跟随默认小类（后端自动归入） */
+const category = ref<string | null>(null)
 const isDir = ref(false)
 const error = ref('')
 const cardRef = ref<HTMLElement | null>(null)
@@ -56,6 +60,14 @@ const nameInputRef = ref<HTMLInputElement | null>(null)
 useFocusTrap(toRef(props, 'visible'), cardRef, nameInputRef)
 
 const isEdit = computed(() => props.editing !== null)
+
+/** 当前大类的小类库名单（各大类一套、允许同名不同义） */
+const kindOptions = computed(() => store.subcategoriesOf(kind.value).map((s) => s.name))
+
+/** 新建/切换大类时的缺省小类 = 该大类默认小类（还没有小类库时为 null → 未归类） */
+function defaultCategoryFor(k: 'app' | 'web' | 'file'): string | null {
+  return store.defaultSubcategoryName(k)
+}
 
 const isExtractedIcon = computed(() => /\.(png|jpg|jpeg|ico|gif|webp)$/i.test(icon.value))
 const targetLabel = computed(() => {
@@ -92,7 +104,7 @@ watch(
       }
       args.value = props.editing.args ?? ''
       icon.value = props.editing.icon ?? ''
-      category.value = props.editing.category ?? '其他'
+      category.value = props.editing.category ?? null
       isDir.value = props.editing.category === '文件夹'
     } else {
       kind.value = 'app'
@@ -100,7 +112,7 @@ watch(
       target.value = ''
       args.value = ''
       icon.value = ''
-      category.value = '其他'
+      category.value = defaultCategoryFor('app')
       isDir.value = false
       webScheme.value = 'https'
       if (props.prefill) {
@@ -115,7 +127,7 @@ watch(
           target.value = props.prefill.target ?? ''
           icon.value = props.prefill.icon ?? ''
         }
-        category.value = props.prefill.category ?? '其他'
+        category.value = props.prefill.category ?? defaultCategoryFor(kind.value)
         isDir.value = props.prefill.isDir ?? false
       }
     }
@@ -207,7 +219,8 @@ function submit() {
     kind: kind.value,
     name: trimmedName,
     target: trimmedTarget,
-    category: kind.value === 'file' ? category.value : null,
+    // 新建传 null = 后端自动归默认小类；编辑传 null = 显式未归类
+    category: category.value,
     icon: icon.value.trim() || null,
     args: kind.value === 'app' ? (args.value.trim() || null) : null,
   })
@@ -225,6 +238,8 @@ function normalizeWebTarget() {
 
 function onKindChange(nextKind: 'app' | 'web' | 'file') {
   kind.value = nextKind
+  // 小类归属随大类切换重置为该大类的默认小类（小类库各大类独立）
+  category.value = defaultCategoryFor(nextKind)
   if (nextKind === 'web' && target.value.trim() && !icon.value.trim()) normalizeWebTarget()
 }
 
@@ -387,12 +402,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             </div>
           </template>
 
-          <!-- 分类（仅 file） -->
-          <template v-if="kind === 'file'">
-            <label class="field-label">分类</label>
+          <!-- 小类（ADR 0012）：各大类一套小类库；编辑时可选「未归类」清空归属 -->
+          <template v-if="kindOptions.length">
+            <label class="field-label">小类</label>
             <div class="cat-pills">
               <button
-                v-for="c in CATEGORIES"
+                v-if="isEdit"
+                class="cat-pill"
+                :class="{ active: category === null }"
+                @click="category = null"
+              >
+                未归类
+              </button>
+              <button
+                v-for="c in kindOptions"
                 :key="c"
                 class="cat-pill"
                 :class="{ active: category === c }"
@@ -401,11 +424,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 {{ c }}
               </button>
             </div>
+          </template>
+          <template v-else>
+            <label class="field-label">小类</label>
             <p class="link-hint">
-              <Link :size="12" :stroke-width="2" class="link-hint-icon" aria-hidden="true" />
-              仅创建链接，源文件保留在原位置
+              该大类还没有小类，可到 设置 → 功能 → 速达 中新增；当前将显示为「未归类」
             </p>
           </template>
+          <p v-if="kind === 'file'" class="link-hint">
+            <Link :size="12" :stroke-width="2" class="link-hint-icon" aria-hidden="true" />
+            仅创建链接，源文件保留在原位置
+          </p>
 
           <p v-if="error" class="form-error">{{ error }}</p>
 

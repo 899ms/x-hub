@@ -14,12 +14,54 @@ export interface Resource {
   updated_at: string
 }
 
+/** 工作台「自定义速达」槽位内容配置（槽位 id 固定 suda1..suda4，同便签 1/2 池子模式） */
+export interface SudaCustomModuleConfig {
+  id: string
+  /** 内容来源：pinned(手动挑选,顺序=resource_ids) / app / web / file(整个大类) / subcategory(指定小类) */
+  source: 'pinned' | 'app' | 'web' | 'file' | 'subcategory'
+  /** source = subcategory 时的小类名（resources.category 口径） */
+  subcategory: string
+  /** source = pinned 时的资源 id 序（勾选顺序即展示顺序；已删除的资源自动跳过） */
+  resource_ids: number[]
+}
+
 /** 本机已安装浏览器（list_installed_browsers，注册表 StartMenuInternet 枚举） */
 export interface InstalledBrowser {
   /** 显示名（如 Google Chrome / Microsoft Edge） */
   name: string
   /** 浏览器 exe 绝对路径 */
   exe: string
+}
+
+/** 速达小类（ADR 0012）：大类（kind）下单归属的小类，各大类一套、允许同名不同义 */
+export interface ResourceSubcategory {
+  id: number
+  kind: 'app' | 'web' | 'file'
+  name: string
+  sort_order: number
+  is_default: boolean
+}
+
+/** 速达独立应用内浏览器窗口槽位快照（chrome 页挂载时拉取） */
+export interface SudaSlotState {
+  slot: number
+  tabs: string[]
+  active: number
+}
+
+/** 速达独立浏览器窗口池概览（主窗侧展示） */
+export interface SudaSlotSummary {
+  slot: number
+  tabs: string[]
+  active: number
+  visible: boolean
+}
+
+/** suda_browser_open 的结果：slot=窗口槽位，index=tab 序号，reused=同地址复用 */
+export interface SudaOpenResult {
+  slot: number
+  index: number
+  reused: boolean
 }
 
 export interface Note {
@@ -217,6 +259,7 @@ export interface AppConfig {
   clock_quote: string // 时钟卡片语录（可配置，空串回退默认）
   notice_duration_ms: number // 右下角通知弹窗驻留时长（毫秒，1000–60000）
   online_enabled: boolean // 联网功能总开关（默认开）
+  webview_mem_low_on_hide: boolean // 隐藏窗口降低内存占用（默认开）：隐藏时 WebView2 内存级别设 Low，显示前恢复 Normal
   weather_city: string // 天气城市展示名（空串 = 未配置）
   weather_lat: number // 天气纬度缓存
   weather_lng: number // 天气经度缓存
@@ -250,6 +293,12 @@ export interface AppConfig {
   clipboard_paused: boolean
   /** 粘贴快捷键方式：auto / ctrl_v / ctrl_shift_v / shift_insert */
   clipboard_paste_method: string
+  /** 速达网页默认打开方式：panel(内嵌面板) / window(独立应用内浏览器窗口) */
+  suda_web_open_mode: string
+  /** 工作台「自定义速达」槽位内容配置（suda1..suda4） */
+  suda_custom_modules: SudaCustomModuleConfig[]
+  /** 速达内嵌面板是否显示工具栏（默认不显示，隐藏时整个面板区域只渲染网页） */
+  suda_panel_toolbar: boolean
   /** 记录剪贴板图片（默认开启） */
   clipboard_image_enabled: boolean
   /** 记录剪贴板文件（默认开启） */
@@ -860,6 +909,49 @@ export const tauriApi = {
   listInstalledBrowsers: () => invoke<InstalledBrowser[]>('list_installed_browsers'),
   openUrlWithBrowser: (id: number, browserExe: string) =>
     invoke<void>('open_url_with_browser', { id, browserExe }),
+  // ---- 速达小类（ADR 0012）----
+  listSubcategories: () => invoke<ResourceSubcategory[]>('list_subcategories'),
+  createSubcategory: (kind: 'app' | 'web' | 'file', name: string) =>
+    invoke<ResourceSubcategory>('create_subcategory', { kind, name }),
+  renameSubcategory: (id: number, name: string) =>
+    invoke<void>('rename_subcategory', { id, name }),
+  deleteSubcategory: (id: number) => invoke<void>('delete_subcategory', { id }),
+  reorderSubcategories: (kind: 'app' | 'web' | 'file', ids: number[]) =>
+    invoke<void>('reorder_subcategories', { kind, ids }),
+  setDefaultSubcategory: (id: number) => invoke<void>('set_default_subcategory', { id }),
+  setSudaWebOpenMode: (mode: 'panel' | 'window') =>
+    invoke<string>('set_suda_web_open_mode', { mode }),
+  // ---- 速达「应用内打开网页」（ADR 0011）----
+  /** 独立浏览器窗口池：按资源 id 打开（后端校验 Web 类型 + http/https 并写最近使用） */
+  sudaBrowserOpen: (id: number) => invoke<SudaOpenResult>('suda_browser_open', { id }),
+  sudaBrowserOpenUrl: (url: string) => invoke<SudaOpenResult>('suda_browser_open_url', { url }),
+  sudaBrowserOpenTab: (slot: number, url: string) =>
+    invoke<void>('suda_browser_open_tab', { slot, url }),
+  sudaBrowserActivateTab: (slot: number, index: number) =>
+    invoke<void>('suda_browser_activate_tab', { slot, index }),
+  sudaBrowserCloseTab: (slot: number, index: number) =>
+    invoke<void>('suda_browser_close_tab', { slot, index }),
+  sudaBrowserClose: (slot: number) => invoke<void>('suda_browser_close', { slot }),
+  sudaBrowserNavigate: (slot: number, url: string) =>
+    invoke<void>('suda_browser_navigate', { slot, url }),
+  sudaBrowserBack: (slot: number) => invoke<void>('suda_browser_back', { slot }),
+  sudaBrowserForward: (slot: number) => invoke<void>('suda_browser_forward', { slot }),
+  sudaBrowserReload: (slot: number) => invoke<void>('suda_browser_reload', { slot }),
+  sudaBrowserOpenSystem: (slot: number) => invoke<void>('suda_browser_open_system', { slot }),
+  sudaBrowserChromeHeight: (slot: number, height: number) =>
+    invoke<void>('suda_browser_chrome_height', { slot, height }),
+  sudaBrowserState: (slot: number) => invoke<SudaSlotState>('suda_browser_state', { slot }),
+  sudaBrowserSlots: () => invoke<SudaSlotSummary[]>('suda_browser_slots'),
+  /** 主窗内嵌面板：按资源 id 打开（后端校验 + 写最近使用），bounds 为逻辑 px */
+  sudaPanelShow: (id: number, x: number, y: number, w: number, h: number) =>
+    invoke<void>('suda_panel_show', { id, x, y, w, h }),
+  sudaPanelBounds: (x: number, y: number, w: number, h: number) =>
+    invoke<void>('suda_panel_bounds', { x, y, w, h }),
+  sudaPanelHide: () => invoke<void>('suda_panel_hide'),
+  sudaPanelNavigate: (url: string) => invoke<void>('suda_panel_navigate', { url }),
+  sudaPanelBack: () => invoke<void>('suda_panel_back'),
+  sudaPanelForward: () => invoke<void>('suda_panel_forward'),
+  sudaPanelReload: () => invoke<void>('suda_panel_reload'),
   createNote: (title: string) => invoke<Note>('create_note', { title }),
   updateNote: (id: number, title: string, content: string) =>
     invoke<Note>('update_note', { id, title, content }),
@@ -1175,13 +1267,22 @@ export const tauriApi = {
   /** 撤销某台设备（换机/设备丢失时用） */
   accountRevokeDevice: (id: number) => invoke<unknown>('account_revoke_device', { id }),
   // ---- 扩展发布（打包上传 / 我的提交 / 撤回） ----
-  devSubmit: (id: string, changelog?: string, minAppVersion?: string, homepage?: string, screenshots?: string[]) =>
+  /** newVersion 非空时，Rust 端会先把它写回扩展 manifest.json（须大于当前版本）再打包上传 */
+  devSubmit: (
+    id: string,
+    changelog?: string,
+    minAppVersion?: string,
+    homepage?: string,
+    screenshots?: string[],
+    newVersion?: string,
+  ) =>
     invoke<SubmitResult>('dev_submit', {
       id,
       changelog: changelog ?? null,
       minAppVersion: minAppVersion ?? null,
       homepage: homepage ?? null,
       screenshots: screenshots && screenshots.length ? screenshots : null,
+      newVersion: newVersion ?? null,
     }),
   /** 读本地图片为 data URL（发布弹窗的截图缩略图预览用；作者选的图不在资产白名单目录里） */
   readImageDataUrl: (path: string) => invoke<string>('read_image_data_url', { path }),

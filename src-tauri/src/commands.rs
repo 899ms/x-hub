@@ -3,13 +3,13 @@ use crate::config;
 use crate::config::AppConfig;
 use crate::models::{
     ChatMessage, ChatModelConfig, ChatSession, ClipboardItem, Countdown, DetachedSticky, Note,
-    RepeatRule, Resource, ResourceKind, SearchResult, Snippet, Sticky, Tag, Todo, TodoOccurrence,
-    TodoTag, TodoTagLink,
+    RepeatRule, Resource, ResourceKind, ResourceSubcategory, SearchResult, Snippet, Sticky, Tag,
+    Todo, TodoOccurrence, TodoTag, TodoTagLink,
 };
 use crate::process;
 use crate::repo::{
-    chat, clipboard, countdown, detached_sticky, note, resource, snippet, sticky, tag, todo,
-    todo_tag,
+    chat, clipboard, countdown, detached_sticky, note, resource, snippet, sticky, subcategory,
+    tag, todo, todo_tag,
 };
 use crate::todo_recurrence;
 use rusqlite::Connection;
@@ -233,6 +233,93 @@ pub fn launch_resource(state: State<'_, DbState>, id: i64) -> Result<(), String>
             }
         },
     }
+}
+
+// ---------- 速达小类（ADR 0012）----------
+
+fn validate_subcategory_input(kind: &str, name: &str) -> Result<(), String> {
+    if !subcategory::VALID_KINDS.contains(&kind) {
+        return Err("无效的大类".into());
+    }
+    if name.is_empty() || name.chars().count() > 20 {
+        return Err("小类名称需为 1–20 个字符".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_subcategories(state: State<'_, DbState>) -> Result<Vec<ResourceSubcategory>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    subcategory::list(&conn).map_err(err_str)
+}
+
+#[tauri::command]
+pub fn create_subcategory(
+    state: State<'_, DbState>,
+    kind: String,
+    name: String,
+) -> Result<ResourceSubcategory, String> {
+    let kind = kind.trim().to_string();
+    let name = name.trim().to_string();
+    validate_subcategory_input(&kind, &name)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let free = subcategory::is_name_free(&conn, &kind, &name, None).map_err(err_str)?;
+    if !free {
+        return Err(format!("DUP:「{name}」已存在于该大类"));
+    }
+    let sub = subcategory::create(&conn, &kind, &name).map_err(err_str)?;
+    log::info!("新建速达小类: {} / {}", kind, name);
+    Ok(sub)
+}
+
+#[tauri::command]
+pub fn rename_subcategory(state: State<'_, DbState>, id: i64, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 20 {
+        return Err("小类名称需为 1–20 个字符".into());
+    }
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    subcategory::rename(&mut conn, id, &name)
+}
+
+/// 删除小类：条目批量改挂默认小类（单事务，见 repo::subcategory::delete）
+#[tauri::command]
+pub fn delete_subcategory(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    subcategory::delete(&mut conn, id)
+}
+
+#[tauri::command]
+pub fn reorder_subcategories(
+    state: State<'_, DbState>,
+    kind: String,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    if !subcategory::VALID_KINDS.contains(&kind.as_str()) {
+        return Err("无效的大类".into());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    subcategory::reorder(&conn, &kind, &ids).map_err(err_str)
+}
+
+#[tauri::command]
+pub fn set_default_subcategory(state: State<'_, DbState>, id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    subcategory::set_default(&conn, id)
+}
+
+/// 速达网页默认打开方式（panel=内嵌面板 / window=独立窗口，ADR 0011 2026-09-25 拍板）
+#[tauri::command]
+pub fn set_suda_web_open_mode(mode: String) -> Result<String, String> {
+    let mode = mode.trim().to_string();
+    if !["panel", "window"].contains(&mode.as_str()) {
+        return Err("无效的打开方式".into());
+    }
+    let _guard = crate::config::lock();
+    let mut config = crate::config::load();
+    config.suda_web_open_mode = mode.clone();
+    crate::config::save(&config)?;
+    Ok(config.suda_web_open_mode)
 }
 
 // ---------- 笔记 ----------
@@ -1243,8 +1330,12 @@ pub fn save_config(config: AppConfig) -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
-pub fn set_window_always_on_top(window: tauri::WebviewWindow, value: bool) -> Result<(), String> {
-    window
+// ⚠️ 参数必须是 Webview 而非 WebviewWindow：主窗自速达浏览器起是多 webview 窗口，
+// WebviewWindow 的命令注入走 is_webview_window 校验、对多 webview 窗口解析直接报错
+// （实测踩过：最小化/最大化/置顶全部静默失效）。webview.window() 对任何窗口都成立。
+pub fn set_window_always_on_top(webview: tauri::Webview, value: bool) -> Result<(), String> {
+    webview
+        .window()
         .set_always_on_top(value)
         .map_err(|e| e.to_string())?;
     log::info!("窗口置顶: {}", if value { "开" } else { "关" });
@@ -1374,14 +1465,18 @@ pub fn log_client_error(message: String, detail: Option<String>) -> Result<(), S
 // ---------- 窗口控制 ----------
 
 #[tauri::command]
-pub fn minimize_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.minimize().map_err(|e| e.to_string())?;
+pub fn minimize_window(webview: tauri::Webview) -> Result<(), String> {
+    webview
+        .window()
+        .minimize()
+        .map_err(|e| e.to_string())?;
     log::info!("窗口最小化");
     Ok(())
 }
 
 #[tauri::command]
-pub fn toggle_maximize(window: tauri::WebviewWindow) -> Result<(), String> {
+pub fn toggle_maximize(webview: tauri::Webview) -> Result<(), String> {
+    let window = webview.window();
     if window.is_maximized().unwrap_or(false) {
         window.unmaximize().map_err(|e| e.to_string())?;
         log::info!("窗口还原");
@@ -1394,8 +1489,11 @@ pub fn toggle_maximize(window: tauri::WebviewWindow) -> Result<(), String> {
 
 #[tauri::command]
 pub fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
-    crate::tray::hide_window(&app);
-    log::info!("窗口隐藏至托盘");
+    // hide_window 找不到主窗时会自己落 WARN；这里只在真隐藏成功时打 INFO，
+    // 避免「日志说已隐藏、窗口其实还在」的假成功（实测踩过：主窗查不到时仍报成功）
+    if crate::tray::hide_window(&app) {
+        log::info!("窗口隐藏至托盘");
+    }
     Ok(())
 }
 
